@@ -1,7 +1,5 @@
 from pydantic_settings import BaseSettings
 from functools import lru_cache
-from pydantic_settings import BaseSettings
-from functools import lru_cache
 from pathlib import Path
 
 class Settings(BaseSettings):
@@ -15,6 +13,7 @@ class Settings(BaseSettings):
 
     # Firebase
     firebase_project_id: str
+    firebase_credentials_path: str = "firebase-service-account.prod.json"
 
     # Stripe
     stripe_secret_key: str
