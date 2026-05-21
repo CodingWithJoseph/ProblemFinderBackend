@@ -5,7 +5,7 @@ from app.db import get_db
 from app.models import PipelineCard, StageEnum
 from app.auth import get_uid
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timezone
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
@@ -76,9 +76,9 @@ async def update_pipeline_card(
     if body.exitChecklist is not None:
         card.exit_checklist = body.exitChecklist
     if body.action == "launch":
-        card.launched_at = datetime.utcnow()
+        card.launched_at = datetime.now(timezone.utc)
     if body.action == "remove":
-        card.removed_at = datetime.utcnow()
+        card.removed_at = datetime.now(timezone.utc)
 
     return _serialize(card)
 
@@ -90,7 +90,7 @@ async def delete_pipeline_card(
     uid: str = Depends(get_uid),
 ):
     card = await _get_card(card_id, uid, db)
-    card.removed_at = datetime.utcnow()
+    card.removed_at = datetime.now(timezone.utc)
 
 
 async def _get_card(card_id: int, uid: str, db: AsyncSession) -> PipelineCard:

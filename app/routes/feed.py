@@ -19,7 +19,7 @@ async def get_opportunities(
 ):
     offset = (page - 1) * pageSize
 
-    query = select(Opportunity)
+    query = select(Opportunity).where(Opportunity.deleted_at == None)
 
     if category:
         query = query.where(Opportunity.category == category)

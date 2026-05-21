@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
 from app.models import Opportunity, SearchUsage
 from app.auth import get_uid
-from datetime import datetime
+from datetime import datetime, timezone
 
 router = APIRouter(prefix="/opportunities", tags=["search"])
 
@@ -22,6 +22,7 @@ async def search_opportunities(
     query = (
         select(Opportunity)
         .where(
+            Opportunity.deleted_at == None,
             Opportunity.search_vector.op("@@")(
                 func.plainto_tsquery("english", q)
             )
@@ -46,7 +47,7 @@ async def search_opportunities(
         uid=uid,
         query=q,
         result_count=total or 0,
-        searched_at=datetime.utcnow(),
+        searched_at=datetime.now(timezone.utc),
     ))
 
     return {

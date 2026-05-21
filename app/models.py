@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import (
-    String, Text, Integer, Float, Boolean,
+    String, Text, Integer, Boolean,
     DateTime, ForeignKey, Enum as SAEnum
 )
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
@@ -50,7 +50,8 @@ class Opportunity(Base):
     wtp_signal: Mapped[bool] = mapped_column(Boolean, default=False)
     workaround: Mapped[str | None] = mapped_column(Text, nullable=True)
     intensity: Mapped[IntensityEnum] = mapped_column(SAEnum(IntensityEnum), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now(timezone.utc))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     search_vector: Mapped[str | None] = mapped_column(TSVECTOR, nullable=True)
 
     pipeline_cards: Mapped[list["PipelineCard"]] = relationship(back_populates="opportunity")
@@ -98,7 +99,7 @@ class SearchUsage(Base):
     uid: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     query: Mapped[str] = mapped_column(String(500), nullable=False)
     result_count: Mapped[int] = mapped_column(Integer, default=0)
-    searched_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    searched_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now(timezone.utc))
 
 
 class Subscription(Base):
