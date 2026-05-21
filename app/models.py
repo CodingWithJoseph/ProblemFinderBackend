@@ -52,6 +52,8 @@ class Opportunity(Base):
     intensity: Mapped[IntensityEnum] = mapped_column(SAEnum(IntensityEnum), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now(timezone.utc))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    pipeline_count: Mapped[int] = mapped_column(Integer, default=0)
+    launch_count: Mapped[int] = mapped_column(Integer, default=0)
     search_vector: Mapped[str | None] = mapped_column(TSVECTOR, nullable=True)
 
     pipeline_cards: Mapped[list["PipelineCard"]] = relationship(back_populates="opportunity")

@@ -2,24 +2,34 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
-from app.models import Opportunity
 from app.auth import get_uid
+from app.models import Opportunity, Subscription, PlanEnum
 
 router = APIRouter(prefix="/opportunities", tags=["feed"])
 
 
 @router.get("")
 async def get_opportunities(
-    page: int = Query(1, ge=1),
-    pageSize: int = Query(default=20, ge=1, le=100),
-    category: str | None = Query(None),
-    sort: str | None = Query(None),
-    db: AsyncSession = Depends(get_db),
-    uid: str = Depends(get_uid),
+        page: int = Query(1, ge=1),
+        pageSize: int = Query(default=20, ge=1, le=100),
+        category: str | None = Query(None),
+        sort: str | None = Query(None),
+        db: AsyncSession = Depends(get_db),
+        uid: str = Depends(get_uid),
 ):
-    offset = (page - 1) * pageSize
-
     query = select(Opportunity).where(Opportunity.deleted_at == None)
+
+    sub_result = await db.execute(
+        select(Subscription).where(Subscription.uid == uid)
+    )
+    sub = sub_result.scalar_one_or_none()
+    plan = sub.plan if sub else PlanEnum.free
+
+    if plan == PlanEnum.free:
+        page = min(page, 1)
+        pageSize = min(pageSize, 50)
+
+    offset = (page - 1) * pageSize
 
     if category:
         query = query.where(Opportunity.category == category)
@@ -54,6 +64,8 @@ async def get_opportunities(
                 "workaround": o.workaround,
                 "intensity": o.intensity,
                 "createdAt": o.created_at,
+                "pipelineCount": o.pipeline_count,
+                "launchCount": o.launch_count,
             }
             for o in opportunities
         ],

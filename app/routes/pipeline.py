@@ -1,11 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
-from app.models import PipelineCard, StageEnum
 from app.auth import get_uid
 from pydantic import BaseModel
 from datetime import datetime, timezone
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.models import PipelineCard, Opportunity, StageEnum
+from fastapi import APIRouter, Depends, HTTPException, status
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
@@ -51,6 +51,11 @@ async def add_to_pipeline(
         stage=body.stage,
     )
     db.add(card)
+    await db.execute(
+        update(Opportunity)
+        .where(Opportunity.id == body.opportunityId)
+        .values(pipeline_count=Opportunity.pipeline_count + 1)
+    )
     await db.flush()
     await db.refresh(card)
     return _serialize(card)
@@ -77,6 +82,11 @@ async def update_pipeline_card(
         card.exit_checklist = body.exitChecklist
     if body.action == "launch":
         card.launched_at = datetime.now(timezone.utc)
+        await db.execute(
+            update(Opportunity)
+            .where(Opportunity.id == card.opportunity_id)
+            .values(launch_count=Opportunity.launch_count + 1)
+        )
     if body.action == "remove":
         card.removed_at = datetime.now(timezone.utc)
 
