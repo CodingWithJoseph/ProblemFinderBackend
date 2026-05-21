@@ -1,10 +1,9 @@
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, func, text
+from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.db import get_db
-from app.models import Opportunity, SearchUsage
+
 from app.auth import get_uid
-from datetime import datetime, timezone
+from app.db import get_db
+from app.models import Opportunity, SearchUsage, Subscription, PlanEnum
 
 router = APIRouter(prefix="/opportunities", tags=["search"])
 
@@ -17,6 +16,35 @@ async def search_opportunities(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
+    from datetime import datetime, timezone
+    from sqlalchemy import select, func, cast, Date
+
+    if True:
+        sub_result = await db.execute(
+            select(Subscription).where(Subscription.uid == uid)
+        )
+        sub = sub_result.scalar_one_or_none()
+        plan = sub.plan if sub else PlanEnum.free
+
+        if plan == PlanEnum.free:
+            today = datetime.now(timezone.utc).date()
+            count_result = await db.execute(
+                select(func.count()).where(
+                    SearchUsage.uid == uid,
+                    cast(SearchUsage.searched_at, Date) == today,
+                )
+            )
+            search_count = count_result.scalar() or 0
+            if search_count >= 5:
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "error": "Search limit reached",
+                        "code": "SEARCH_LIMIT_REACHED",
+                        "remaining": 0,
+                    }
+                )
+
     offset = (page - 1) * pageSize
 
     query = (
