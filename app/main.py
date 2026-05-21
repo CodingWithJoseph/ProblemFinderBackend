@@ -1,6 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
+from app.routes.feed import router as feed_router
+from app.routes.search import router as search_router
+from app.routes.pipeline import router as pipeline_router
+from app.routes.portfolio import router as portfolio_router
+from app.routes.subscriptions import router as subscriptions_router
 
 settings = get_settings()
 
@@ -19,6 +24,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(feed_router)
+app.include_router(search_router)
+app.include_router(pipeline_router)
+app.include_router(portfolio_router)
+app.include_router(subscriptions_router)
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "environment": settings.environment}
 
 @app.get("/health")
 async def health():
