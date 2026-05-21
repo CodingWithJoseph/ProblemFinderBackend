@@ -1,6 +1,8 @@
 from pydantic_settings import BaseSettings
 from functools import lru_cache
-
+from pydantic_settings import BaseSettings
+from functools import lru_cache
+from pathlib import Path
 
 class Settings(BaseSettings):
     # App
@@ -26,7 +28,7 @@ class Settings(BaseSettings):
         return [o.strip() for o in self.allowed_origins.split(",")]
 
     class Config:
-        env_file = "../.env"
+        env_file = Path(__file__).parent.parent / ".env"
 
 
 @lru_cache
