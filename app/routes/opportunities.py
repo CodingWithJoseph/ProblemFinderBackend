@@ -17,7 +17,8 @@ def _serialize(o: Opportunity) -> dict:
         "description": o.description,
         "source": o.source,
         "sourceUrl": o.source_url,
-        "category": o.category,
+        "domain": o.domain,
+        "type": o.type,
         "score": o.score,
         "upvotes": o.upvotes,
         "trending": o.trending,
@@ -42,7 +43,7 @@ async def _get_plan(uid: str, db: AsyncSession) -> PlanEnum:
 async def get_opportunities(
     page: int = Query(1, ge=1),
     pageSize: int = Query(default=20, ge=1, le=100),
-    category: str | None = Query(None),
+    type: str | None = Query(None),
     sort: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
@@ -56,8 +57,8 @@ async def get_opportunities(
     offset = (page - 1) * pageSize
     query = select(Opportunity).where(Opportunity.deleted_at == None)
 
-    if category:
-        query = query.where(Opportunity.category == category)
+    if type:
+        query = query.where(Opportunity.type == type)
 
     if sort == "trending":
         query = query.where(Opportunity.trending == True)
@@ -79,6 +80,27 @@ async def get_opportunities(
         "pageSize": pageSize,
         "total": total,
     }
+
+@router.get("/batch")
+async def get_opportunities_by_ids(
+    ids: str = Query(..., description="Comma-separated opportunity IDs"),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    id_list = [int(i) for i in ids.split(",") if i.strip().isdigit()]
+
+    if not id_list:
+        return {"data": []}
+
+    result = await db.execute(
+        select(Opportunity).where(
+            Opportunity.id.in_(id_list),
+            Opportunity.deleted_at == None,
+        )
+    )
+    opportunities = result.scalars().all()
+
+    return {"data": [_serialize(o) for o in opportunities]}
 
 
 @router.get("/search")

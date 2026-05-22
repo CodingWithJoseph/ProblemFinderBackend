@@ -43,7 +43,8 @@ class Opportunity(Base):
     description: Mapped[str] = mapped_column(Text, nullable=False)
     source: Mapped[str] = mapped_column(String(50), nullable=False)
     source_url: Mapped[str] = mapped_column(String(500), nullable=False)
-    category: Mapped[str] = mapped_column(String(100), nullable=False)
+    domain: Mapped[str] = mapped_column(String(100), nullable=False)
+    type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     score: Mapped[int] = mapped_column(Integer, default=0)
     upvotes: Mapped[int] = mapped_column(Integer, default=0)
     trending: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -55,43 +56,6 @@ class Opportunity(Base):
     pipeline_count: Mapped[int] = mapped_column(Integer, default=0)
     launch_count: Mapped[int] = mapped_column(Integer, default=0)
     search_vector: Mapped[str | None] = mapped_column(TSVECTOR, nullable=True)
-
-    pipeline_cards: Mapped[list["PipelineCard"]] = relationship(back_populates="opportunity")
-    portfolio_products: Mapped[list["PortfolioProduct"]] = relationship(back_populates="opportunity")
-
-
-class PipelineCard(Base):
-    __tablename__ = "pipeline_cards"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    uid: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
-    opportunity_id: Mapped[int] = mapped_column(ForeignKey("opportunities.id"), nullable=False)
-    stage: Mapped[StageEnum] = mapped_column(SAEnum(StageEnum), default=StageEnum.watching)
-    kill_criteria: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    distribution_channels: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    concept_angles: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    exit_checklist: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    launched_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    removed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-
-    opportunity: Mapped["Opportunity"] = relationship(back_populates="pipeline_cards")
-
-
-class PortfolioProduct(Base):
-    __tablename__ = "portfolio_products"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    uid: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
-    opportunity_id: Mapped[int | None] = mapped_column(ForeignKey("opportunities.id"), nullable=True)
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
-    description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    url: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    category: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    revenue_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    status: Mapped[ProductStatusEnum] = mapped_column(SAEnum(ProductStatusEnum), default=ProductStatusEnum.active)
-    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-    opportunity: Mapped["Opportunity | None"] = relationship(back_populates="portfolio_products")
 
 
 class SearchUsage(Base):
