@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from app.db import get_db
 from app.models import Subscription, PlanEnum
 from stripe import Subscription as StripeSubscription
-from app.auth import get_uid
+from app.auth import get_uid, get_firestore
 from app.config import get_settings
 from datetime import datetime, timezone
 import stripe
@@ -48,6 +48,14 @@ def _serialize(s: Subscription) -> dict:
         "currentPeriodEnd": s.current_period_end,
         "cancelAtPeriodEnd": s.cancel_at_period_end,
     }
+
+
+def _write_plan_to_firestore(uid: str, plan: str):
+    try:
+        fs = get_firestore()
+        fs.collection('users').document(uid).update({'plan': plan})
+    except Exception as e:
+        print(f"Firestore write failed for uid {uid}: {e}")
 
 
 # ─── Get Subscription ───────────────────────────────────────────────────────
@@ -206,8 +214,8 @@ async def _handle_checkout_completed(session, db: AsyncSession):
         return
 
     stripe_sub = stripe.Subscription.retrieve(session.subscription)
-    await _sync_subscription(stripe_sub, db, uid=uid,
-                             customer_id=session.customer)
+    await _sync_subscription(stripe_sub, db, uid=uid, customer_id=session.customer)
+
 
 async def _sync_subscription(
     stripe_sub: StripeSubscription,
@@ -228,7 +236,6 @@ async def _sync_subscription(
         sub = Subscription(uid=uid)
         db.add(sub)
 
-    # Handle both object and dict access
     if hasattr(stripe_sub, 'items'):
         price_id = stripe_sub.items.data[0].price.id
         cancel_at_period_end = stripe_sub.cancel_at_period_end
@@ -242,17 +249,24 @@ async def _sync_subscription(
         customer = stripe_sub["customer"]
         subscription_id = stripe_sub["id"]
 
+    plan = _get_plan_from_price_id(price_id)
+
     sub.stripe_subscription_id = subscription_id
     sub.stripe_customer_id = customer_id or customer
     sub.stripe_price_id = price_id
-    sub.plan = _get_plan_from_price_id(price_id)
+    sub.plan = plan
     sub.cancel_at_period_end = cancel_at_period_end
     sub.current_period_end = datetime.fromtimestamp(
         current_period_end, tz=timezone.utc
     )
 
-async def _handle_cancellation(stripe_sub: dict, db: AsyncSession):
-    uid = stripe_sub.get("metadata", {}).get("uid")
+    # Write plan to Firestore
+    plan_value = plan.value if hasattr(plan, 'value') else str(plan)
+    _write_plan_to_firestore(uid, plan_value)
+
+
+async def _handle_cancellation(stripe_sub, db: AsyncSession):
+    uid = stripe_sub.metadata["uid"] if hasattr(stripe_sub, 'metadata') and stripe_sub.metadata else stripe_sub.get("metadata", {}).get("uid")
     if not uid:
         return
 
@@ -266,3 +280,6 @@ async def _handle_cancellation(stripe_sub: dict, db: AsyncSession):
         sub.stripe_price_id = None
         sub.cancel_at_period_end = False
         sub.current_period_end = None
+
+        # Write free plan to Firestore
+        _write_plan_to_firestore(uid, 'free')

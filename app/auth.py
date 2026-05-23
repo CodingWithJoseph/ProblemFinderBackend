@@ -4,26 +4,38 @@ from pathlib import Path
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from firebase_admin import auth, credentials, initialize_app, get_app
+from firebase_admin import auth, credentials, initialize_app, get_app, firestore
+
 from app.config import get_settings
 
 settings = get_settings()
 bearer_scheme = HTTPBearer(auto_error=False)
+
 
 def init_firebase():
     try:
         get_app()
     except ValueError:
         firebase_credentials_json = os.environ.get('FIREBASE_CREDENTIALS_JSON')
+        print(f"CREDENTIALS LENGTH: {len(firebase_credentials_json) if firebase_credentials_json else 'NONE'}")
+        print(f"FIRST 50 CHARS: {firebase_credentials_json[:50] if firebase_credentials_json else 'NONE'}")
+
         if firebase_credentials_json:
             cred = credentials.Certificate(json.loads(firebase_credentials_json))
         else:
-            cred = credentials.Certificate(Path(__file__).parent.parent / settings.firebase_credentials_path)
+            cred = credentials.Certificate(
+                Path(__file__).parent.parent / settings.firebase_credentials_path
+            )
 
         initialize_app(cred, {"projectId": settings.firebase_project_id})
 
 
 init_firebase()
+
+
+def get_firestore():
+    return firestore.client()
+
 
 async def get_uid(
     token: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
