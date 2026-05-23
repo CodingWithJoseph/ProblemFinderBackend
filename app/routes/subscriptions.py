@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 from app.db import get_db
 from app.models import Subscription, PlanEnum
+from stripe import Subscription as StripeSubscription
 from app.auth import get_uid
 from app.config import get_settings
 from datetime import datetime, timezone
@@ -208,7 +209,7 @@ async def _handle_checkout_completed(session: dict, db: AsyncSession):
     await _sync_subscription(stripe_sub, db, uid=uid, customer_id=session["customer"])
 
 async def _sync_subscription(
-    stripe_sub: Subscription,
+    stripe_sub: StripeSubscription,
     db: AsyncSession,
     uid: str = None,
     customer_id: str = None,
