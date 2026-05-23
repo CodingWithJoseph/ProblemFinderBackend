@@ -4,7 +4,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 from app.db import get_db
 from app.models import Subscription, PlanEnum
-from stripe import Subscription as StripeSubscription
 from app.auth import get_uid, get_firestore
 from app.config import get_settings
 from datetime import datetime, timezone
@@ -56,6 +55,16 @@ def _write_plan_to_firestore(uid: str, plan: str):
         fs.collection('users').document(uid).update({'plan': plan})
     except Exception as e:
         print(f"Firestore write failed for uid {uid}: {e}")
+
+
+def _get_stripe_attr(obj, key: str, default=None):
+    """Safely get attribute from either StripeObject or dict."""
+    try:
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+    except Exception:
+        return default
 
 
 # ─── Get Subscription ───────────────────────────────────────────────────────
@@ -168,7 +177,7 @@ async def upgrade_subscription(
     stripe.Subscription.modify(
         sub.stripe_subscription_id,
         items=[{
-            "id": subscription["items"]["data"][0]["id"],
+            "id": subscription.items.data[0].id,
             "price": price_id,
         }],
         proration_behavior="always_invoice",
@@ -214,16 +223,44 @@ async def _handle_checkout_completed(session, db: AsyncSession):
         return
 
     stripe_sub = stripe.Subscription.retrieve(session.subscription)
-    await _sync_subscription(stripe_sub, db, uid=uid, customer_id=session.customer)
+    await _sync_subscription(stripe_sub, db, uid=uid,
+                             customer_id=session.customer)
+
+
+async def _get_uid_from_stripe_sub(stripe_sub, db: AsyncSession) -> str | None:
+    """Get uid from subscription - first try metadata, then look up by customer ID."""
+    # Try metadata first
+    try:
+        metadata = stripe_sub.metadata if not isinstance(stripe_sub, dict) else stripe_sub.get("metadata", {})
+        if metadata and "uid" in metadata:
+            return metadata["uid"]
+    except Exception:
+        pass
+
+    # Fall back to customer ID lookup in Supabase
+    try:
+        customer = stripe_sub.customer if not isinstance(stripe_sub, dict) else stripe_sub.get("customer")
+        if customer:
+            result = await db.execute(
+                select(Subscription).where(Subscription.stripe_customer_id == customer)
+            )
+            existing = result.scalar_one_or_none()
+            if existing:
+                return existing.uid
+    except Exception:
+        pass
+
+    return None
 
 
 async def _sync_subscription(
-    stripe_sub: StripeSubscription,
+    stripe_sub,
     db: AsyncSession,
     uid: str = None,
     customer_id: str = None,
 ):
-    uid = uid or (stripe_sub.metadata.get("uid") if hasattr(stripe_sub, 'metadata') else stripe_sub.get("metadata", {}).get("uid"))
+    if not uid:
+        uid = await _get_uid_from_stripe_sub(stripe_sub, db)
     if not uid:
         return
 
@@ -236,7 +273,9 @@ async def _sync_subscription(
         sub = Subscription(uid=uid)
         db.add(sub)
 
-    if hasattr(stripe_sub, 'items'):
+    is_object = not isinstance(stripe_sub, dict)
+
+    if is_object:
         price_id = stripe_sub.items.data[0].price.id
         cancel_at_period_end = stripe_sub.cancel_at_period_end
         current_period_end = stripe_sub.items.data[0].current_period_end
@@ -260,13 +299,12 @@ async def _sync_subscription(
         current_period_end, tz=timezone.utc
     )
 
-    # Write plan to Firestore
     plan_value = plan.value if hasattr(plan, 'value') else str(plan)
     _write_plan_to_firestore(uid, plan_value)
 
 
 async def _handle_cancellation(stripe_sub, db: AsyncSession):
-    uid = stripe_sub.metadata["uid"] if hasattr(stripe_sub, 'metadata') and stripe_sub.metadata else stripe_sub.get("metadata", {}).get("uid")
+    uid = await _get_uid_from_stripe_sub(stripe_sub, db)
     if not uid:
         return
 
@@ -281,5 +319,4 @@ async def _handle_cancellation(stripe_sub, db: AsyncSession):
         sub.cancel_at_period_end = False
         sub.current_period_end = None
 
-        # Write free plan to Firestore
         _write_plan_to_firestore(uid, 'free')
