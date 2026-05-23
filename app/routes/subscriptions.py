@@ -97,7 +97,7 @@ async def get_subscription(
     return _serialize(sub)
 
 
-# ─── Checkout ───────────────────────────────────────────────────────────────
+# ─── Checkout ────────────────────────────
 
 class CheckoutRequest(BaseModel):
     price_key: str
