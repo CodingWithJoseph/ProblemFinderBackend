@@ -200,13 +200,13 @@ async def stripe_webhook(
     return {"received": True}
 
 
-async def _handle_checkout_completed(session: dict, db: AsyncSession):
-    uid = session.get("metadata", {}).get("uid")
+async def _handle_checkout_completed(session, db: AsyncSession):
+    uid = session.metadata.get("uid") if session.metadata else None
     if not uid:
         return
 
-    stripe_sub = stripe.Subscription.retrieve(session["subscription"])
-    await _sync_subscription(stripe_sub, db, uid=uid, customer_id=session["customer"])
+    stripe_sub = stripe.Subscription.retrieve(session.subscription)
+    await _sync_subscription(stripe_sub, db, uid=uid, customer_id=session.customer)
 
 async def _sync_subscription(
     stripe_sub: StripeSubscription,
