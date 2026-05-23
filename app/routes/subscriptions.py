@@ -54,7 +54,7 @@ def _write_plan_to_firestore(uid: str, plan: str):
         fs = get_firestore()
         fs.collection('users').document(uid).update({'plan': plan})
     except Exception as e:
-        print(f"Firestore write failed for uid {uid}: {e}")
+        print(f"Firestore write failed: {e}")
 
 
 def _get_stripe_attr(obj, key: str, default=None):
@@ -239,27 +239,20 @@ async def _handle_checkout_completed(session, db: AsyncSession):
 
 
 async def _get_uid_from_stripe_sub(stripe_sub, db: AsyncSession) -> str | None:
-    print(f"GET_UID: stripe_sub type={type(stripe_sub)}")
-    print(f"GET_UID: is_dict={isinstance(stripe_sub, dict)}")
-
     try:
         metadata = stripe_sub.metadata if not isinstance(stripe_sub, dict) else stripe_sub.get("metadata", {})
-        print(f"GET_UID: metadata={metadata}")
         if metadata and "uid" in metadata:
-            print(f"GET_UID: found uid in metadata={metadata['uid']}")
             return metadata["uid"]
     except Exception as e:
         print(f"GET_UID: metadata error={e}")
 
     try:
         customer = stripe_sub.customer if not isinstance(stripe_sub, dict) else stripe_sub.get("customer")
-        print(f"GET_UID: looking up by customer={customer}")
         if customer:
             result = await db.execute(
                 select(Subscription).where(Subscription.stripe_customer_id == customer)
             )
             existing = result.scalar_one_or_none()
-            print(f"GET_UID: found by customer={existing}")
             if existing:
                 return existing.uid
     except Exception as e:
@@ -275,30 +268,23 @@ async def _sync_subscription(
         uid: str = None,
         customer_id: str = None,
 ):
-    print(f"SYNC: starting uid={uid}")
 
     if not uid:
         uid = await _get_uid_from_stripe_sub(stripe_sub, db)
 
-    print(f"SYNC: resolved uid={uid}")
-
     if not uid:
-        print("SYNC: no uid, returning early")
         return
 
     result = await db.execute(
         select(Subscription).where(Subscription.uid == uid)
     )
     sub = result.scalar_one_or_none()
-    print(f"SYNC: found sub={sub is not None}")
 
     if not sub:
         sub = Subscription(uid=uid)
         db.add(sub)
-        print("SYNC: created new sub")
 
     is_object = not isinstance(stripe_sub, dict)
-    print(f"SYNC: is_object={is_object}")
 
     if is_object:
         price_id = stripe_sub.items.data[0].price.id
@@ -313,10 +299,7 @@ async def _sync_subscription(
         customer = stripe_sub["customer"]
         subscription_id = stripe_sub["id"]
 
-    print(f"SYNC: price_id={price_id} cancel_at_period_end={cancel_at_period_end}")
-
     plan = _get_plan_from_price_id(price_id)
-    print(f"SYNC: plan={plan}")
 
     sub.stripe_subscription_id = subscription_id
     sub.stripe_customer_id = customer_id or customer
@@ -328,11 +311,9 @@ async def _sync_subscription(
     )
 
     await db.flush()
-    print(f"SYNC: flushed to db")
 
     plan_value = plan.value if hasattr(plan, 'value') else str(plan)
     _write_plan_to_firestore(uid, plan_value)
-    print(f"SYNC: wrote to firestore plan={plan_value}")
 
 
 async def _handle_cancellation(stripe_sub, db: AsyncSession):
