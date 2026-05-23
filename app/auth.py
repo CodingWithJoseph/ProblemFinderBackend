@@ -8,17 +8,13 @@ from firebase_admin import auth, credentials, initialize_app, get_app
 from app.config import get_settings
 
 settings = get_settings()
-bearer_scheme = HTTPBearer()
+bearer_scheme = HTTPBearer(auto_error=False)
 
 def init_firebase():
     try:
         get_app()
-        print(f"Get App Succeeded")
     except ValueError:
         firebase_credentials_json = os.environ.get('FIREBASE_CREDENTIALS_JSON')
-        print(f"CREDENTIALS LENGTH: {len(firebase_credentials_json) if firebase_credentials_json else 'NONE'}")
-        print(f"FIRST 50 CHARS: {firebase_credentials_json[:50] if firebase_credentials_json else 'NONE'}")
-
         if firebase_credentials_json:
             cred = credentials.Certificate(json.loads(firebase_credentials_json))
         else:
@@ -30,8 +26,13 @@ def init_firebase():
 init_firebase()
 
 async def get_uid(
-        token: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    token: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> str:
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+        )
     try:
         decoded = auth.verify_id_token(token.credentials)
         return decoded["uid"]
