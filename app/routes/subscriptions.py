@@ -105,14 +105,21 @@ class CheckoutRequest(BaseModel):
 
 @router.post("/checkout")
 async def create_checkout(
-    body: CheckoutRequest,
-    uid: str = Depends(get_uid),
+        body: CheckoutRequest,
+        uid: str = Depends(get_uid),
+        db: AsyncSession = Depends(get_db),  # ← add db
 ):
     price_id = _get_price_id(body.price_key)
     if not price_id:
         raise HTTPException(status_code=400, detail="Invalid price key")
 
-    session = stripe.checkout.Session.create(
+    result = await db.execute(
+        select(Subscription).where(Subscription.uid == uid)
+    )
+    sub = result.scalar_one_or_none()
+    existing_customer_id = sub.stripe_customer_id if sub else None
+
+    session_params = dict(
         mode="subscription",
         payment_method_types=["card"],
         line_items=[{"price": price_id, "quantity": 1}],
@@ -122,6 +129,10 @@ async def create_checkout(
         metadata={"uid": uid, "price_key": body.price_key},
     )
 
+    if existing_customer_id:
+        session_params["customer"] = existing_customer_id  # ← reuse, Stripe won't create a new one
+
+    session = stripe.checkout.Session.create(**session_params)
     return {"url": session.url}
 
 
