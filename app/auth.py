@@ -15,6 +15,8 @@ def init_firebase():
         get_app()
     except ValueError:
         firebase_credentials_json = os.environ.get('FIREBASE_CREDENTIALS_JSON')
+        print(f"CREDENTIALS LENGTH: {len(firebase_credentials_json) if firebase_credentials_json else 'NONE'}")
+        print(f"FIRST 50 CHARS: {firebase_credentials_json[:50] if firebase_credentials_json else 'NONE'}")
 
         if firebase_credentials_json:
             cred = credentials.Certificate(json.loads(firebase_credentials_json))

@@ -6,7 +6,7 @@ from app.db import get_db
 from app.models import Subscription, PlanEnum
 from app.auth import get_uid
 from app.config import get_settings
-from datetime import datetime
+from datetime import datetime, timezone
 import stripe
 
 settings = get_settings()
@@ -21,8 +21,8 @@ def _get_plan_from_price_id(price_id: str) -> PlanEnum:
     price_map = {
         settings.stripe_pro_monthly_price_id: PlanEnum.pro,
         settings.stripe_pro_yearly_price_id: PlanEnum.pro,
-        # settings.stripe_elite_monthly_price_id: PlanEnum.elite,
-        # settings.stripe_elite_yearly_price_id: PlanEnum.elite,
+        settings.stripe_elite_monthly_price_id: PlanEnum.elite,
+        settings.stripe_elite_yearly_price_id: PlanEnum.elite,
     }
     return price_map.get(price_id, PlanEnum.free)
 
@@ -31,8 +31,8 @@ def _get_price_id(price_key: str) -> str | None:
     price_map = {
         "pro_monthly": settings.stripe_pro_monthly_price_id,
         "pro_yearly": settings.stripe_pro_yearly_price_id,
-        # "elite_monthly": settings.stripe_elite_monthly_price_id,
-        # "elite_yearly": settings.stripe_elite_yearly_price_id,
+        "elite_monthly": settings.stripe_elite_monthly_price_id,
+        "elite_yearly": settings.stripe_elite_yearly_price_id,
     }
     return price_map.get(price_key)
 
@@ -205,17 +205,15 @@ async def _handle_checkout_completed(session: dict, db: AsyncSession):
         return
 
     stripe_sub = stripe.Subscription.retrieve(session["subscription"])
-    await _sync_subscription(stripe_sub, db, uid=uid,
-                             customer_id=session["customer"])
-
+    await _sync_subscription(stripe_sub, db, uid=uid, customer_id=session["customer"])
 
 async def _sync_subscription(
-    stripe_sub: dict,
+    stripe_sub: Subscription,
     db: AsyncSession,
     uid: str = None,
     customer_id: str = None,
 ):
-    uid = uid or stripe_sub.get("metadata", {}).get("uid")
+    uid = uid or (stripe_sub.metadata.get("uid") if hasattr(stripe_sub, 'metadata') else stripe_sub.get("metadata", {}).get("uid"))
     if not uid:
         return
 
@@ -228,17 +226,28 @@ async def _sync_subscription(
         sub = Subscription(uid=uid)
         db.add(sub)
 
-    price_id = stripe_sub["items"]["data"][0]["price"]["id"]
+    # Handle both object and dict access
+    if hasattr(stripe_sub, 'items'):
+        price_id = stripe_sub.items.data[0].price.id
+        cancel_at_period_end = stripe_sub.cancel_at_period_end
+        current_period_end = stripe_sub.items.data[0].current_period_end
+        customer = stripe_sub.customer
+        subscription_id = stripe_sub.id
+    else:
+        price_id = stripe_sub["items"]["data"][0]["price"]["id"]
+        cancel_at_period_end = stripe_sub["cancel_at_period_end"]
+        current_period_end = stripe_sub["current_period_end"]
+        customer = stripe_sub["customer"]
+        subscription_id = stripe_sub["id"]
 
-    sub.stripe_subscription_id = stripe_sub["id"]
-    sub.stripe_customer_id = customer_id or stripe_sub["customer"]
+    sub.stripe_subscription_id = subscription_id
+    sub.stripe_customer_id = customer_id or customer
     sub.stripe_price_id = price_id
     sub.plan = _get_plan_from_price_id(price_id)
-    sub.cancel_at_period_end = stripe_sub["cancel_at_period_end"]
-    sub.current_period_end = datetime.utcfromtimestamp(
-        stripe_sub["current_period_end"]
+    sub.cancel_at_period_end = cancel_at_period_end
+    sub.current_period_end = datetime.fromtimestamp(
+        current_period_end, tz=timezone.utc
     )
-
 
 async def _handle_cancellation(stripe_sub: dict, db: AsyncSession):
     uid = stripe_sub.get("metadata", {}).get("uid")
