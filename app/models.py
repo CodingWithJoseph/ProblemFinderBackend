@@ -1,10 +1,10 @@
 from datetime import datetime, timezone
 from sqlalchemy import (
-    String, Text, Integer, Boolean,
-    DateTime, ForeignKey, Enum as SAEnum
+    String, Text, Integer, Boolean, TIMESTAMP,
+    DateTime, Enum as SAEnum
 )
-from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.dialects.postgresql import TSVECTOR
+from sqlalchemy.orm import Mapped, mapped_column
 from app.db import Base
 import enum
 
@@ -76,5 +76,5 @@ class Subscription(Base):
     stripe_customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     stripe_subscription_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     stripe_price_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    current_period_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    current_period_end: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, default=False)
