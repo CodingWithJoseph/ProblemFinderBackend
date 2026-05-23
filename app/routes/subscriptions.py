@@ -340,4 +340,5 @@ async def _handle_cancellation(stripe_sub, db: AsyncSession):
         sub.cancel_at_period_end = False
         sub.current_period_end = None
 
+        await db.flush()
         _write_plan_to_firestore(uid, 'free')
