@@ -13,11 +13,16 @@ class Settings(BaseSettings):
 
     # Firebase
     firebase_project_id: str
-    firebase_credentials_path: str = "firebase-service-account.prod.json"
+    firebase_credentials_path: str = "firebase-service-account-prod.json"
 
     # Stripe
     stripe_secret_key: str
     stripe_webhook_secret: str
+    stripe_pro_monthly_price_id: str
+    stripe_pro_yearly_price_id: str
+    stripe_elite_monthly_price_id: str
+    stripe_elite_yearly_price_id: str
+    app_url: str
 
     # CORS
     allowed_origins: str = "http://localhost:3000"
