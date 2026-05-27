@@ -1,12 +1,12 @@
-from app.db import get_db
-from app.auth import get_uid
+from datetime import datetime, timezone
+from fastapi import APIRouter, Depends, Query, HTTPException
+from sqlalchemy import select, func, cast, Date, text
+from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 from openai import AsyncOpenAI
+from app.db import get_db
+from app.auth import get_uid
 from app.config import get_settings
-from datetime import datetime, timezone
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, cast, Date, text
-from fastapi import APIRouter, Depends, Query, HTTPException
 from app.models import Opportunity, SearchUsage, Subscription, PlanEnum, Cluster, ClusterSnapshot
 
 router = APIRouter(prefix="/opportunities", tags=["opportunities"])
