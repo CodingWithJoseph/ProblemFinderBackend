@@ -169,33 +169,33 @@ async def search_opportunities(
     offset = (page - 1) * pageSize
 
     # Hybrid search via Supabase RPC function
-    hybrid_query = text("""
+    # vector_str is embedded directly in the SQL to avoid asyncpg :: parameter conflict
+    hybrid_query = text(f"""
         SELECT * FROM hybrid_search(
             :query_text,
-            :query_embedding::vector,
+            '{vector_str}'::vector,
             :match_count
         )
         LIMIT :limit OFFSET :offset
     """)
 
-    count_query = text("""
+    count_query = text(f"""
         SELECT COUNT(*) FROM hybrid_search(
             :query_text,
-            :query_embedding::vector,
+            '{vector_str}'::vector,
             :match_count
         )
     """)
 
     total = await db.scalar(
         count_query,
-        {"query_text": q, "query_embedding": vector_str, "match_count": 200}
+        {"query_text": q, "match_count": 200}
     )
 
     result = await db.execute(
         hybrid_query,
         {
             "query_text": q,
-            "query_embedding": vector_str,
             "match_count": 200,
             "limit": pageSize,
             "offset": offset,
@@ -203,7 +203,8 @@ async def search_opportunities(
     )
 
     rows = result.mappings().all()
-    opportunities = [Opportunity(**dict(row)) for row in rows]
+    EXCLUDE_COLS = {"embedding", "search_vector"}
+    opportunities = [Opportunity(**{k: v for k, v in dict(row).items() if k not in EXCLUDE_COLS}) for row in rows]
 
     # DS-02 — join cluster context to results
     cluster_ids = list({o.cluster_id for o in opportunities if o.cluster_id is not None})
@@ -239,7 +240,7 @@ async def search_opportunities(
         uid=uid,
         query=q,
         result_count=total or 0,
-        searched_at=datetime.now(timezone.utc),
+        searched_at=datetime.now(timezone.utc).replace(tzinfo=None),
     ))
 
     def _serialize_with_cluster(o: Opportunity) -> dict:
