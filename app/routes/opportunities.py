@@ -1,13 +1,15 @@
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Query, HTTPException
-from sqlalchemy import select, func, cast, Date
+from sqlalchemy import select, func, cast, Date, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
+from openai import AsyncOpenAI
 from app.db import get_db
 from app.auth import get_uid
-from app.models import Opportunity, SearchUsage, Subscription, PlanEnum
+from app.models import Opportunity, SearchUsage, Subscription, PlanEnum, Cluster, ClusterSnapshot
 
 router = APIRouter(prefix="/opportunities", tags=["opportunities"])
+openai_client = AsyncOpenAI()
 
 
 def _serialize(o: Opportunity) -> dict:
@@ -19,12 +21,19 @@ def _serialize(o: Opportunity) -> dict:
         "sourceUrl": o.source_url,
         "domain": o.domain,
         "type": o.type,
-        "score": o.score,
+        "sourceScore": o.source_score,
         "upvotes": o.upvotes,
         "trending": o.trending,
         "wtpSignal": o.wtp_signal,
-        "workaround": o.workaround,
+        "workaroundBoolean": o.workaround_boolean,
         "intensity": o.intensity,
+        "sentiment": o.sentiment,
+        "clusterId": o.cluster_id,
+        "numComments": o.num_comments,
+        "upvoteRatio": o.upvote_ratio,
+        "feed": o.feed,
+        "author": o.author,
+        "scrapedAt": o.scraped_at,
         "createdAt": o.created_at,
         "pipelineCount": o.pipeline_count,
         "launchCount": o.launch_count,
@@ -44,6 +53,11 @@ async def get_opportunities(
     page: int = Query(1, ge=1),
     pageSize: int = Query(default=20, ge=1, le=100),
     type: str | None = Query(None),
+    domain: str | None = Query(None),
+    intensity: str | None = Query(None),
+    sentiment: str | None = Query(None),
+    wtp_signal: bool | None = Query(None),
+    workaround_boolean: bool | None = Query(None),
     sort: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
@@ -59,11 +73,21 @@ async def get_opportunities(
 
     if type:
         query = query.where(Opportunity.type == type)
+    if domain:
+        query = query.where(Opportunity.domain == domain.lower())
+    if intensity:
+        query = query.where(Opportunity.intensity == intensity.lower())
+    if sentiment:
+        query = query.where(Opportunity.sentiment == sentiment.lower())
+    if wtp_signal is not None:
+        query = query.where(Opportunity.wtp_signal == wtp_signal)
+    if workaround_boolean is not None:
+        query = query.where(Opportunity.workaround_boolean == workaround_boolean)
 
     if sort == "trending":
         query = query.where(Opportunity.trending == True)
-    elif sort == "score":
-        query = query.order_by(Opportunity.score.desc())
+    elif sort == "source_score":
+        query = query.order_by(Opportunity.source_score.desc())
     else:
         query = query.order_by(Opportunity.created_at.desc())
 
@@ -81,13 +105,14 @@ async def get_opportunities(
         "total": total,
     }
 
+
 @router.get("/batch")
 async def get_opportunities_by_ids(
     ids: str = Query(..., description="Comma-separated opportunity IDs"),
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
-    id_list = [int(i) for i in ids.split(",") if i.strip().isdigit()]
+    id_list = [i.strip() for i in ids.split(",") if i.strip()]
 
     if not id_list:
         return {"data": []}
@@ -132,30 +157,82 @@ async def search_opportunities(
                 }
             )
 
+    # Embed query using OpenAI text-embedding-3-small
+    response = await openai_client.embeddings.create(
+        model="text-embedding-3-small",
+        input=q,
+    )
+    query_vector = response.data[0].embedding
+    vector_str = f"[{','.join(str(x) for x in query_vector)}]"
+
     offset = (page - 1) * pageSize
 
-    query = (
-        select(Opportunity)
-        .where(
-            Opportunity.deleted_at == None,
-            Opportunity.search_vector.op("@@")(
-                func.plainto_tsquery("english", q)
-            )
+    # Hybrid search via Supabase RPC function
+    hybrid_query = text("""
+        SELECT * FROM hybrid_search(
+            :query_text,
+            :query_embedding::vector,
+            :match_count
         )
-        .order_by(
-            func.ts_rank(
-                Opportunity.search_vector,
-                func.plainto_tsquery("english", q)
-            ).desc()
+        LIMIT :limit OFFSET :offset
+    """)
+
+    count_query = text("""
+        SELECT COUNT(*) FROM hybrid_search(
+            :query_text,
+            :query_embedding::vector,
+            :match_count
         )
+    """)
+
+    total = await db.scalar(
+        count_query,
+        {"query_text": q, "query_embedding": vector_str, "match_count": 200}
     )
 
-    count_query = select(func.count()).select_from(query.subquery())
-    total = await db.scalar(count_query)
+    result = await db.execute(
+        hybrid_query,
+        {
+            "query_text": q,
+            "query_embedding": vector_str,
+            "match_count": 200,
+            "limit": pageSize,
+            "offset": offset,
+        }
+    )
 
-    query = query.offset(offset).limit(pageSize)
-    result = await db.execute(query)
-    opportunities = result.scalars().all()
+    rows = result.mappings().all()
+    opportunities = [Opportunity(**dict(row)) for row in rows]
+
+    # DS-02 — join cluster context to results
+    cluster_ids = list({o.cluster_id for o in opportunities if o.cluster_id is not None})
+    cluster_map = {}
+    if cluster_ids:
+        clusters_result = await db.execute(
+            select(Cluster).where(Cluster.id.in_(cluster_ids))
+        )
+        clusters = clusters_result.scalars().all()
+
+        # Get latest snapshot post_count for each cluster
+        snapshots_result = await db.execute(
+            select(ClusterSnapshot)
+            .where(ClusterSnapshot.cluster_id.in_(cluster_ids))
+            .distinct(ClusterSnapshot.cluster_id)
+            .order_by(ClusterSnapshot.cluster_id, ClusterSnapshot.date.desc())
+        )
+        snapshots = snapshots_result.scalars().all()
+        snapshot_map = {s.cluster_id: s.post_count for s in snapshots}
+
+        cluster_map = {
+            c.id: {
+                "id": c.id,
+                "name": c.name,
+                "postCount": snapshot_map.get(c.id),
+                "signalScore": None,  # RD-08
+                "trending": None,     # RD-06
+            }
+            for c in clusters
+        }
 
     db.add(SearchUsage(
         uid=uid,
@@ -164,8 +241,14 @@ async def search_opportunities(
         searched_at=datetime.now(timezone.utc),
     ))
 
+    def _serialize_with_cluster(o: Opportunity) -> dict:
+        return {
+            **_serialize(o),
+            "cluster": cluster_map.get(o.cluster_id) if o.cluster_id else None,
+        }
+
     return {
-        "data": [_serialize(o) for o in opportunities],
+        "data": [_serialize_with_cluster(o) for o in opportunities],
         "page": page,
         "pageSize": pageSize,
         "total": total,
@@ -178,7 +261,7 @@ class PipelineActionRequest(BaseModel):
 
 @router.post("/{opportunity_id}/pipeline-action")
 async def pipeline_action(
-    opportunity_id: int,
+    opportunity_id: str,
     body: PipelineActionRequest,
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),

@@ -1,12 +1,10 @@
-from datetime import datetime, timezone
-from sqlalchemy import (
-    String, Text, Integer, Boolean, TIMESTAMP,
-    DateTime, Enum as SAEnum
-)
-from sqlalchemy.dialects.postgresql import TSVECTOR
-from sqlalchemy.orm import Mapped, mapped_column
-from app.db import Base
 import enum
+from app.db import Base
+from datetime import datetime, date, timezone
+from sqlalchemy.dialects.postgresql import TSVECTOR, JSONB
+from sqlalchemy import String, Text, Integer, Boolean, Float, DateTime, Date
+from sqlalchemy import (TIMESTAMP, Enum as SAEnum)
+from sqlalchemy.orm import Mapped, mapped_column
 
 
 class IntensityEnum(str, enum.Enum):
@@ -34,23 +32,29 @@ class PlanEnum(str, enum.Enum):
     elite = "elite"
     admin = "admin"
 
-
 class Opportunity(Base):
     __tablename__ = "opportunities"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[str] = mapped_column(String, primary_key=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
-    description: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
     source: Mapped[str] = mapped_column(String(50), nullable=False)
-    source_url: Mapped[str] = mapped_column(String(500), nullable=False)
-    domain: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    domain: Mapped[str | None] = mapped_column(String(100), nullable=True)
     type: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    score: Mapped[int] = mapped_column(Integer, default=0)
-    upvotes: Mapped[int] = mapped_column(Integer, default=0)
+    source_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    upvotes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     trending: Mapped[bool] = mapped_column(Boolean, default=False)
     wtp_signal: Mapped[bool] = mapped_column(Boolean, default=False)
-    workaround: Mapped[str | None] = mapped_column(Text, nullable=True)
-    intensity: Mapped[IntensityEnum] = mapped_column(SAEnum(IntensityEnum), nullable=False)
+    workaround_boolean: Mapped[bool] = mapped_column(Boolean, default=False)
+    intensity: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    sentiment: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    cluster_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    num_comments: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    upvote_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    feed: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    author: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    scraped_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now(timezone.utc))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     pipeline_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -78,3 +82,23 @@ class Subscription(Base):
     stripe_price_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     current_period_end: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class Cluster(Base):
+    __tablename__ = "clusters"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    first_seen: Mapped[date | None] = mapped_column(Date, nullable=True)
+    source: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    pipeline_cluster_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class ClusterSnapshot(Base):
+    __tablename__ = "cluster_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    cluster_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    post_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    sample_posts: Mapped[list | None] = mapped_column(JSONB, nullable=True)

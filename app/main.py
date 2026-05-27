@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.routes.subscriptions import router as subscriptions_router
 from app.routes.opportunities import router as opportunities_router
+from app.routes.clusters import router as clusters_router
 
 settings = get_settings()
 
@@ -23,6 +24,7 @@ app.add_middleware(
 
 app.include_router(opportunities_router)
 app.include_router(subscriptions_router)
+app.include_router(clusters_router)
 
 
 @app.get("/health")
