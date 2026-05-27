@@ -22,7 +22,10 @@ class Settings(BaseSettings):
     stripe_pro_yearly_price_id: str
     stripe_elite_monthly_price_id: str
     stripe_elite_yearly_price_id: str
-    app_url: str
+    app_url: str = "http://localhost:3000"
+
+    # OpenAI
+    openai_api_key: str = ""
 
     # CORS
     allowed_origins: str = "http://localhost:3000"
@@ -33,6 +36,7 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = Path(__file__).parent.parent / ".env"
+        extra = "ignore"
 
 
 @lru_cache

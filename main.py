@@ -1,9 +1,12 @@
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
 from app.config import get_settings
+from fastapi.middleware.cors import CORSMiddleware
 from app.routes.subscriptions import router as subscriptions_router
 from app.routes.opportunities import router as opportunities_router
 from app.routes.clusters import router as clusters_router
+
+load_dotenv()
 
 settings = get_settings()
 
