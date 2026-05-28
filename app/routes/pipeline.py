@@ -1,11 +1,13 @@
 from datetime import datetime, timezone
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, and_
+import math
+import random
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
-from app.db import get_db
+from app.db import get_db, AsyncSessionLocal
 from app.auth import get_uid
 from app.models import Pipeline, Opportunity
 
@@ -30,8 +32,25 @@ CAMEL_TO_SNAKE = {
     "name": "name",
 }
 
+INTENSITY_MAP = {"low": 1.0, "medium": 2.0, "high": 3.0}
+MAX_COHERENCE_POSTS = 50
 
-def _serialize(p: Pipeline) -> dict:
+
+def _format_cluster_metrics(raw: dict | None) -> dict | None:
+    if not raw:
+        return None
+    return {
+        "avgSignalScore": raw.get("avg_signal_score"),
+        "wtpRate": raw.get("wtp_rate"),
+        "workaroundRate": raw.get("workaround_rate"),
+        "avgIntensity": raw.get("avg_intensity"),
+        "coherenceScore": raw.get("coherence_score"),
+        "postCount": raw.get("post_count"),
+        "computedAt": raw.get("computed_at"),
+    }
+
+
+def _serialize(p: Pipeline, posts: list[dict] | None = None) -> dict:
     return {
         "id": p.id,
         "userId": p.user_id,
@@ -48,10 +67,140 @@ def _serialize(p: Pipeline) -> dict:
         "category": p.category,
         "revenueModel": p.revenue_model,
         "status": p.status,
+        "clusterMetrics": _format_cluster_metrics(p.cluster_metrics),
         "launchedAt": p.launched_at.isoformat() if p.launched_at else None,
         "removedAt": p.removed_at.isoformat() if p.removed_at else None,
         "createdAt": p.created_at.isoformat() if p.created_at else None,
         "updatedAt": p.updated_at.isoformat() if p.updated_at else None,
+        "posts": posts or [],
+    }
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    mag_a = math.sqrt(sum(x * x for x in a))
+    mag_b = math.sqrt(sum(x * x for x in b))
+    if mag_a == 0.0 or mag_b == 0.0:
+        return 0.0
+    return dot / (mag_a * mag_b)
+
+
+def _parse_embedding(raw) -> list[float] | None:
+    if raw is None:
+        return None
+    if isinstance(raw, (list, tuple)):
+        return [float(x) for x in raw]
+    s = str(raw).strip()
+    if s.startswith("[") and s.endswith("]"):
+        inner = s[1:-1].strip()
+        if not inner:
+            return None
+        return [float(x) for x in inner.split(",")]
+    return None
+
+
+async def _compute_and_write_metrics(pipeline_id: str, post_ids: list[str]) -> None:
+    """Background task: compute cluster metrics and write them back to the pipeline row."""
+    if not post_ids:
+        return
+
+    async with AsyncSessionLocal() as db:
+        try:
+            result = await db.execute(
+                select(
+                    Opportunity.id,
+                    Opportunity.signal_score,
+                    Opportunity.wtp_signal,
+                    Opportunity.workaround_boolean,
+                    Opportunity.intensity,
+                ).where(Opportunity.id.in_(post_ids))
+            )
+            rows = result.all()
+
+            if not rows:
+                return
+
+            count = len(rows)
+            scores = [r.signal_score for r in rows if r.signal_score is not None]
+            wtp_count = sum(1 for r in rows if r.wtp_signal)
+            workaround_count = sum(1 for r in rows if r.workaround_boolean)
+            intensities = [INTENSITY_MAP[r.intensity] for r in rows if r.intensity in INTENSITY_MAP]
+
+            avg_signal_score = round(sum(scores) / len(scores), 2) if scores else None
+            wtp_rate = round(wtp_count / count, 4)
+            workaround_rate = round(workaround_count / count, 4)
+            avg_intensity = round(sum(intensities) / len(intensities), 4) if intensities else None
+
+            # Coherence score: average pairwise cosine similarity using embeddings
+            coherence_score: float | None = None
+            if count == 1:
+                coherence_score = 1.0
+            else:
+                sample = post_ids if count <= MAX_COHERENCE_POSTS else random.sample(post_ids, MAX_COHERENCE_POSTS)
+                emb_result = await db.execute(
+                    text(
+                        "SELECT id::text, embedding::text AS emb "
+                        "FROM opportunities "
+                        "WHERE id::text = ANY(:ids) AND embedding IS NOT NULL"
+                    ),
+                    {"ids": sample},
+                )
+                emb_rows = emb_result.all()
+                parsed = [_parse_embedding(r[1]) for r in emb_rows]
+                vecs = [v for v in parsed if v is not None]
+
+                if len(vecs) >= 2:
+                    magnitudes = [math.sqrt(sum(x * x for x in v)) for v in vecs]
+                    similarities: list[float] = []
+                    for i in range(len(vecs)):
+                        for j in range(i + 1, len(vecs)):
+                            mag_i, mag_j = magnitudes[i], magnitudes[j]
+                            if mag_i == 0.0 or mag_j == 0.0:
+                                continue
+                            dot = sum(x * y for x, y in zip(vecs[i], vecs[j]))
+                            similarities.append(dot / (mag_i * mag_j))
+                    if similarities:
+                        coherence_score = round(sum(similarities) / len(similarities), 4)
+                elif len(vecs) == 1:
+                    coherence_score = 1.0
+
+            metrics = {
+                "avg_signal_score": avg_signal_score,
+                "wtp_rate": wtp_rate,
+                "workaround_rate": workaround_rate,
+                "avg_intensity": avg_intensity,
+                "coherence_score": coherence_score,
+                "post_count": count,
+                "computed_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+            pipeline_result = await db.execute(select(Pipeline).where(Pipeline.id == pipeline_id))
+            pipeline = pipeline_result.scalar_one_or_none()
+            if pipeline:
+                pipeline.cluster_metrics = metrics
+                await db.commit()
+        except Exception:
+            pass  # Background task — don't surface errors to the user
+
+
+async def _fetch_posts_for_cards(cards: list[Pipeline], db: AsyncSession) -> dict[str, list[dict]]:
+    """Batch-fetch {id, title, signalScore} for all post_ids across the given pipeline cards."""
+    all_ids = list({pid for c in cards for pid in (c.post_ids or [])})
+    if not all_ids:
+        return {str(c.id): [] for c in cards}
+
+    result = await db.execute(
+        select(Opportunity.id, Opportunity.title, Opportunity.signal_score)
+        .where(Opportunity.id.in_(all_ids))
+    )
+    post_map: dict[str, dict] = {
+        str(row.id): {"id": str(row.id), "title": row.title, "signalScore": row.signal_score}
+        for row in result
+    }
+
+    return {
+        str(c.id): [post_map[pid] for pid in (c.post_ids or []) if pid in post_map]
+        for c in cards
     }
 
 
@@ -89,6 +238,7 @@ class PatchPipelineBody(BaseModel):
     revenue_model: Optional[str] = None
     status: Optional[str] = None
     name: Optional[str] = None
+    post_ids: Optional[list[str]] = None
 
 
 class LaunchBody(BaseModel):
@@ -108,19 +258,21 @@ async def get_pipeline(
         ).order_by(Pipeline.created_at.desc())
     )
     cards = result.scalars().all()
-    return {"data": [_serialize(c) for c in cards]}
+    posts_map = await _fetch_posts_for_cards(list(cards), db)
+    return {"data": [_serialize(c, posts=posts_map.get(str(c.id), [])) for c in cards]}
 
 
 @router.post("")
 async def create_pipeline(
     body: CreatePipelineBody,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
     if not body.post_ids:
         raise HTTPException(status_code=400, detail="post_ids must not be empty")
 
-    # Duplicate check: any active cluster already contains one of these post_ids
+    # Duplicate check: any active card already contains one of these post_ids
     existing_result = await db.execute(
         select(Pipeline).where(
             Pipeline.user_id == uid,
@@ -144,20 +296,25 @@ async def create_pipeline(
         source_cluster_id=body.source_cluster_id,
     )
     db.add(card)
-    await db.flush()  # get the generated id
+    await db.flush()
 
     for post_id in body.post_ids:
         await _update_opportunity_counts(post_id, "add", db)
 
     await db.commit()
     await db.refresh(card)
-    return {"data": _serialize(card)}
+
+    background_tasks.add_task(_compute_and_write_metrics, str(card.id), list(body.post_ids))
+
+    posts_map = await _fetch_posts_for_cards([card], db)
+    return {"data": _serialize(card, posts=posts_map.get(str(card.id), []))}
 
 
 @router.patch("/{pipeline_id}")
 async def patch_pipeline(
     pipeline_id: str,
     body: PatchPipelineBody,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
@@ -169,13 +326,20 @@ async def patch_pipeline(
         raise HTTPException(status_code=404, detail="Pipeline card not found")
 
     updates = body.model_dump(exclude_none=True)
+    post_ids_changed = "post_ids" in updates
+
     for field, value in updates.items():
         setattr(card, field, value)
     card.updated_at = datetime.now(timezone.utc)
 
     await db.commit()
     await db.refresh(card)
-    return {"data": _serialize(card)}
+
+    if post_ids_changed:
+        background_tasks.add_task(_compute_and_write_metrics, str(card.id), list(card.post_ids or []))
+
+    posts_map = await _fetch_posts_for_cards([card], db)
+    return {"data": _serialize(card, posts=posts_map.get(str(card.id), []))}
 
 
 @router.post("/{pipeline_id}/launch")
@@ -227,5 +391,3 @@ async def delete_pipeline(
 
     await db.commit()
     return {"success": True}
-
-
