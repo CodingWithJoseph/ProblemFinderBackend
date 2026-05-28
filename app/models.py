@@ -2,7 +2,7 @@ import enum
 import uuid
 from app.db import Base
 from datetime import datetime, date, timezone
-from sqlalchemy.dialects.postgresql import TSVECTOR, JSONB, UUID as PGUUID
+from sqlalchemy.dialects.postgresql import TSVECTOR, JSONB, UUID as PGUUID, ARRAY
 from sqlalchemy import String, Text, Integer, Boolean, Float, DateTime, Date, TIMESTAMP
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column
@@ -108,3 +108,27 @@ class ClusterSnapshot(Base):
     date: Mapped[date] = mapped_column(Date, nullable=False)
     post_count: Mapped[int] = mapped_column(Integer, nullable=False)
     sample_posts: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+
+
+class Pipeline(Base):
+    __tablename__ = "pipeline"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    post_ids: Mapped[list] = mapped_column(ARRAY(Text), nullable=False, default=list)
+    source_cluster_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), nullable=True)
+    stage: Mapped[str] = mapped_column(String(50), nullable=False, default="watching")
+    kill_criteria: Mapped[str | None] = mapped_column(Text, nullable=True)
+    distribution_channels: Mapped[list] = mapped_column(ARRAY(Text), nullable=False, default=list)
+    concept_angles: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    exit_checklist: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    category: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    revenue_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="active")
+    launched_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    removed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
