@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
 from app.auth import get_uid
 from app.models import Pipeline
-from app.routes.pipeline import _serialize
+from app.routes.pipeline import _serialize, _fetch_posts_for_cards
 
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 
@@ -22,4 +22,5 @@ async def get_portfolio(
         ).order_by(Pipeline.launched_at.desc())
     )
     cards = result.scalars().all()
-    return {"data": [_serialize(c) for c in cards]}
+    posts_map = await _fetch_posts_for_cards(list(cards), db)
+    return {"data": [_serialize(c, posts=posts_map.get(str(c.id), [])) for c in cards]}

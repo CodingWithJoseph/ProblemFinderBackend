@@ -136,8 +136,19 @@ async def get_cluster(
         )
     )
 
+    # All opportunity IDs in this cluster (for seeding user pipeline from system cluster)
+    all_ids_result = await db.execute(
+        select(Opportunity.id)
+        .where(
+            Opportunity.cluster_id == cluster_id,
+            Opportunity.deleted_at == None,
+        )
+    )
+    post_ids = [str(row[0]) for row in all_ids_result]
+
     return {
         **_serialize_cluster(cluster, post_count, signals),
+        "postIds": post_ids,
         "posts": [
             {
                 "id": p.id,
