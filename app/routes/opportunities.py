@@ -13,6 +13,9 @@ from app.models import Opportunity, SearchUsage, Subscription, PlanEnum, Cluster
 router = APIRouter(prefix="/opportunities", tags=["opportunities"])
 openai_client = AsyncOpenAI(api_key=get_settings().openai_api_key)
 
+COUNT_CAP = 10_000
+MAX_PAGE = 500
+
 
 def _serialize(o: Opportunity) -> dict:
     return {
@@ -56,11 +59,13 @@ async def get_opportunities(
     page: int = Query(1, ge=1),
     pageSize: int = Query(default=20, ge=1, le=100),
     type: str | None = Query(None),
+    min_score: float | None = Query(None),
     domain: str | None = Query(None),
     intensity: str | None = Query(None),
     sentiment: str | None = Query(None),
     wtp_signal: bool | None = Query(None),
     workaround_boolean: bool | None = Query(None),
+    has_cluster: bool | None = Query(None),
     sort: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
@@ -71,7 +76,9 @@ async def get_opportunities(
         page = min(page, 1)
         pageSize = min(pageSize, 50)
 
+    page = min(page, MAX_PAGE)
     offset = (page - 1) * pageSize
+
     query = select(Opportunity).where(Opportunity.deleted_at == None)
 
     if type:
@@ -86,26 +93,72 @@ async def get_opportunities(
         query = query.where(Opportunity.wtp_signal == wtp_signal)
     if workaround_boolean is not None:
         query = query.where(Opportunity.workaround_boolean == workaround_boolean)
+    if min_score is not None:
+        query = query.where(Opportunity.signal_score >= min_score)
+    if has_cluster is True:
+        query = query.where(Opportunity.cluster_id != None)
+    elif has_cluster is False:
+        query = query.where(Opportunity.cluster_id == None)
 
     if sort == "trending":
         query = query.where(Opportunity.trending == True)
+        query = query.order_by(Opportunity.signal_score.desc().nullslast())
+    elif sort == "signal_score":
+        query = query.order_by(Opportunity.signal_score.desc().nullslast())
     elif sort == "source_score":
-        query = query.order_by(Opportunity.source_score.desc())
+        query = query.order_by(Opportunity.source_score.desc().nullslast())
     else:
-        query = query.order_by(Opportunity.created_at.desc())
+        query = query.order_by(Opportunity.created_at.desc().nullslast())
 
-    count_query = select(func.count()).select_from(query.subquery())
+    count_query = select(func.count()).select_from(
+        query.limit(COUNT_CAP).subquery()
+    )
     total = await db.scalar(count_query)
 
     query = query.offset(offset).limit(pageSize)
     result = await db.execute(query)
     opportunities = result.scalars().all()
 
+    cluster_ids = list({o.cluster_id for o in opportunities if o.cluster_id is not None})
+    cluster_map = {}
+    if cluster_ids:
+        clusters_result = await db.execute(
+            select(Cluster).where(Cluster.id.in_(cluster_ids))
+        )
+        clusters = clusters_result.scalars().all()
+
+        snapshots_result = await db.execute(
+            select(ClusterSnapshot)
+            .where(ClusterSnapshot.cluster_id.in_(cluster_ids))
+            .distinct(ClusterSnapshot.cluster_id)
+            .order_by(ClusterSnapshot.cluster_id, ClusterSnapshot.date.desc())
+        )
+        snapshots = snapshots_result.scalars().all()
+        snapshot_map = {s.cluster_id: s.post_count for s in snapshots}
+
+        cluster_map = {
+            c.id: {
+                "id": c.id,
+                "name": c.name,
+                "postCount": snapshot_map.get(c.id),
+                "signalScore": c.signal_score,
+                "trending": c.trending,
+            }
+            for c in clusters
+        }
+
+    def _serialize_with_cluster(o: Opportunity) -> dict:
+        return {
+            **_serialize(o),
+            "cluster": cluster_map.get(o.cluster_id) if o.cluster_id else None,
+        }
+
     return {
-        "data": [_serialize(o) for o in opportunities],
+        "data": [_serialize_with_cluster(o) for o in opportunities],
         "page": page,
         "pageSize": pageSize,
         "total": total,
+        "capped": total == COUNT_CAP,
     }
 
 
@@ -131,6 +184,7 @@ async def get_opportunities_by_ids(
     opportunities = result.scalars().all()
 
     return {"data": [_serialize(o) for o in opportunities]}
+
 
 @router.get("/search")
 async def search_opportunities(
@@ -161,7 +215,6 @@ async def search_opportunities(
                 }
             )
 
-    # Embed query using OpenAI text-embedding-3-small
     response = await openai_client.embeddings.create(
         model="text-embedding-3-small",
         input=q,
@@ -169,10 +222,9 @@ async def search_opportunities(
     query_vector = response.data[0].embedding
     vector_str = f"[{','.join(str(x) for x in query_vector)}]"
 
+    page = min(page, MAX_PAGE)
     offset = (page - 1) * pageSize
 
-    # Hybrid search via Supabase RPC function
-    # vector_str is embedded directly in the SQL to avoid asyncpg :: parameter conflict
     hybrid_query = text(f"""
         SELECT * FROM hybrid_search(
             :query_text,
@@ -209,7 +261,6 @@ async def search_opportunities(
     EXCLUDE_COLS = {"embedding", "search_vector"}
     opportunities = [Opportunity(**{k: v for k, v in dict(row).items() if k not in EXCLUDE_COLS}) for row in rows]
 
-    # DS-02 — join cluster context to results
     cluster_ids = list({o.cluster_id for o in opportunities if o.cluster_id is not None})
     cluster_map = {}
     if cluster_ids:
@@ -218,7 +269,6 @@ async def search_opportunities(
         )
         clusters = clusters_result.scalars().all()
 
-        # Get latest snapshot post_count for each cluster
         snapshots_result = await db.execute(
             select(ClusterSnapshot)
             .where(ClusterSnapshot.cluster_id.in_(cluster_ids))
@@ -233,8 +283,8 @@ async def search_opportunities(
                 "id": c.id,
                 "name": c.name,
                 "postCount": snapshot_map.get(c.id),
-                "signalScore": None,  # RD-08
-                "trending": None,     # RD-06
+                "signalScore": c.signal_score,
+                "trending": c.trending,
             }
             for c in clusters
         }

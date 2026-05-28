@@ -163,7 +163,11 @@ async def get_cluster_snapshots(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
-    # Confirm cluster exists
+    cluster_result = await db.execute(
+        select(Cluster).where(Cluster.id == cluster_id)
+    )
+    cluster = cluster_result.scalar_one_or_none()
+
     cluster_exists = await db.scalar(
         select(func.count()).where(Cluster.id == cluster_id)
     )
@@ -180,7 +184,7 @@ async def get_cluster_snapshots(
     return {
         "clusterId": cluster_id,
         "hasSufficientHistory": len(snapshots) >= SUFFICIENT_HISTORY_DAYS,
-        "growthRateWow": None,  # RD-06 — not yet implemented
+        "growthRateWow": cluster.growth_rate_wow,
         "snapshots": [
             {
                 "date": s.date.isoformat(),
