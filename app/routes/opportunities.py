@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy import select, func, cast, Date, text
@@ -23,6 +24,7 @@ def _serialize(o: Opportunity) -> dict:
         "domain": o.domain,
         "type": o.type,
         "sourceScore": o.source_score,
+        "signalScore": o.signal_score,
         "upvotes": o.upvotes,
         "trending": o.trending,
         "wtpSignal": o.wtp_signal,
@@ -118,16 +120,17 @@ async def get_opportunities_by_ids(
     if not id_list:
         return {"data": []}
 
+    uuid_list = [uuid.UUID(i) for i in id_list]
+
     result = await db.execute(
         select(Opportunity).where(
-            Opportunity.id.in_(id_list),
+            Opportunity.id.in_(uuid_list),
             Opportunity.deleted_at == None,
         )
     )
     opportunities = result.scalars().all()
 
     return {"data": [_serialize(o) for o in opportunities]}
-
 
 @router.get("/search")
 async def search_opportunities(
@@ -276,15 +279,20 @@ async def pipeline_action(
     if not opportunity:
         raise HTTPException(status_code=404, detail="Opportunity not found")
 
+    pipeline_count = opportunity.pipeline_count or 0
+    launch_count = opportunity.launch_count or 0
+
     if body.action == "add":
-        opportunity.pipeline_count = opportunity.pipeline_count + 1
+        opportunity.pipeline_count = pipeline_count + 1
     elif body.action == "remove":
-        opportunity.pipeline_count = max(0, opportunity.pipeline_count - 1)
+        opportunity.pipeline_count = max(0, pipeline_count - 1)
     elif body.action == "launch":
-        opportunity.pipeline_count = max(0, opportunity.pipeline_count - 1)
-        opportunity.launch_count = opportunity.launch_count + 1
+        opportunity.pipeline_count = max(0, pipeline_count - 1)
+        opportunity.launch_count = launch_count + 1
     else:
         raise HTTPException(status_code=400, detail="Invalid action")
+
+    await db.commit()
 
     return {
         "success": True,

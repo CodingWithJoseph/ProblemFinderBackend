@@ -87,10 +87,10 @@ def _serialize_cluster(c: Cluster, post_count: int | None, signals: dict) -> dic
         "name": c.name,
         "source": c.source,
         "firstSeen": c.first_seen.isoformat() if c.first_seen else None,
-        "pipelineClusterId": c.pipeline_cluster_id,
         "postCount": post_count,
-        "signalScore": None,   # RD-08 — not yet implemented
-        "trending": None,      # RD-06 — not yet implemented
+        "signalScore": c.signal_score,
+        "trending": c.trending,
+        "growthRateWow": c.growth_rate_wow,
         "signals": signals,
     }
 

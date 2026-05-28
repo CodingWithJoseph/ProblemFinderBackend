@@ -1,9 +1,10 @@
 import enum
+import uuid
 from app.db import Base
 from datetime import datetime, date, timezone
-from sqlalchemy.dialects.postgresql import TSVECTOR, JSONB
-from sqlalchemy import String, Text, Integer, Boolean, Float, DateTime, Date
-from sqlalchemy import (TIMESTAMP, Enum as SAEnum)
+from sqlalchemy.dialects.postgresql import TSVECTOR, JSONB, UUID as PGUUID
+from sqlalchemy import String, Text, Integer, Boolean, Float, DateTime, Date, TIMESTAMP
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column
 
 
@@ -32,14 +33,16 @@ class PlanEnum(str, enum.Enum):
     elite = "elite"
     admin = "admin"
 
+
 class Opportunity(Base):
     __tablename__ = "opportunities"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    source_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     source: Mapped[str] = mapped_column(String(50), nullable=False)
-    source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     domain: Mapped[str | None] = mapped_column(String(100), nullable=True)
     type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     source_score: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -49,11 +52,12 @@ class Opportunity(Base):
     workaround_boolean: Mapped[bool] = mapped_column(Boolean, default=False)
     intensity: Mapped[str | None] = mapped_column(String(20), nullable=True)
     sentiment: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    signal_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     cluster_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     num_comments: Mapped[int | None] = mapped_column(Integer, nullable=True)
     upvote_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
     feed: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    author: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    author: Mapped[str | None] = mapped_column(Text, nullable=True)
     scraped_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now(timezone.utc))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -91,7 +95,9 @@ class Cluster(Base):
     name: Mapped[str | None] = mapped_column(Text, nullable=True)
     first_seen: Mapped[date | None] = mapped_column(Date, nullable=True)
     source: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    pipeline_cluster_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    signal_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    trending: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    growth_rate_wow: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class ClusterSnapshot(Base):
