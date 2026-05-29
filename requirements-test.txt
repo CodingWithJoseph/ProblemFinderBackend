@@ -1,0 +1,16 @@
+# Test-only dependencies for the backend API suite.
+#
+# firebase-admin is stubbed in conftest.py (no real credentials needed) and
+# stripe is not imported by the routes under test, so both are omitted to keep
+# CI light. asyncpg is required only so the async engine can be constructed (no
+# real connection is ever opened — get_db is overridden).
+fastapi
+sqlalchemy[asyncio]
+asyncpg
+pydantic-settings
+python-dotenv
+openai
+httpx
+pgvector
+pytest
+pytest-asyncio
