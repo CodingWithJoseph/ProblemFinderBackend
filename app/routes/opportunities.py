@@ -66,6 +66,7 @@ async def get_opportunities(
     wtp_signal: bool | None = Query(None),
     workaround_boolean: bool | None = Query(None),
     has_cluster: bool | None = Query(None),
+    cluster_id: int | None = Query(None),
     sort: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
@@ -99,6 +100,8 @@ async def get_opportunities(
         query = query.where(Opportunity.cluster_id != None)
     elif has_cluster is False:
         query = query.where(Opportunity.cluster_id == None)
+    if cluster_id is not None:
+        query = query.where(Opportunity.cluster_id == cluster_id)
 
     if sort == "trending":
         query = query.where(Opportunity.trending == True)
@@ -289,6 +292,38 @@ async def search_opportunities(
             for c in clusters
         }
 
+    # Search clusters by name similarity
+    matching_clusters_result = await db.execute(
+        select(Cluster)
+        .where(Cluster.name.ilike(f"%{q}%"))
+        .limit(5)
+    )
+    matching_clusters = matching_clusters_result.scalars().all()
+
+    cluster_search_ids = [c.id for c in matching_clusters]
+    cluster_snapshot_map: dict[int, int | None] = {}
+    if cluster_search_ids:
+        cluster_snapshots_result = await db.execute(
+            select(ClusterSnapshot)
+            .where(ClusterSnapshot.cluster_id.in_(cluster_search_ids))
+            .distinct(ClusterSnapshot.cluster_id)
+            .order_by(ClusterSnapshot.cluster_id, ClusterSnapshot.date.desc())
+        )
+        for s in cluster_snapshots_result.scalars().all():
+            cluster_snapshot_map[s.cluster_id] = s.post_count
+
+    clusters_response = [
+        {
+            "id": c.id,
+            "name": c.name,
+            "signalScore": c.signal_score,
+            "postCount": cluster_snapshot_map.get(c.id),
+            "trending": c.trending,
+            "growthRateWow": c.growth_rate_wow,
+        }
+        for c in matching_clusters
+    ]
+
     db.add(SearchUsage(
         uid=uid,
         query=q,
@@ -307,6 +342,7 @@ async def search_opportunities(
         "page": page,
         "pageSize": pageSize,
         "total": total,
+        "clusters": clusters_response,
     }
 
 
