@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
@@ -91,7 +91,53 @@ def _serialize_cluster(c: Cluster, post_count: int | None, signals: dict) -> dic
         "signalScore": c.signal_score,
         "trending": c.trending,
         "growthRateWow": c.growth_rate_wow,
+        "growthRateMom": c.growth_rate_mom,
+        "postVelocity": c.post_velocity,
         "signals": signals,
+    }
+
+
+@router.get("/trending")
+async def get_trending_clusters(
+    limit: int = Query(10, ge=1, le=50),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Top trending clusters by week-over-week growth (dashboard intelligence feed)."""
+    result = await db.execute(
+        select(Cluster)
+        .where(Cluster.trending == True)
+        .order_by(Cluster.growth_rate_wow.desc().nullslast())
+        .limit(limit)
+    )
+    clusters = list(result.scalars().all())
+
+    cluster_ids = [c.id for c in clusters]
+    snapshot_map: dict[int, int | None] = {}
+    if cluster_ids:
+        snapshots_result = await db.execute(
+            select(ClusterSnapshot)
+            .where(ClusterSnapshot.cluster_id.in_(cluster_ids))
+            .distinct(ClusterSnapshot.cluster_id)
+            .order_by(ClusterSnapshot.cluster_id, ClusterSnapshot.date.desc())
+        )
+        snapshot_map = {s.cluster_id: s.post_count for s in snapshots_result.scalars().all()}
+
+    return {
+        "data": [
+            {
+                "id": c.id,
+                "name": c.name,
+                "source": c.source,
+                "signalScore": c.signal_score,
+                "trending": c.trending,
+                "growthRateWow": c.growth_rate_wow,
+                "growthRateMom": c.growth_rate_mom,
+                "postVelocity": c.post_velocity,
+                "postCount": snapshot_map.get(c.id),
+            }
+            for c in clusters
+        ]
     }
 
 
@@ -153,12 +199,20 @@ async def get_cluster(
             {
                 "id": p.id,
                 "title": p.title,
+                "description": p.description,
+                "sourceUrl": p.source_url,
                 "sourceScore": p.source_score,
+                "signalScore": p.signal_score,
                 "wtpSignal": p.wtp_signal,
                 "intensity": p.intensity,
                 "sentiment": p.sentiment,
                 "domain": p.domain,
                 "workaroundBoolean": p.workaround_boolean,
+                "intensityScore": p.intensity_score,
+                "sentimentScore": p.sentiment_score,
+                "wtpConfidence": p.wtp_confidence,
+                "workaroundConfidence": p.workaround_confidence,
+                "createdAt": p.created_at,
             }
             for p in posts
         ],
@@ -196,6 +250,8 @@ async def get_cluster_snapshots(
         "clusterId": cluster_id,
         "hasSufficientHistory": len(snapshots) >= SUFFICIENT_HISTORY_DAYS,
         "growthRateWow": cluster.growth_rate_wow,
+        "growthRateMom": cluster.growth_rate_mom,
+        "postVelocity": cluster.post_velocity,
         "snapshots": [
             {
                 "date": s.date.isoformat(),

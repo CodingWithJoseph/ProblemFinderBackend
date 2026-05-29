@@ -2,6 +2,7 @@ import enum
 import uuid
 from app.db import Base
 from datetime import datetime, date, timezone
+from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects.postgresql import TSVECTOR, JSONB, UUID as PGUUID, ARRAY
 from sqlalchemy import String, Text, Integer, Boolean, Float, DateTime, Date, TIMESTAMP
 from sqlalchemy import Enum as SAEnum
@@ -53,6 +54,10 @@ class Opportunity(Base):
     intensity: Mapped[str | None] = mapped_column(String(20), nullable=True)
     sentiment: Mapped[str | None] = mapped_column(String(20), nullable=True)
     signal_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    intensity_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sentiment_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    wtp_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    workaround_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     cluster_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     num_comments: Mapped[int | None] = mapped_column(Integer, nullable=True)
     upvote_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -98,6 +103,8 @@ class Cluster(Base):
     signal_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     trending: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     growth_rate_wow: Mapped[float | None] = mapped_column(Float, nullable=True)
+    growth_rate_mom: Mapped[float | None] = mapped_column(Float, nullable=True)
+    post_velocity: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class ClusterSnapshot(Base):
@@ -145,6 +152,7 @@ class Problem(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_post_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    embedding: Mapped[list | None] = mapped_column(Vector(1536), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 

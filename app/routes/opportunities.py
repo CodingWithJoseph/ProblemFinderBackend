@@ -4,14 +4,12 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy import select, func, cast, Date, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
-from openai import AsyncOpenAI
 from app.db import get_db
 from app.auth import get_uid
-from app.config import get_settings
+from app.openai_client import openai_client
 from app.models import Opportunity, SearchUsage, Subscription, PlanEnum, Cluster, ClusterSnapshot
 
 router = APIRouter(prefix="/opportunities", tags=["opportunities"])
-openai_client = AsyncOpenAI(api_key=get_settings().openai_api_key)
 
 COUNT_CAP = 10_000
 MAX_PAGE = 500
@@ -28,6 +26,10 @@ def _serialize(o: Opportunity) -> dict:
         "type": o.type,
         "sourceScore": o.source_score,
         "signalScore": o.signal_score,
+        "intensityScore": o.intensity_score,
+        "sentimentScore": o.sentiment_score,
+        "wtpConfidence": o.wtp_confidence,
+        "workaroundConfidence": o.workaround_confidence,
         "upvotes": o.upvotes,
         "trending": o.trending,
         "wtpSignal": o.wtp_signal,
@@ -44,6 +46,39 @@ def _serialize(o: Opportunity) -> dict:
         "pipelineCount": o.pipeline_count,
         "launchCount": o.launch_count,
     }
+
+
+def _serialize_cluster_inline(c: Cluster, post_count: int | None) -> dict:
+    return {
+        "id": c.id,
+        "name": c.name,
+        "postCount": post_count,
+        "signalScore": c.signal_score,
+        "trending": c.trending,
+        "growthRateWow": c.growth_rate_wow,
+        "growthRateMom": c.growth_rate_mom,
+        "postVelocity": c.post_velocity,
+    }
+
+
+async def _build_cluster_map(opportunities: list[Opportunity], db: AsyncSession) -> dict:
+    """Map cluster_id -> serialized cluster (with latest snapshot post count)."""
+    cluster_ids = list({o.cluster_id for o in opportunities if o.cluster_id is not None})
+    if not cluster_ids:
+        return {}
+
+    clusters_result = await db.execute(select(Cluster).where(Cluster.id.in_(cluster_ids)))
+    clusters = clusters_result.scalars().all()
+
+    snapshots_result = await db.execute(
+        select(ClusterSnapshot)
+        .where(ClusterSnapshot.cluster_id.in_(cluster_ids))
+        .distinct(ClusterSnapshot.cluster_id)
+        .order_by(ClusterSnapshot.cluster_id, ClusterSnapshot.date.desc())
+    )
+    snapshot_map = {s.cluster_id: s.post_count for s in snapshots_result.scalars().all()}
+
+    return {c.id: _serialize_cluster_inline(c, snapshot_map.get(c.id)) for c in clusters}
 
 
 async def _get_plan(uid: str, db: AsyncSession) -> PlanEnum:
@@ -122,33 +157,7 @@ async def get_opportunities(
     result = await db.execute(query)
     opportunities = result.scalars().all()
 
-    cluster_ids = list({o.cluster_id for o in opportunities if o.cluster_id is not None})
-    cluster_map = {}
-    if cluster_ids:
-        clusters_result = await db.execute(
-            select(Cluster).where(Cluster.id.in_(cluster_ids))
-        )
-        clusters = clusters_result.scalars().all()
-
-        snapshots_result = await db.execute(
-            select(ClusterSnapshot)
-            .where(ClusterSnapshot.cluster_id.in_(cluster_ids))
-            .distinct(ClusterSnapshot.cluster_id)
-            .order_by(ClusterSnapshot.cluster_id, ClusterSnapshot.date.desc())
-        )
-        snapshots = snapshots_result.scalars().all()
-        snapshot_map = {s.cluster_id: s.post_count for s in snapshots}
-
-        cluster_map = {
-            c.id: {
-                "id": c.id,
-                "name": c.name,
-                "postCount": snapshot_map.get(c.id),
-                "signalScore": c.signal_score,
-                "trending": c.trending,
-            }
-            for c in clusters
-        }
+    cluster_map = await _build_cluster_map(list(opportunities), db)
 
     def _serialize_with_cluster(o: Opportunity) -> dict:
         return {
@@ -187,6 +196,30 @@ async def get_opportunities_by_ids(
     opportunities = result.scalars().all()
 
     return {"data": [_serialize(o) for o in opportunities]}
+
+
+@router.get("/top")
+async def get_top_opportunities(
+    limit: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Top opportunities by signal score (for the dashboard right column)."""
+    result = await db.execute(
+        select(Opportunity)
+        .where(Opportunity.deleted_at == None)
+        .order_by(Opportunity.signal_score.desc().nullslast())
+        .limit(limit)
+    )
+    opportunities = list(result.scalars().all())
+    cluster_map = await _build_cluster_map(opportunities, db)
+
+    return {
+        "data": [
+            {**_serialize(o), "cluster": cluster_map.get(o.cluster_id) if o.cluster_id else None}
+            for o in opportunities
+        ]
+    }
 
 
 @router.get("/search")
@@ -264,33 +297,7 @@ async def search_opportunities(
     EXCLUDE_COLS = {"embedding", "search_vector"}
     opportunities = [Opportunity(**{k: v for k, v in dict(row).items() if k not in EXCLUDE_COLS}) for row in rows]
 
-    cluster_ids = list({o.cluster_id for o in opportunities if o.cluster_id is not None})
-    cluster_map = {}
-    if cluster_ids:
-        clusters_result = await db.execute(
-            select(Cluster).where(Cluster.id.in_(cluster_ids))
-        )
-        clusters = clusters_result.scalars().all()
-
-        snapshots_result = await db.execute(
-            select(ClusterSnapshot)
-            .where(ClusterSnapshot.cluster_id.in_(cluster_ids))
-            .distinct(ClusterSnapshot.cluster_id)
-            .order_by(ClusterSnapshot.cluster_id, ClusterSnapshot.date.desc())
-        )
-        snapshots = snapshots_result.scalars().all()
-        snapshot_map = {s.cluster_id: s.post_count for s in snapshots}
-
-        cluster_map = {
-            c.id: {
-                "id": c.id,
-                "name": c.name,
-                "postCount": snapshot_map.get(c.id),
-                "signalScore": c.signal_score,
-                "trending": c.trending,
-            }
-            for c in clusters
-        }
+    cluster_map = await _build_cluster_map(opportunities, db)
 
     # Search clusters by name similarity
     matching_clusters_result = await db.execute(
@@ -320,6 +327,8 @@ async def search_opportunities(
             "postCount": cluster_snapshot_map.get(c.id),
             "trending": c.trending,
             "growthRateWow": c.growth_rate_wow,
+            "growthRateMom": c.growth_rate_mom,
+            "postVelocity": c.post_velocity,
         }
         for c in matching_clusters
     ]

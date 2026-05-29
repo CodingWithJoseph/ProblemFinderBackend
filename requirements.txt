@@ -8,3 +8,4 @@ firebase-admin
 stripe
 openai
 httpx
+pgvector

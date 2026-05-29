@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from app.db import get_db, AsyncSessionLocal
 from app.auth import get_uid
-from app.models import Pipeline, Opportunity
+from app.models import Pipeline, Opportunity, Cluster
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
@@ -73,6 +73,29 @@ def _serialize(p: Pipeline, posts: list[dict] | None = None) -> dict:
         "createdAt": p.created_at.isoformat() if p.created_at else None,
         "updatedAt": p.updated_at.isoformat() if p.updated_at else None,
         "posts": posts or [],
+    }
+
+
+def _serialize_signal_post(o: Opportunity) -> dict:
+    return {
+        "id": o.id,
+        "title": o.title,
+        "description": o.description,
+        "source": o.source,
+        "sourceUrl": o.source_url,
+        "domain": o.domain,
+        "author": o.author,
+        "signalScore": o.signal_score,
+        "wtpSignal": o.wtp_signal,
+        "workaroundBoolean": o.workaround_boolean,
+        "intensity": o.intensity,
+        "sentiment": o.sentiment,
+        "intensityScore": o.intensity_score,
+        "sentimentScore": o.sentiment_score,
+        "wtpConfidence": o.wtp_confidence,
+        "workaroundConfidence": o.workaround_confidence,
+        "numComments": o.num_comments,
+        "createdAt": o.created_at.isoformat() if o.created_at else None,
     }
 
 
@@ -180,7 +203,7 @@ async def _compute_and_write_metrics(pipeline_id: str, post_ids: list[str]) -> N
                 pipeline.cluster_metrics = metrics
                 await db.commit()
         except Exception:
-            pass  # Background task — don't surface errors to the user
+            pass  # Background task - don't surface errors to the user
 
 
 async def _fetch_posts_for_cards(cards: list[Pipeline], db: AsyncSession) -> dict[str, list[dict]]:
@@ -260,6 +283,98 @@ async def get_pipeline(
     cards = result.scalars().all()
     posts_map = await _fetch_posts_for_cards(list(cards), db)
     return {"data": [_serialize(c, posts=posts_map.get(str(c.id), [])) for c in cards]}
+
+
+@router.get("/{pipeline_id}/signal")
+async def get_pipeline_signal(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Cluster metrics + all cluster posts with full signal breakdown.
+
+    The pipeline is the anchor (notes live here). Posts are the full set in the
+    pipeline's source_cluster_id; falls back to the card's post_ids if there is
+    no system cluster behind it.
+    """
+    result = await db.execute(
+        select(Pipeline).where(Pipeline.id == pipeline_id, Pipeline.user_id == uid)
+    )
+    card = result.scalar_one_or_none()
+    if not card:
+        raise HTTPException(status_code=404, detail="Pipeline card not found")
+
+    # source_cluster_id is stored as text; system cluster ids are integers.
+    cluster = None
+    cluster_int_id: int | None = None
+    if card.source_cluster_id:
+        try:
+            cluster_int_id = int(card.source_cluster_id)
+        except (TypeError, ValueError):
+            cluster_int_id = None
+
+    if cluster_int_id is not None:
+        cluster_result = await db.execute(select(Cluster).where(Cluster.id == cluster_int_id))
+        cluster = cluster_result.scalar_one_or_none()
+
+    # Full cluster view: ALL posts in the cluster; fall back to the card's post_ids.
+    if cluster_int_id is not None:
+        posts_result = await db.execute(
+            select(Opportunity)
+            .where(Opportunity.cluster_id == cluster_int_id, Opportunity.deleted_at == None)
+            .order_by(Opportunity.signal_score.desc().nullslast())
+        )
+        posts = list(posts_result.scalars().all())
+    elif card.post_ids:
+        posts_result = await db.execute(
+            select(Opportunity)
+            .where(Opportunity.id.in_(card.post_ids), Opportunity.deleted_at == None)
+            .order_by(Opportunity.signal_score.desc().nullslast())
+        )
+        posts = list(posts_result.scalars().all())
+    else:
+        posts = []
+
+    def _avg(values: list) -> float | None:
+        vals = [v for v in values if v is not None]
+        return round(sum(vals) / len(vals), 4) if vals else None
+
+    count = len(posts)
+    metrics = {
+        "postCount": count,
+        "wtpRate": round(sum(1 for p in posts if p.wtp_signal) / count, 4) if count else None,
+        "workaroundRate": round(sum(1 for p in posts if p.workaround_boolean) / count, 4) if count else None,
+        "avgIntensityScore": _avg([p.intensity_score for p in posts]),
+        "avgSentimentScore": _avg([p.sentiment_score for p in posts]),
+        "avgSignalScore": _avg([p.signal_score for p in posts]),
+        "avgWtpConfidence": _avg([p.wtp_confidence for p in posts]),
+        "avgWorkaroundConfidence": _avg([p.workaround_confidence for p in posts]),
+    }
+
+    cluster_payload = None
+    if cluster:
+        cluster_payload = {
+            "id": cluster.id,
+            "name": cluster.name,
+            "signalScore": cluster.signal_score,
+            "trending": cluster.trending,
+            "growthRateWow": cluster.growth_rate_wow,
+            "growthRateMom": cluster.growth_rate_mom,
+            "postVelocity": cluster.post_velocity,
+        }
+
+    return {
+        "pipeline": {
+            "id": card.id,
+            "name": card.name,
+            "notes": card.notes,
+            "sourceClusterId": card.source_cluster_id,
+            "stage": card.stage,
+        },
+        "cluster": cluster_payload,
+        "metrics": metrics,
+        "posts": [_serialize_signal_post(p) for p in posts],
+    }
 
 
 @router.post("")
