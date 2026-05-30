@@ -46,6 +46,19 @@ def limit_reached_body(limit: str, plan: PlanEnum) -> dict:
     }
 
 
+def register_limit_handler(app) -> None:
+    """Register the LimitReached -> top-level-JSON handler on a FastAPI app.
+
+    Shared by the real app (main.py) and the test app (conftest) so both render
+    limit_reached identically.
+    """
+    from fastapi.responses import JSONResponse
+
+    @app.exception_handler(LimitReached)
+    async def _limit_reached_handler(request, exc: LimitReached):
+        return JSONResponse(status_code=exc.status_code, content=limit_reached_body(exc.limit, exc.plan))
+
+
 def limit_for(plan: PlanEnum, key: str):
     return TIER_LIMITS.get(plan, TIER_LIMITS[PlanEnum.free]).get(key)
 

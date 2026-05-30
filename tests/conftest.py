@@ -402,6 +402,9 @@ def app(fake_db):
 
     application.dependency_overrides[get_db] = _get_db_override
     application.dependency_overrides[get_uid] = lambda: TEST_UID
+
+    from app.limits import register_limit_handler
+    register_limit_handler(application)
     return application
 
 

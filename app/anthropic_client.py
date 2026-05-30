@@ -4,15 +4,29 @@ Centralised like openai_client. Defensive by design: if no API key is configured
 generate_next_step returns None, so the feature degrades gracefully instead of
 breaking the request. The static system prompt is marked for prompt caching.
 """
-from anthropic import AsyncAnthropic
-
 from app.config import get_settings
 
 _settings = get_settings()
 
-_client: AsyncAnthropic | None = (
-    AsyncAnthropic(api_key=_settings.anthropic_api_key) if _settings.anthropic_api_key else None
-)
+# Lazily created so the app imports even when the anthropic SDK isn't installed,
+# and so a missing API key simply disables the feature.
+_client = None
+_init_attempted = False
+
+
+def _get_client():
+    global _client, _init_attempted
+    if not _init_attempted:
+        _init_attempted = True
+        if _settings.anthropic_api_key:
+            try:
+                from anthropic import AsyncAnthropic
+                _client = AsyncAnthropic(api_key=_settings.anthropic_api_key)
+            except Exception as exc:  # SDK missing or misconfigured
+                print(f"anthropic client init failed: {exc}")
+                _client = None
+    return _client
+
 
 _SYSTEM = (
     "You are an experienced startup advisor inside a market-research tool. Given a "
@@ -26,10 +40,11 @@ _SYSTEM = (
 async def generate_next_step(context: str) -> str | None:
     """Return a concise recommended next step for the given opportunity context,
     or None if Anthropic is not configured or the call fails."""
-    if _client is None:
+    client = _get_client()
+    if client is None:
         return None
     try:
-        message = await _client.messages.create(
+        message = await client.messages.create(
             model=_settings.anthropic_model,
             max_tokens=200,
             system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],

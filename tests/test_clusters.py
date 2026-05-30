@@ -30,6 +30,16 @@ async def test_trending_clusters_returns_growth_fields(client, fake_db, auth_hea
     resp = await client.get("/clusters/trending", headers=auth_headers)
     assert resp.status_code == 200
 
+    data = resp.json()["data"]
+    assert len(data) == 1
+    item = data[0]
+    for field in GROWTH_FIELDS:
+        assert field in item
+    assert item["growthRateWow"] == 0.5
+    assert item["growthRateMom"] == 1.1
+    assert item["postVelocity"] == 99.0
+    assert item["postCount"] == 33
+
 
 async def test_trending_clusters_blocked_for_free_plan(client, fake_db, auth_headers):
     # AI-detected clusters are Pro-only; free users get the limit_reached payload.
@@ -42,16 +52,6 @@ async def test_trending_clusters_blocked_for_free_plan(client, fake_db, auth_hea
     assert body["limit"] == "clusters"
     assert body["plan"] == "free"
     assert body["upgrade_required"] == "pro"
-
-    data = resp.json()["data"]
-    assert len(data) == 1
-    item = data[0]
-    for field in GROWTH_FIELDS:
-        assert field in item
-    assert item["growthRateWow"] == 0.5
-    assert item["growthRateMom"] == 1.1
-    assert item["postVelocity"] == 99.0
-    assert item["postCount"] == 33
 
 
 async def test_get_cluster_returns_growth_and_signals(client, fake_db, auth_headers):
