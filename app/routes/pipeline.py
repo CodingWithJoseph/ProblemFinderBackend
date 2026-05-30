@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from app.db import get_db, AsyncSessionLocal
 from app.auth import get_uid
 from app.models import Pipeline, Opportunity, Cluster
+from app.limits import get_plan, limit_for, LimitReached
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
@@ -413,6 +414,13 @@ async def create_pipeline(
         )
     )
     active_cards = existing_result.scalars().all()
+
+    # Free plan: cap active pipeline cards (403 with limit_reached on overflow).
+    plan = await get_plan(uid, db)
+    cap = limit_for(plan, "max_pipeline_cards")
+    if cap is not None and len(active_cards) >= cap:
+        raise LimitReached("pipeline", plan, status_code=403)
+
     new_ids_set = set(body.post_ids)
     for card in active_cards:
         if new_ids_set.intersection(card.post_ids or []):

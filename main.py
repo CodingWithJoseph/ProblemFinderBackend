@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from dotenv import load_dotenv
 from app.config import get_settings
+from app.limits import register_limit_handler
 from fastapi.middleware.cors import CORSMiddleware
 from app.routes.subscriptions import router as subscriptions_router
 from app.routes.opportunities import router as opportunities_router
@@ -44,6 +45,9 @@ app.include_router(dashboard_router)
 app.include_router(revenue_signals_router)
 app.include_router(experiments_router)
 app.include_router(domain_snapshots_router)
+
+
+register_limit_handler(app)
 
 
 @app.get("/health")

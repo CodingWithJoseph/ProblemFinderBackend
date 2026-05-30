@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
 from app.auth import get_uid
 from app.models import Cluster, ClusterSnapshot, Opportunity, ClusterMember, SourcePost
+from app.limits import get_plan, ai_clusters_allowed, LimitReached
 
 router = APIRouter(prefix="/clusters", tags=["clusters"])
 
@@ -121,6 +122,11 @@ async def get_trending_clusters(
     uid: str = Depends(get_uid),
 ):
     """Top trending clusters by week-over-week growth (dashboard intelligence feed)."""
+    # AI-detected clusters are a Pro feature (403 with limit_reached for free).
+    plan = await get_plan(uid, db)
+    if not ai_clusters_allowed(plan):
+        raise LimitReached("clusters", plan, status_code=403)
+
     result = await db.execute(
         select(Cluster)
         .where(Cluster.trending == True)

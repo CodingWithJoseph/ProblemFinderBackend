@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from app.db import get_db, AsyncSessionLocal
 from app.auth import get_uid
 from app.models import Problem, Opportunity
+from app.limits import get_plan, enforce_problems_limit
 from app.openai_client import openai_client, EMBEDDING_MODEL
 from app.routes.opportunities import _serialize as _serialize_opportunity
 
@@ -225,6 +226,10 @@ async def create_problem(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
+    # Free plan: cap problems per pipeline (403 with limit_reached on overflow).
+    plan = await get_plan(uid, db)
+    await enforce_problems_limit(uid, plan, body.pipeline_id, db)
+
     problem = Problem(
         pipeline_id=body.pipeline_id,
         user_id=uid,

@@ -123,8 +123,8 @@ async def create_checkout(
         mode="subscription",
         payment_method_types=["card"],
         line_items=[{"price": price_id, "quantity": 1}],
-        success_url=f"{settings.app_url}/payment/success?session_id={{CHECKOUT_SESSION_ID}}",
-        cancel_url=f"{settings.app_url}/payment/cancel",
+        success_url=f"{settings.app_url}/success?session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=f"{settings.app_url}/cancel",
         client_reference_id=uid,
         metadata={"uid": uid, "price_key": body.price_key},
     )

@@ -4,11 +4,13 @@ Focus: cluster endpoints surface the growth fields (growthRateWow,
 growthRateMom, postVelocity) and on-read signal aggregations.
 """
 
+from app.models import PlanEnum
 from conftest import (
     FakeResult,
     make_cluster,
     make_snapshot,
     make_opportunity,
+    make_subscription,
 )
 
 GROWTH_FIELDS = ["growthRateWow", "growthRateMom", "postVelocity"]
@@ -19,6 +21,7 @@ async def test_trending_clusters_returns_growth_fields(client, fake_db, auth_hea
     snapshot = make_snapshot(cluster_id=7, post_count=33)
     fake_db.stub(
         execute=[
+            FakeResult(rows=[make_subscription(plan=PlanEnum.pro)]),  # plan lookup (AI-cluster gate)
             FakeResult(rows=[cluster]),    # trending clusters
             FakeResult(rows=[snapshot]),   # latest snapshots
         ]
@@ -36,6 +39,19 @@ async def test_trending_clusters_returns_growth_fields(client, fake_db, auth_hea
     assert item["growthRateMom"] == 1.1
     assert item["postVelocity"] == 99.0
     assert item["postCount"] == 33
+
+
+async def test_trending_clusters_blocked_for_free_plan(client, fake_db, auth_headers):
+    # AI-detected clusters are Pro-only; free users get the limit_reached payload.
+    fake_db.stub(execute=[FakeResult(rows=[make_subscription(plan=PlanEnum.free)])])
+
+    resp = await client.get("/clusters/trending", headers=auth_headers)
+    assert resp.status_code == 403
+    body = resp.json()
+    assert body["error"] == "limit_reached"
+    assert body["limit"] == "clusters"
+    assert body["plan"] == "free"
+    assert body["upgrade_required"] == "pro"
 
 
 async def test_get_cluster_returns_growth_and_signals(client, fake_db, auth_headers):
