@@ -7,6 +7,7 @@ python-dotenv
 firebase-admin
 stripe
 openai
+anthropic
 httpx
 pgvector
 pytest

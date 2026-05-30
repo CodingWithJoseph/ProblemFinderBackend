@@ -7,7 +7,9 @@ from pydantic import BaseModel
 from app.db import get_db
 from app.auth import get_uid
 from app.openai_client import openai_client
-from app.models import Opportunity, SearchUsage, Subscription, PlanEnum, Cluster, ClusterSnapshot
+from app.models import Opportunity, SearchUsage, Subscription, PlanEnum, Cluster, ClusterSnapshot, Problem, Pipeline
+from app.limits import enforce_search_limit
+from app.anthropic_client import generate_next_step
 
 router = APIRouter(prefix="/opportunities", tags=["opportunities"])
 
@@ -252,24 +254,8 @@ async def search_opportunities(
 ):
     plan = await _get_plan(uid, db)
 
-    if plan == PlanEnum.free:
-        today = datetime.now(timezone.utc).date()
-        count_result = await db.execute(
-            select(func.count()).where(
-                SearchUsage.uid == uid,
-                cast(SearchUsage.searched_at, Date) == today,
-            )
-        )
-        search_count = count_result.scalar() or 0
-        if search_count >= 5:
-            raise HTTPException(
-                status_code=429,
-                detail={
-                    "error": "Search limit reached",
-                    "code": "SEARCH_LIMIT_REACHED",
-                    "remaining": 0,
-                }
-            )
+    # Free: 3 searches per rolling 24h (429 with limit_reached on overflow).
+    await enforce_search_limit(uid, plan, db)
 
     response = await openai_client.embeddings.create(
         model="text-embedding-3-small",
@@ -414,3 +400,111 @@ async def pipeline_action(
         "pipelineCount": opportunity.pipeline_count,
         "launchCount": opportunity.launch_count,
     }
+
+
+def _build_next_step_context(opp: Opportunity, problems: list[Problem], cluster: Cluster | None) -> str:
+    lines = [f"OPPORTUNITY: {opp.title}"]
+    if opp.description:
+        lines.append(f"Description: {opp.description[:600]}")
+    if opp.signal_strength:
+        reason = f" ({opp.signal_reason})" if opp.signal_reason else ""
+        lines.append(f"Signal strength: {opp.signal_strength}{reason}")
+    if opp.industry_category:
+        lines.append(f"Industry: {opp.industry_category}")
+    if opp.primary_problem:
+        lines.append(f"Primary problem: {opp.primary_problem}")
+    if opp.target_audience:
+        lines.append(f"Target audience: {opp.target_audience}")
+    score_bits = [
+        f"{label} {round(val, 2)}"
+        for label, val in (
+            ("pain", opp.pain_score),
+            ("urgency", opp.urgency_score),
+            ("commercial intent", opp.commercial_intent_score),
+            ("solution-seeking", opp.solution_seeking_score),
+        )
+        if val is not None
+    ]
+    if score_bits:
+        lines.append("Signal scores: " + ", ".join(score_bits))
+
+    if cluster is not None:
+        lines.append("")
+        lines.append(f"CLUSTER: {cluster.name or 'unnamed'}")
+        if cluster.description:
+            lines.append(f"Cluster description: {cluster.description[:400]}")
+        cluster_bits = []
+        if cluster.signal_score is not None:
+            cluster_bits.append(f"signal {round(cluster.signal_score)}")
+        if cluster.growth_rate_wow is not None:
+            cluster_bits.append(f"WoW growth {round(cluster.growth_rate_wow * 100)}%")
+        if cluster.post_velocity is not None:
+            cluster_bits.append(f"{round(cluster.post_velocity)} posts/week")
+        if cluster_bits:
+            lines.append("Cluster metrics: " + ", ".join(cluster_bits))
+
+    lines.append("")
+    if problems:
+        lines.append("DEFINED PROBLEMS:")
+        for p in problems[:15]:
+            extras = []
+            if p.pain_level:
+                extras.append(f"pain {p.pain_level}")
+            if p.urgency_level:
+                extras.append(f"urgency {p.urgency_level}")
+            if p.willingness_to_pay_signal:
+                extras.append(f"WTP {p.willingness_to_pay_signal}")
+            suffix = f" [{', '.join(extras)}]" if extras else ""
+            lines.append(f"- {p.title}{suffix}")
+    else:
+        lines.append("DEFINED PROBLEMS: none yet.")
+
+    lines.append("")
+    lines.append("Recommend the single most valuable next step for this founder.")
+    return "\n".join(lines)
+
+
+@router.post("/{opportunity_id}/recommend-next-step")
+async def recommend_next_step(
+    opportunity_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Generate (via Claude) and persist a recommended next step for an opportunity,
+    grounded in the user's defined problems, the opportunity's signal strength, and its
+    cluster. Intended to be called once the user has defined problems for the pipeline.
+    Idempotent — re-call to refresh."""
+    opp = (await db.execute(
+        select(Opportunity).where(Opportunity.id == opportunity_id)
+    )).scalar_one_or_none()
+    if not opp:
+        raise HTTPException(status_code=404, detail="Opportunity not found")
+
+    # The user's pipelines that contain this opportunity, and their problems.
+    pipelines = (await db.execute(
+        select(Pipeline).where(
+            Pipeline.user_id == uid,
+            Pipeline.post_ids.any(opportunity_id),
+        )
+    )).scalars().all()
+    pipeline_ids = [p.id for p in pipelines]
+
+    problems: list[Problem] = []
+    if pipeline_ids:
+        problems = list((await db.execute(
+            select(Problem).where(Problem.pipeline_id.in_(pipeline_ids))
+        )).scalars().all())
+
+    cluster = None
+    if opp.cluster_id is not None:
+        cluster = (await db.execute(
+            select(Cluster).where(Cluster.id == opp.cluster_id)
+        )).scalar_one_or_none()
+
+    context = _build_next_step_context(opp, problems, cluster)
+    recommendation = await generate_next_step(context)
+    if recommendation:
+        opp.recommended_next_step = recommendation
+        await db.commit()
+
+    return {"data": {"recommendedNextStep": opp.recommended_next_step}}

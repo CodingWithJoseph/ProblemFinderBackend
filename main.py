@@ -1,6 +1,8 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from app.config import get_settings
+from app.limits import LimitReached, limit_reached_body
 from fastapi.middleware.cors import CORSMiddleware
 from app.routes.subscriptions import router as subscriptions_router
 from app.routes.opportunities import router as opportunities_router
@@ -44,6 +46,12 @@ app.include_router(dashboard_router)
 app.include_router(revenue_signals_router)
 app.include_router(experiments_router)
 app.include_router(domain_snapshots_router)
+
+
+@app.exception_handler(LimitReached)
+async def limit_reached_handler(request: Request, exc: LimitReached):
+    # Render the limit payload at the top level (not under FastAPI's "detail").
+    return JSONResponse(status_code=exc.status_code, content=limit_reached_body(exc.limit, exc.plan))
 
 
 @app.get("/health")
