@@ -16,6 +16,7 @@ router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 PATCHABLE_FIELDS = {
     "stage", "kill_criteria", "distribution_channels", "concept_angles",
     "exit_checklist", "notes", "url", "category", "revenue_model", "status", "name",
+    "outcome", "mrr",
 }
 
 CAMEL_TO_SNAKE = {
@@ -68,6 +69,9 @@ def _serialize(p: Pipeline, posts: list[dict] | None = None) -> dict:
         "revenueModel": p.revenue_model,
         "status": p.status,
         "clusterMetrics": _format_cluster_metrics(p.cluster_metrics),
+        "outcome": p.outcome,
+        "mrr": p.mrr,
+        "outcomeNotedAt": p.outcome_noted_at.isoformat() if p.outcome_noted_at else None,
         "launchedAt": p.launched_at.isoformat() if p.launched_at else None,
         "removedAt": p.removed_at.isoformat() if p.removed_at else None,
         "createdAt": p.created_at.isoformat() if p.created_at else None,
@@ -94,6 +98,13 @@ def _serialize_signal_post(o: Opportunity) -> dict:
         "sentimentScore": o.sentiment_score,
         "wtpConfidence": o.wtp_confidence,
         "workaroundConfidence": o.workaround_confidence,
+        "painScore": o.pain_score,
+        "urgencyScore": o.urgency_score,
+        "commercialIntentScore": o.commercial_intent_score,
+        "solutionSeekingScore": o.solution_seeking_score,
+        "signalStrength": o.signal_strength,
+        "signalReason": o.signal_reason,
+        "industryCategory": o.industry_category,
         "numComments": o.num_comments,
         "createdAt": o.created_at.isoformat() if o.created_at else None,
     }
@@ -261,6 +272,8 @@ class PatchPipelineBody(BaseModel):
     revenue_model: Optional[str] = None
     status: Optional[str] = None
     name: Optional[str] = None
+    outcome: Optional[str] = None
+    mrr: Optional[float] = None
     post_ids: Optional[list[str]] = None
 
 
@@ -349,6 +362,10 @@ async def get_pipeline_signal(
         "avgSignalScore": _avg([p.signal_score for p in posts]),
         "avgWtpConfidence": _avg([p.wtp_confidence for p in posts]),
         "avgWorkaroundConfidence": _avg([p.workaround_confidence for p in posts]),
+        "avgPainScore": _avg([p.pain_score for p in posts]),
+        "avgUrgencyScore": _avg([p.urgency_score for p in posts]),
+        "avgCommercialIntentScore": _avg([p.commercial_intent_score for p in posts]),
+        "avgSolutionSeekingScore": _avg([p.solution_seeking_score for p in posts]),
     }
 
     cluster_payload = None
@@ -445,6 +462,8 @@ async def patch_pipeline(
 
     for field, value in updates.items():
         setattr(card, field, value)
+    if "outcome" in updates or "mrr" in updates:
+        card.outcome_noted_at = datetime.now(timezone.utc)
     card.updated_at = datetime.now(timezone.utc)
 
     await db.commit()

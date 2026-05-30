@@ -3,7 +3,7 @@ from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
 from app.auth import get_uid
-from app.models import Cluster, ClusterSnapshot, Opportunity
+from app.models import Cluster, ClusterSnapshot, Opportunity, ClusterMember, SourcePost
 
 router = APIRouter(prefix="/clusters", tags=["clusters"])
 
@@ -93,6 +93,23 @@ def _serialize_cluster(c: Cluster, post_count: int | None, signals: dict) -> dic
         "growthRateWow": c.growth_rate_wow,
         "growthRateMom": c.growth_rate_mom,
         "postVelocity": c.post_velocity,
+        "growthAcceleration": c.growth_acceleration,
+        "status": c.status,
+        "description": c.description,
+        "primaryDomain": c.primary_domain,
+        "audienceType": c.audience_type,
+        "problemCategory": c.problem_category,
+        "monetizationCategory": c.monetization_category,
+        "authorCount": c.author_count,
+        "communityCount": c.community_count,
+        "avgPainScore": c.avg_pain_score,
+        "avgUrgencyScore": c.avg_urgency_score,
+        "avgCommercialIntentScore": c.avg_commercial_intent_score,
+        "avgSolutionSeekingScore": c.avg_solution_seeking_score,
+        "revenuePotentialScore": c.revenue_potential_score,
+        "competitionScore": c.competition_score,
+        "saturationScore": c.saturation_score,
+        "confidenceScore": c.confidence_score,
         "signals": signals,
     }
 
@@ -259,5 +276,55 @@ async def get_cluster_snapshots(
                 "samplePosts": s.sample_posts or [],
             }
             for s in snapshots
+        ],
+    }
+
+
+@router.get("/{cluster_id}/members")
+async def get_cluster_members(
+    cluster_id: int,
+    page: int = Query(1, ge=1),
+    pageSize: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Posts belonging to a cluster via the universal cluster_members join."""
+    offset = (page - 1) * pageSize
+    result = await db.execute(
+        select(ClusterMember, SourcePost)
+        .join(SourcePost, ClusterMember.source_post_id == SourcePost.id, isouter=True)
+        .where(ClusterMember.cluster_id == cluster_id)
+        .order_by(ClusterMember.created_at.desc())
+        .offset(offset)
+        .limit(pageSize)
+    )
+    rows = result.all()
+    total = await db.scalar(
+        select(func.count()).select_from(ClusterMember).where(ClusterMember.cluster_id == cluster_id)
+    )
+
+    return {
+        "clusterId": cluster_id,
+        "page": page,
+        "pageSize": pageSize,
+        "total": total,
+        "data": [
+            {
+                "id": m.id,
+                "sourcePostId": m.source_post_id,
+                "similarityScore": m.similarity_score,
+                "membershipConfidence": m.membership_confidence,
+                "assignedBy": m.assigned_by,
+                "modelVersion": m.model_version,
+                "post": {
+                    "title": sp.title,
+                    "url": sp.url,
+                    "source": sp.source,
+                    "sourceCommunityId": sp.source_community_id,
+                    "score": sp.score,
+                    "numComments": sp.num_comments,
+                } if sp else None,
+            }
+            for m, sp in rows
         ],
     }

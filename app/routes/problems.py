@@ -1,4 +1,5 @@
 import math
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
@@ -19,6 +20,24 @@ DEFAULT_SIMILAR_POSTS = 10
 MAX_SIMILAR_POSTS = 25
 
 
+def _bucket(score: float | None) -> str | None:
+    if score is None:
+        return None
+    if score >= 0.66:
+        return "high"
+    if score >= 0.33:
+        return "medium"
+    return "low"
+
+
+def _is_uuid(value) -> bool:
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
 def _serialize(p: Problem) -> dict:
     return {
         "id": p.id,
@@ -29,6 +48,13 @@ def _serialize(p: Problem) -> dict:
         "sourcePostId": p.source_post_id,
         "position": p.position,
         "embeddingReady": p.embedding is not None,
+        "painLevel": p.pain_level,
+        "urgencyLevel": p.urgency_level,
+        "frequencyScore": p.frequency_score,
+        "solutionSeekingScore": p.solution_seeking_score,
+        "currentAlternatives": p.current_alternatives,
+        "willingnessToPaySignal": p.willingness_to_pay_signal,
+        "buyerType": p.buyer_type,
         "createdAt": p.created_at.isoformat() if p.created_at else None,
         "updatedAt": p.updated_at.isoformat() if p.updated_at else None,
     }
@@ -86,6 +112,13 @@ class PatchProblemBody(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     position: Optional[int] = None
+    pain_level: Optional[str] = None
+    urgency_level: Optional[str] = None
+    frequency_score: Optional[float] = None
+    solution_seeking_score: Optional[float] = None
+    current_alternatives: Optional[str] = None
+    willingness_to_pay_signal: Optional[str] = None
+    buyer_type: Optional[str] = None
 
 
 @router.get("")
@@ -199,6 +232,20 @@ async def create_problem(
         description=body.description,
         source_post_id=body.source_post_id,
     )
+
+    # Pre-populate signal fields from the linked opportunity (Decision #4);
+    # the user can edit them afterward via PATCH.
+    if body.source_post_id and _is_uuid(body.source_post_id):
+        opp = (await db.execute(
+            select(Opportunity).where(Opportunity.id == body.source_post_id)
+        )).scalar_one_or_none()
+        if opp:
+            problem.pain_level = _bucket(opp.pain_score)
+            problem.urgency_level = _bucket(opp.urgency_score)
+            problem.willingness_to_pay_signal = _bucket(opp.wtp_confidence)
+            problem.solution_seeking_score = opp.solution_seeking_score
+            problem.buyer_type = opp.buyer_persona
+
     db.add(problem)
     await db.commit()
     await db.refresh(problem)

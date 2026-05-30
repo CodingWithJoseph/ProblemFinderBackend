@@ -9,3 +9,6 @@ stripe
 openai
 httpx
 pgvector
+pytest
+pytest-asyncio
+aiosqlite
