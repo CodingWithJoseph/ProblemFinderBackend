@@ -67,6 +67,16 @@ def ai_clusters_allowed(plan: PlanEnum) -> bool:
     return bool(limit_for(plan, "ai_clusters"))
 
 
+def is_pro_plus(plan: PlanEnum) -> bool:
+    """True for paid tiers (pro / elite / admin); False for free."""
+    return plan != PlanEnum.free
+
+
+def is_elite(plan: PlanEnum) -> bool:
+    """True only for the elite (and admin) tier."""
+    return plan in (PlanEnum.elite, PlanEnum.admin)
+
+
 async def get_plan(uid: str, db: AsyncSession) -> PlanEnum:
     res = await db.execute(select(Subscription).where(Subscription.uid == uid))
     sub = res.scalar_one_or_none()

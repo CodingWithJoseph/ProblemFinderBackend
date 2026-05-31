@@ -149,6 +149,10 @@ class Cluster(Base):
     saturation_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     confidence_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # --- Task 3: auto-generated founder brief (see migration 0006) ---
+    opportunity_brief: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    brief_generated_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    brief_model_version: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ClusterSnapshot(Base):
