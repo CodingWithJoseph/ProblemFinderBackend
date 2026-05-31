@@ -34,6 +34,13 @@ CAMEL_TO_SNAKE = {
     "name": "name",
 }
 
+# Canonical pipeline stages, in progression order. "watching" is the backlog —
+# clusters the user is monitoring but not actively pursuing — and is the first
+# stage, before "discovery". Terminal states (launched / archived) are tracked
+# via launched_at / removed_at rather than as stage values.
+PIPELINE_STAGES = ("watching", "discovery", "exploring", "validating", "building")
+VALID_STAGES = frozenset(PIPELINE_STAGES)
+
 INTENSITY_MAP = {"low": 1.0, "medium": 2.0, "high": 3.0}
 MAX_COHERENCE_POSTS = 50
 
@@ -466,6 +473,13 @@ async def patch_pipeline(
         raise HTTPException(status_code=404, detail="Pipeline card not found")
 
     updates = body.model_dump(exclude_none=True)
+
+    if "stage" in updates and updates["stage"] not in VALID_STAGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid stage '{updates['stage']}'. Must be one of: {', '.join(PIPELINE_STAGES)}",
+        )
+
     post_ids_changed = "post_ids" in updates
 
     for field, value in updates.items():
