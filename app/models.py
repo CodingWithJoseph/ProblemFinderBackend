@@ -75,6 +75,9 @@ class Opportunity(Base):
     top_comments: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     signal_strength: Mapped[str | None] = mapped_column(Text, nullable=True)
     signal_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Per-post intent (venting / seeking / workaround / purchase_intent /
+    # cost_complaint), set by the AI scoring pipeline. See migration 0004.
+    post_intent: Mapped[str | None] = mapped_column(Text, nullable=True)
     industry_category: Mapped[str | None] = mapped_column(Text, nullable=True)
     pain_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     urgency_score: Mapped[float | None] = mapped_column(Float, nullable=True)
