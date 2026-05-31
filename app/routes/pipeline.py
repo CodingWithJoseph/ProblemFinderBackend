@@ -112,6 +112,7 @@ def _serialize_signal_post(o: Opportunity) -> dict:
         "solutionSeekingScore": o.solution_seeking_score,
         "signalStrength": o.signal_strength,
         "signalReason": o.signal_reason,
+        "postIntent": o.post_intent,
         "industryCategory": o.industry_category,
         "numComments": o.num_comments,
         "createdAt": o.created_at.isoformat() if o.created_at else None,
