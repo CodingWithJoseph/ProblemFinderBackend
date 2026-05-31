@@ -1,8 +1,10 @@
+import csv
+import io
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
 import math
 import random
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query, Response
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
@@ -43,6 +45,41 @@ VALID_STAGES = frozenset(PIPELINE_STAGES)
 
 INTENSITY_MAP = {"low": 1.0, "medium": 2.0, "high": 3.0}
 MAX_COHERENCE_POSTS = 50
+
+EXPORT_CSV_COLUMNS = (
+    "pipeline_id",
+    "pipeline_name",
+    "pipeline_stage",
+    "source_cluster_id",
+    "cluster_id",
+    "cluster_name",
+    "post_id",
+    "title",
+    "description",
+    "source",
+    "source_url",
+    "domain",
+    "author",
+    "signal_score",
+    "wtp_signal",
+    "workaround_boolean",
+    "intensity",
+    "sentiment",
+    "intensity_score",
+    "sentiment_score",
+    "wtp_confidence",
+    "workaround_confidence",
+    "pain_score",
+    "urgency_score",
+    "commercial_intent_score",
+    "solution_seeking_score",
+    "signal_strength",
+    "signal_reason",
+    "post_intent",
+    "industry_category",
+    "num_comments",
+    "created_at",
+)
 
 
 def _format_cluster_metrics(raw: dict | None) -> dict | None:
@@ -117,6 +154,159 @@ def _serialize_signal_post(o: Opportunity) -> dict:
         "numComments": o.num_comments,
         "createdAt": o.created_at.isoformat() if o.created_at else None,
     }
+
+
+def _avg(values: list) -> float | None:
+    vals = [v for v in values if v is not None]
+    return round(sum(vals) / len(vals), 4) if vals else None
+
+
+def _serialize_signal_cluster(cluster: Cluster | None) -> dict | None:
+    if not cluster:
+        return None
+    return {
+        "id": cluster.id,
+        "name": cluster.name,
+        "signalScore": cluster.signal_score,
+        "trending": cluster.trending,
+        "growthRateWow": cluster.growth_rate_wow,
+        "growthRateMom": cluster.growth_rate_mom,
+        "postVelocity": cluster.post_velocity,
+    }
+
+
+def _build_signal_metrics(posts: list[Opportunity]) -> dict:
+    count = len(posts)
+    return {
+        "postCount": count,
+        "wtpRate": round(sum(1 for p in posts if p.wtp_signal) / count, 4) if count else None,
+        "workaroundRate": round(sum(1 for p in posts if p.workaround_boolean) / count, 4) if count else None,
+        "avgIntensityScore": _avg([p.intensity_score for p in posts]),
+        "avgSentimentScore": _avg([p.sentiment_score for p in posts]),
+        "avgSignalScore": _avg([p.signal_score for p in posts]),
+        "avgWtpConfidence": _avg([p.wtp_confidence for p in posts]),
+        "avgWorkaroundConfidence": _avg([p.workaround_confidence for p in posts]),
+        "avgPainScore": _avg([p.pain_score for p in posts]),
+        "avgUrgencyScore": _avg([p.urgency_score for p in posts]),
+        "avgCommercialIntentScore": _avg([p.commercial_intent_score for p in posts]),
+        "avgSolutionSeekingScore": _avg([p.solution_seeking_score for p in posts]),
+    }
+
+
+async def _load_pipeline_signal_data(
+    pipeline_id: str,
+    db: AsyncSession,
+    uid: str,
+) -> tuple[Pipeline, dict | None, dict, list[Opportunity]]:
+    result = await db.execute(
+        select(Pipeline).where(Pipeline.id == pipeline_id, Pipeline.user_id == uid)
+    )
+    card = result.scalar_one_or_none()
+    if not card:
+        raise HTTPException(status_code=404, detail="Pipeline card not found")
+
+    # source_cluster_id is stored as text; system cluster ids are integers.
+    cluster = None
+    cluster_int_id: int | None = None
+    if card.source_cluster_id:
+        try:
+            cluster_int_id = int(card.source_cluster_id)
+        except (TypeError, ValueError):
+            cluster_int_id = None
+
+    if cluster_int_id is not None:
+        cluster_result = await db.execute(select(Cluster).where(Cluster.id == cluster_int_id))
+        cluster = cluster_result.scalar_one_or_none()
+
+    # Full cluster view: ALL posts in the cluster; fall back to the card's post_ids.
+    if cluster_int_id is not None:
+        posts_result = await db.execute(
+            select(Opportunity)
+            .where(Opportunity.cluster_id == cluster_int_id, Opportunity.deleted_at == None)
+            .order_by(Opportunity.signal_score.desc().nullslast())
+        )
+        posts = list(posts_result.scalars().all())
+    elif card.post_ids:
+        posts_result = await db.execute(
+            select(Opportunity)
+            .where(Opportunity.id.in_(card.post_ids), Opportunity.deleted_at == None)
+            .order_by(Opportunity.signal_score.desc().nullslast())
+        )
+        posts = list(posts_result.scalars().all())
+    else:
+        posts = []
+
+    return card, _serialize_signal_cluster(cluster), _build_signal_metrics(posts), posts
+
+
+def _serialize_pipeline_signal_payload(
+    card: Pipeline,
+    cluster_payload: dict | None,
+    metrics: dict,
+    posts: list[Opportunity],
+) -> dict:
+    return {
+        "pipeline": {
+            "id": card.id,
+            "name": card.name,
+            "notes": card.notes,
+            "sourceClusterId": card.source_cluster_id,
+            "stage": card.stage,
+        },
+        "cluster": cluster_payload,
+        "metrics": metrics,
+        "posts": [_serialize_signal_post(p) for p in posts],
+    }
+
+
+def _csv_value(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
+def _build_signal_csv(card: Pipeline, cluster_payload: dict | None, posts: list[Opportunity]) -> str:
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=EXPORT_CSV_COLUMNS)
+    writer.writeheader()
+
+    for post in posts:
+        writer.writerow({
+            "pipeline_id": card.id,
+            "pipeline_name": card.name,
+            "pipeline_stage": card.stage,
+            "source_cluster_id": card.source_cluster_id,
+            "cluster_id": cluster_payload.get("id") if cluster_payload else None,
+            "cluster_name": cluster_payload.get("name") if cluster_payload else None,
+            "post_id": post.id,
+            "title": post.title,
+            "description": post.description,
+            "source": post.source,
+            "source_url": post.source_url,
+            "domain": post.domain,
+            "author": post.author,
+            "signal_score": post.signal_score,
+            "wtp_signal": post.wtp_signal,
+            "workaround_boolean": post.workaround_boolean,
+            "intensity": post.intensity,
+            "sentiment": post.sentiment,
+            "intensity_score": post.intensity_score,
+            "sentiment_score": post.sentiment_score,
+            "wtp_confidence": post.wtp_confidence,
+            "workaround_confidence": post.workaround_confidence,
+            "pain_score": post.pain_score,
+            "urgency_score": post.urgency_score,
+            "commercial_intent_score": post.commercial_intent_score,
+            "solution_seeking_score": post.solution_seeking_score,
+            "signal_strength": post.signal_strength,
+            "signal_reason": post.signal_reason,
+            "post_intent": post.post_intent,
+            "industry_category": post.industry_category,
+            "num_comments": post.num_comments,
+            "created_at": _csv_value(post.created_at),
+        })
+
+    return output.getvalue()
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -319,88 +509,31 @@ async def get_pipeline_signal(
     pipeline's source_cluster_id; falls back to the card's post_ids if there is
     no system cluster behind it.
     """
-    result = await db.execute(
-        select(Pipeline).where(Pipeline.id == pipeline_id, Pipeline.user_id == uid)
-    )
-    card = result.scalar_one_or_none()
-    if not card:
-        raise HTTPException(status_code=404, detail="Pipeline card not found")
+    card, cluster_payload, metrics, posts = await _load_pipeline_signal_data(pipeline_id, db, uid)
+    return _serialize_pipeline_signal_payload(card, cluster_payload, metrics, posts)
 
-    # source_cluster_id is stored as text; system cluster ids are integers.
-    cluster = None
-    cluster_int_id: int | None = None
-    if card.source_cluster_id:
-        try:
-            cluster_int_id = int(card.source_cluster_id)
-        except (TypeError, ValueError):
-            cluster_int_id = None
 
-    if cluster_int_id is not None:
-        cluster_result = await db.execute(select(Cluster).where(Cluster.id == cluster_int_id))
-        cluster = cluster_result.scalar_one_or_none()
+@router.get("/{pipeline_id}/export")
+async def export_pipeline_signal(
+    pipeline_id: str,
+    export_format: Literal["csv", "json"] = Query("csv", alias="format"),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Export the signal dataset backing the Signal workspace."""
+    card, cluster_payload, metrics, posts = await _load_pipeline_signal_data(pipeline_id, db, uid)
 
-    # Full cluster view: ALL posts in the cluster; fall back to the card's post_ids.
-    if cluster_int_id is not None:
-        posts_result = await db.execute(
-            select(Opportunity)
-            .where(Opportunity.cluster_id == cluster_int_id, Opportunity.deleted_at == None)
-            .order_by(Opportunity.signal_score.desc().nullslast())
-        )
-        posts = list(posts_result.scalars().all())
-    elif card.post_ids:
-        posts_result = await db.execute(
-            select(Opportunity)
-            .where(Opportunity.id.in_(card.post_ids), Opportunity.deleted_at == None)
-            .order_by(Opportunity.signal_score.desc().nullslast())
-        )
-        posts = list(posts_result.scalars().all())
-    else:
-        posts = []
+    if export_format == "json":
+        return _serialize_pipeline_signal_payload(card, cluster_payload, metrics, posts)
 
-    def _avg(values: list) -> float | None:
-        vals = [v for v in values if v is not None]
-        return round(sum(vals) / len(vals), 4) if vals else None
-
-    count = len(posts)
-    metrics = {
-        "postCount": count,
-        "wtpRate": round(sum(1 for p in posts if p.wtp_signal) / count, 4) if count else None,
-        "workaroundRate": round(sum(1 for p in posts if p.workaround_boolean) / count, 4) if count else None,
-        "avgIntensityScore": _avg([p.intensity_score for p in posts]),
-        "avgSentimentScore": _avg([p.sentiment_score for p in posts]),
-        "avgSignalScore": _avg([p.signal_score for p in posts]),
-        "avgWtpConfidence": _avg([p.wtp_confidence for p in posts]),
-        "avgWorkaroundConfidence": _avg([p.workaround_confidence for p in posts]),
-        "avgPainScore": _avg([p.pain_score for p in posts]),
-        "avgUrgencyScore": _avg([p.urgency_score for p in posts]),
-        "avgCommercialIntentScore": _avg([p.commercial_intent_score for p in posts]),
-        "avgSolutionSeekingScore": _avg([p.solution_seeking_score for p in posts]),
-    }
-
-    cluster_payload = None
-    if cluster:
-        cluster_payload = {
-            "id": cluster.id,
-            "name": cluster.name,
-            "signalScore": cluster.signal_score,
-            "trending": cluster.trending,
-            "growthRateWow": cluster.growth_rate_wow,
-            "growthRateMom": cluster.growth_rate_mom,
-            "postVelocity": cluster.post_velocity,
-        }
-
-    return {
-        "pipeline": {
-            "id": card.id,
-            "name": card.name,
-            "notes": card.notes,
-            "sourceClusterId": card.source_cluster_id,
-            "stage": card.stage,
+    csv_body = _build_signal_csv(card, cluster_payload, posts)
+    return Response(
+        content=csv_body,
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="problemfinder-{pipeline_id}-signals.csv"',
         },
-        "cluster": cluster_payload,
-        "metrics": metrics,
-        "posts": [_serialize_signal_post(p) for p in posts],
-    }
+    )
 
 
 @router.post("")
