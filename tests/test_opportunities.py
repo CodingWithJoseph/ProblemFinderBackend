@@ -5,9 +5,12 @@ intensityScore, sentimentScore, wtpConfidence, workaroundConfidence) and inline
 cluster growth fields.
 """
 
+import uuid
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 from app.routes import opportunities as opp_module
+from app.models import PlanEnum, UserFlag
 from conftest import (
     FakeResult,
     make_opportunity,
@@ -17,7 +20,6 @@ from conftest import (
     opportunity_row,
     embedding_response,
 )
-from app.models import PlanEnum
 
 SIGNAL_FIELDS = [
     "signalScore",
@@ -134,3 +136,95 @@ async def test_search_returns_signal_fields(client, fake_db, auth_headers, monke
         assert field in item
     assert item["signalScore"] == 72.0
     assert item["intensityScore"] == 0.67
+
+
+async def test_flag_opportunity_creates_user_flag(client, fake_db, auth_headers):
+    opp = make_opportunity()
+    pipeline_id = str(uuid.uuid4())
+    fake_db.stub(
+        execute=[
+            FakeResult(rows=[opp]),     # opportunity lookup
+            FakeResult(rows=[]),        # no existing flag
+        ]
+    )
+
+    resp = await client.post(
+        f"/opportunities/{opp.id}/flag",
+        headers=auth_headers,
+        json={"reason": "irrelevant", "note": "Not a real problem", "pipeline_id": pipeline_id},
+    )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["opportunityId"] == opp.id
+    assert data["pipelineId"] == pipeline_id
+    assert data["reason"] == "irrelevant"
+    assert data["note"] == "Not a real problem"
+    assert data["hidden"] is True
+    assert len(fake_db.added) == 1
+    assert fake_db.commit_count == 1
+
+
+async def test_flag_opportunity_updates_existing_flag(client, fake_db, auth_headers):
+    opp = make_opportunity()
+    existing = UserFlag(
+        id=str(uuid.uuid4()),
+        user_id="test-uid",
+        opportunity_id=opp.id,
+        reason="spam",
+        note=None,
+        hidden=True,
+        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+    )
+    fake_db.stub(
+        execute=[
+            FakeResult(rows=[opp]),         # opportunity lookup
+            FakeResult(rows=[existing]),    # existing flag
+        ]
+    )
+
+    resp = await client.post(
+        f"/opportunities/{opp.id}/flag",
+        headers=auth_headers,
+        json={"reason": "duplicate", "note": "Already covered", "hidden": False},
+    )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["reason"] == "duplicate"
+    assert data["note"] == "Already covered"
+    assert data["hidden"] is False
+    assert existing.reason == "duplicate"
+    assert len(fake_db.added) == 0
+
+
+async def test_flag_opportunity_not_found(client, fake_db, auth_headers):
+    fake_db.stub(execute=[FakeResult(rows=[])])  # opportunity lookup
+    resp = await client.post(
+        "/opportunities/44444444-4444-4444-4444-444444444444/flag",
+        headers=auth_headers,
+        json={"reason": "irrelevant"},
+    )
+    assert resp.status_code == 404
+
+
+async def test_clear_opportunity_flag_deletes_existing_flag(client, fake_db, auth_headers):
+    existing = UserFlag(
+        id=str(uuid.uuid4()),
+        user_id="test-uid",
+        opportunity_id="44444444-4444-4444-4444-444444444444",
+        reason="irrelevant",
+        hidden=True,
+        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+    )
+    fake_db.stub(execute=[FakeResult(rows=[existing])])
+
+    resp = await client.delete(
+        "/opportunities/44444444-4444-4444-4444-444444444444/flag",
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"success": True}
+    assert fake_db.deleted == [existing]
+    assert fake_db.commit_count == 1

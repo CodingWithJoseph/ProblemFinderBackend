@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime, timezone
+from typing import Literal
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy import select, func, cast, Date, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,7 +8,7 @@ from pydantic import BaseModel
 from app.db import get_db
 from app.auth import get_uid
 from app.openai_client import openai_client
-from app.models import Opportunity, SearchUsage, Subscription, PlanEnum, Cluster, ClusterSnapshot, Problem, Pipeline
+from app.models import Opportunity, SearchUsage, Subscription, PlanEnum, Cluster, ClusterSnapshot, Problem, Pipeline, UserFlag
 from app.limits import enforce_search_limit
 from app.anthropic_client import generate_next_step
 
@@ -80,6 +81,19 @@ def _serialize_cluster_inline(c: Cluster, post_count: int | None) -> dict:
         "growthRateWow": c.growth_rate_wow,
         "growthRateMom": c.growth_rate_mom,
         "postVelocity": c.post_velocity,
+    }
+
+
+def _serialize_flag(flag: UserFlag) -> dict:
+    return {
+        "id": flag.id,
+        "opportunityId": flag.opportunity_id,
+        "pipelineId": flag.pipeline_id,
+        "reason": flag.reason,
+        "note": flag.note,
+        "hidden": flag.hidden,
+        "createdAt": flag.created_at.isoformat() if flag.created_at else None,
+        "updatedAt": flag.updated_at.isoformat() if flag.updated_at else None,
     }
 
 
@@ -363,6 +377,82 @@ async def search_opportunities(
 
 class PipelineActionRequest(BaseModel):
     action: str  # "add" | "remove" | "launch"
+
+
+class FlagOpportunityRequest(BaseModel):
+    reason: Literal["irrelevant", "duplicate", "low_quality", "spam", "other"]
+    note: str | None = None
+    pipeline_id: str | None = None
+    hidden: bool = True
+
+
+@router.post("/{opportunity_id}/flag")
+async def flag_opportunity(
+    opportunity_id: str,
+    body: FlagOpportunityRequest,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    opportunity = (await db.execute(
+        select(Opportunity).where(
+            Opportunity.id == opportunity_id,
+            Opportunity.deleted_at == None,
+        )
+    )).scalar_one_or_none()
+    if not opportunity:
+        raise HTTPException(status_code=404, detail="Opportunity not found")
+
+    existing = (await db.execute(
+        select(UserFlag).where(
+            UserFlag.user_id == uid,
+            UserFlag.opportunity_id == opportunity_id,
+        )
+    )).scalar_one_or_none()
+
+    now = datetime.now(timezone.utc)
+    if existing:
+        existing.reason = body.reason
+        existing.note = body.note
+        existing.pipeline_id = body.pipeline_id
+        existing.hidden = body.hidden
+        existing.updated_at = now
+        flag = existing
+    else:
+        flag = UserFlag(
+            user_id=uid,
+            opportunity_id=opportunity_id,
+            pipeline_id=body.pipeline_id,
+            reason=body.reason,
+            note=body.note,
+            hidden=body.hidden,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(flag)
+
+    await db.commit()
+    await db.refresh(flag)
+    return {"data": _serialize_flag(flag)}
+
+
+@router.delete("/{opportunity_id}/flag")
+async def clear_opportunity_flag(
+    opportunity_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    flag = (await db.execute(
+        select(UserFlag).where(
+            UserFlag.user_id == uid,
+            UserFlag.opportunity_id == opportunity_id,
+        )
+    )).scalar_one_or_none()
+    if not flag:
+        raise HTTPException(status_code=404, detail="Flag not found")
+
+    await db.delete(flag)
+    await db.commit()
+    return {"success": True}
 
 
 @router.post("/{opportunity_id}/pipeline-action")
