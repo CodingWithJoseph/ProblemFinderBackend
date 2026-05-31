@@ -1,14 +1,19 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
 from app.auth import get_uid
 from app.models import Cluster, ClusterSnapshot, Opportunity, ClusterMember, SourcePost
-from app.limits import get_plan, ai_clusters_allowed, LimitReached
+from app.limits import get_plan, ai_clusters_allowed, is_pro_plus, LimitReached
+from app.brief import assemble_brief, new_meta, momentum_from_growth
+from app.anthropic_client import generate_opportunity_brief, brief_model_version
 
 router = APIRouter(prefix="/clusters", tags=["clusters"])
 
 SUFFICIENT_HISTORY_DAYS = 7
+BRIEF_TOP_POSTS = 8
 
 
 async def _get_signal_aggregations(cluster_id: int, db: AsyncSession) -> dict:

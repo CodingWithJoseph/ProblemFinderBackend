@@ -57,3 +57,36 @@ async def generate_next_step(context: str) -> str | None:
     except Exception as exc:  # never let an advisory feature break the request
         print(f"anthropic generate_next_step failed: {exc}")
         return None
+
+
+def brief_model_version() -> str:
+    """The model string briefs are stamped with (for brief_model_version)."""
+    return _settings.anthropic_model
+
+
+async def generate_opportunity_brief(context: str) -> dict | None:
+    """Generate the qualitative OpportunityBrief content via Claude.
+
+    Returns the parsed content dict (see brief.parse_brief_content) or None when
+    Anthropic is not configured, the call fails, or the output is unparseable.
+    The static schema/system prompt is cached; the per-cluster context is volatile.
+    """
+    from app.brief import SYSTEM_PROMPT, parse_brief_content
+
+    client = _get_client()
+    if client is None:
+        return None
+    try:
+        message = await client.messages.create(
+            model=_settings.anthropic_model,
+            max_tokens=4096,
+            system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": context}],
+        )
+        text = "".join(
+            block.text for block in message.content if getattr(block, "type", None) == "text"
+        ).strip()
+        return parse_brief_content(text)
+    except Exception as exc:  # advisory feature — never break the request
+        print(f"anthropic generate_opportunity_brief failed: {exc}")
+        return None
