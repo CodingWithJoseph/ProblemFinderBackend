@@ -16,6 +16,117 @@ SUFFICIENT_HISTORY_DAYS = 7
 BRIEF_TOP_POSTS = 8
 
 
+def _iso(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat()
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _pct_to_score(value) -> int:
+    try:
+        raw = float(value)
+    except (TypeError, ValueError):
+        return 0
+    score = raw * 100 if raw <= 1 else raw
+    return max(0, min(100, round(score)))
+
+
+def _clamp_score(value) -> int:
+    try:
+        return max(0, min(100, round(float(value))))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _excerpt(title, description, limit: int = 240) -> str:
+    title = (title or "").strip()
+    body = (description or "").strip()
+    joined = f"{title} - {body}" if body else title
+    return joined[:limit].rstrip()
+
+
+def _brief_response(cluster: Cluster) -> dict:
+    return {
+        "clusterId": cluster.id,
+        "brief": cluster.opportunity_brief,
+        "generatedAt": _iso(cluster.brief_generated_at) or None,
+        "modelVersion": cluster.brief_model_version,
+    }
+
+
+def _build_brief_inputs(cluster: Cluster, posts: list[Opportunity]) -> tuple[dict, dict, float, float]:
+    total = len(posts)
+    wtp_count = sum(1 for p in posts if p.wtp_signal)
+    workaround_count = sum(1 for p in posts if p.workaround_boolean)
+    wtp_rate = round((wtp_count / total) * 100, 1) if total else 0.0
+    workaround_rate = round((workaround_count / total) * 100, 1) if total else 0.0
+
+    dates = sorted(_iso(p.created_at) for p in posts if p.created_at)
+    representative_posts = [
+        {
+            "source": p.source or "reddit",
+            "excerpt": _excerpt(p.title, p.description),
+            **({"url": p.source_url} if p.source_url else {}),
+            **({"score": round(float(p.signal_score), 1)} if p.signal_score is not None else {}),
+        }
+        for p in posts[:BRIEF_TOP_POSTS]
+    ]
+
+    evidence = {
+        "representativePosts": representative_posts,
+        "totalPostsAnalyzed": total,
+        "dateRange": {
+            "from": dates[0] if dates else "",
+            "to": dates[-1] if dates else "",
+        },
+    }
+    signal_strength = {
+        "painIntensity": _pct_to_score(cluster.avg_pain_score),
+        "urgency": _pct_to_score(cluster.avg_urgency_score),
+        "willingnessToPay": _clamp_score(wtp_rate),
+        "frequency": min(100, total),
+        "confidence": _pct_to_score(cluster.confidence_score) or 50,
+        "overallScore": _clamp_score(cluster.signal_score),
+    }
+    return evidence, signal_strength, wtp_rate, workaround_rate
+
+
+def _build_brief_context(
+    cluster: Cluster,
+    posts: list[Opportunity],
+    evidence: dict,
+    wtp_rate: float,
+    workaround_rate: float,
+) -> str:
+    lines = [
+        f"Cluster name: {cluster.name or 'Unnamed cluster'}",
+        f"Primary domain: {cluster.primary_domain or 'unknown'}",
+        f"Total posts analyzed: {evidence['totalPostsAnalyzed']}",
+        f"Overall signal score (0-100): {cluster.signal_score}",
+        f"Avg pain (0-1): {cluster.avg_pain_score}",
+        f"Avg urgency (0-1): {cluster.avg_urgency_score}",
+        f"Avg commercial intent (0-1): {cluster.avg_commercial_intent_score}",
+        f"Avg solution-seeking (0-1): {cluster.avg_solution_seeking_score}",
+        f"Willingness-to-pay rate: {wtp_rate}%",
+        f"Workaround rate: {workaround_rate}%",
+        f"Growth week-over-week: {cluster.growth_rate_wow}",
+        "",
+        "Top representative posts (highest signal first):",
+    ]
+    for i, p in enumerate(posts[:BRIEF_TOP_POSTS], 1):
+        lines.append(f"{i}. [signal {p.signal_score}] {(p.title or '').strip()}")
+        body = (p.description or "").strip()
+        if body:
+            lines.append(f"   {body[:300]}")
+    return "\n".join(lines)
+
+
 async def _get_signal_aggregations(cluster_id: int, db: AsyncSession) -> dict:
     """Compute signal distributions on-read from opportunities."""
     result = await db.execute(
@@ -117,6 +228,9 @@ def _serialize_cluster(c: Cluster, post_count: int | None, signals: dict) -> dic
         "saturationScore": c.saturation_score,
         "confidenceScore": c.confidence_score,
         "signals": signals,
+        "briefGeneratedAt": _iso(c.brief_generated_at) or None,
+        "briefModelVersion": c.brief_model_version,
+        "hasOpportunityBrief": c.opportunity_brief is not None,
     }
 
 
@@ -248,6 +362,81 @@ async def get_cluster(
         "pageSize": pageSize,
         "totalPosts": total_posts,
     }
+
+
+@router.get("/{cluster_id}/brief")
+async def get_cluster_brief(
+    cluster_id: int,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    result = await db.execute(select(Cluster).where(Cluster.id == cluster_id))
+    cluster = result.scalar_one_or_none()
+    if not cluster:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+    return _brief_response(cluster)
+
+
+@router.post("/{cluster_id}/brief/refresh")
+async def refresh_cluster_brief(
+    cluster_id: int,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    plan = await get_plan(uid, db)
+    if not is_pro_plus(plan):
+        raise LimitReached("opportunity_brief", plan, status_code=403)
+
+    result = await db.execute(select(Cluster).where(Cluster.id == cluster_id))
+    cluster = result.scalar_one_or_none()
+    if not cluster:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+
+    posts_result = await db.execute(
+        select(Opportunity)
+        .where(
+            Opportunity.cluster_id == cluster_id,
+            Opportunity.deleted_at == None,
+        )
+        .order_by(Opportunity.signal_score.desc().nullslast(), Opportunity.source_score.desc().nullslast())
+        .limit(500)
+    )
+    posts = list(posts_result.scalars().all())
+
+    snapshot_result = await db.execute(
+        select(ClusterSnapshot)
+        .where(ClusterSnapshot.cluster_id == cluster_id)
+        .order_by(ClusterSnapshot.date.desc())
+        .limit(1)
+    )
+    snapshot = snapshot_result.scalar_one_or_none()
+
+    evidence, signal_strength, wtp_rate, workaround_rate = _build_brief_inputs(cluster, posts)
+    context = _build_brief_context(cluster, posts, evidence, wtp_rate, workaround_rate)
+
+    content = await generate_opportunity_brief(context)
+    if content is None:
+        raise HTTPException(status_code=502, detail="Could not generate opportunity brief")
+
+    if cluster.growth_acceleration is not None or cluster.growth_rate_wow is not None:
+        content["momentum"] = momentum_from_growth(cluster.growth_acceleration, cluster.growth_rate_wow)
+
+    model = brief_model_version()
+    meta = new_meta(
+        cluster.id,
+        snapshot.id if snapshot else "",
+        model,
+        refreshed=cluster.opportunity_brief is not None,
+    )
+    brief = assemble_brief(content, meta=meta, evidence=evidence, signal_strength=signal_strength)
+    generated_at = datetime.fromisoformat(meta["generatedAt"])
+
+    cluster.opportunity_brief = brief
+    cluster.brief_generated_at = generated_at
+    cluster.brief_model_version = model
+
+    await db.commit()
+    return _brief_response(cluster)
 
 
 @router.get("/{cluster_id}/snapshots")
