@@ -5,6 +5,9 @@ with growth fields, the cluster's posts with full signal breakdown, and the
 aggregate metrics computed across those posts.
 """
 
+import csv
+import io
+
 from conftest import (
     FakeResult,
     make_pipeline,
@@ -81,6 +84,73 @@ async def test_pipeline_signal_not_found(client, fake_db, auth_headers):
     fake_db.stub(execute=[FakeResult(rows=[])])  # card lookup -> none
     resp = await client.get(
         "/pipeline/44444444-4444-4444-4444-444444444444/signal",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 404
+
+
+async def test_pipeline_export_csv_with_cluster_posts(client, fake_db, auth_headers):
+    card = make_pipeline(source_cluster_id="42", stage="validating")
+    cluster = make_cluster(id=42, name="Freelance invoicing pain")
+    opp = make_opportunity(
+        cluster_id=42,
+        title="CSV export should include quoted, useful data",
+        signal_score=91.25,
+        wtp_signal=True,
+        workaround_boolean=False,
+        industry_category="fintech",
+    )
+    fake_db.stub(
+        execute=[
+            FakeResult(rows=[card]),        # pipeline card lookup
+            FakeResult(rows=[cluster]),     # source cluster lookup
+            FakeResult(rows=[opp]),         # cluster posts
+        ]
+    )
+
+    resp = await client.get(f"/pipeline/{card.id}/export", headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/csv")
+    assert "problemfinder-" in resp.headers["content-disposition"]
+
+    rows = list(csv.DictReader(io.StringIO(resp.text)))
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["pipeline_id"] == card.id
+    assert row["pipeline_stage"] == "validating"
+    assert row["cluster_id"] == "42"
+    assert row["post_id"] == opp.id
+    assert row["title"] == "CSV export should include quoted, useful data"
+    assert row["signal_score"] == "91.25"
+    assert row["wtp_signal"] == "True"
+    assert row["industry_category"] == "fintech"
+
+
+async def test_pipeline_export_json_reuses_signal_shape(client, fake_db, auth_headers):
+    card = make_pipeline(source_cluster_id=None, post_ids=["a", "b"])
+    opp1 = make_opportunity(cluster_id=None, signal_score=80.0)
+    opp2 = make_opportunity(cluster_id=None, signal_score=60.0)
+    fake_db.stub(
+        execute=[
+            FakeResult(rows=[card]),            # pipeline card lookup
+            FakeResult(rows=[opp1, opp2]),      # posts by id
+        ]
+    )
+
+    resp = await client.get(f"/pipeline/{card.id}/export?format=json", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["pipeline"]["id"] == card.id
+    assert body["cluster"] is None
+    assert body["metrics"]["postCount"] == 2
+    assert body["metrics"]["avgSignalScore"] == 70.0
+    assert [post["id"] for post in body["posts"]] == [opp1.id, opp2.id]
+
+
+async def test_pipeline_export_not_found(client, fake_db, auth_headers):
+    fake_db.stub(execute=[FakeResult(rows=[])])  # card lookup -> none
+    resp = await client.get(
+        "/pipeline/44444444-4444-4444-4444-444444444444/export",
         headers=auth_headers,
     )
     assert resp.status_code == 404
