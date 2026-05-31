@@ -14,6 +14,7 @@ from app.routes.dashboard import router as dashboard_router
 from app.routes.revenue_signals import router as revenue_signals_router
 from app.routes.experiments import router as experiments_router
 from app.routes.domain_snapshots import router as domain_snapshots_router
+from app.routes.homepage import router as homepage_router
 
 load_dotenv()
 
@@ -45,6 +46,7 @@ app.include_router(dashboard_router)
 app.include_router(revenue_signals_router)
 app.include_router(experiments_router)
 app.include_router(domain_snapshots_router)
+app.include_router(homepage_router)
 
 
 register_limit_handler(app)

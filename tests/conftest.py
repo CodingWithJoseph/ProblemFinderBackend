@@ -73,6 +73,7 @@ from app.routes.clusters import router as clusters_router  # noqa: E402
 from app.routes.problems import router as problems_router  # noqa: E402
 from app.routes.pipeline import router as pipeline_router  # noqa: E402
 from app.routes.dashboard import router as dashboard_router  # noqa: E402
+from app.routes.homepage import router as homepage_router  # noqa: E402
 
 TEST_UID = "test-uid"
 
@@ -396,6 +397,7 @@ def app(fake_db):
     application.include_router(problems_router)
     application.include_router(pipeline_router)
     application.include_router(dashboard_router)
+    application.include_router(homepage_router)
 
     async def _get_db_override():
         yield fake_db
