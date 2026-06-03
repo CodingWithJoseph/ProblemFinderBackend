@@ -216,3 +216,121 @@ async def test_refresh_cluster_brief_allows_pro_and_stores_json(
     assert cluster.brief_generated_at is not None
     assert fake_db.commit_count == 1
     assert "Cluster name: Freelance invoicing pain" in captured["context"]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# BACKEND JOB 2 / 3: cluster-first search + browse
+# ──────────────────────────────────────────────────────────────────────────
+
+import uuid as _uuid
+from datetime import date as _date
+from app.models import SourcePost
+
+
+def _src_post(**kw):
+    defaults = dict(
+        id=str(_uuid.uuid4()),
+        source="reddit",
+        source_post_id="abc",
+        source_community_id="r/freelance",
+        title="Invoicing is painful",
+        body="chasing invoices all week",
+        url="https://reddit.com/r/freelance/1",
+        score=240,
+        num_comments=18,
+        noise_filter_reason="commercial_intent",
+        posted_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
+    )
+    defaults.update(kw)
+    return SourcePost(**defaults)
+
+
+async def test_cluster_search_returns_clusters_not_posts(client, fake_db, auth_headers):
+    cluster = make_cluster(id=42, name="Freelance invoicing pain", status="hot")
+    p1 = _src_post(score=240, source_community_id="r/freelance")
+    p2 = _src_post(score=90, source_community_id="r/smallbusiness")
+    fake_db.stub(
+        scalar=[1],  # total
+        execute=[
+            FakeResult(rows=[cluster]),                # clusters page
+            FakeResult(rows=[(42, p1), (42, p2)]),     # posts_by_cluster
+            FakeResult(rows=[]),                       # watched lookup (none)
+        ],
+    )
+
+    resp = await client.get("/clusters/search", params={"q": "invoic"}, headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    item = body["data"][0]
+    # Cluster shape, not a post: has name/post_count/sample_posts, no top-level post fields.
+    assert item["id"] == 42
+    assert item["name"] == "Freelance invoicing pain"
+    assert item["post_count"] == 2
+    assert item["trending_status"] == "hot"
+    assert set(item["subreddits"]) == {"r/freelance", "r/smallbusiness"}
+    # sample posts carry the post-level fields
+    assert item["sample_posts"][0]["reddit_score"] == 240
+    assert item["sample_posts"][0]["subreddit"] == "r/freelance"
+    assert item["sample_posts"][0]["noise_filter_reason"] == "commercial_intent"
+    # top_signal derived from most common noise_filter_reason
+    assert item["top_signal"] == "commercial_intent"
+    assert item["is_watched"] is False
+
+
+async def test_cluster_search_top_signal_null_when_no_reasons(client, fake_db, auth_headers):
+    cluster = make_cluster(id=5, name="No-signal cluster")
+    p1 = _src_post(noise_filter_reason=None)
+    fake_db.stub(
+        scalar=[1],
+        execute=[
+            FakeResult(rows=[cluster]),
+            FakeResult(rows=[(5, p1)]),
+            FakeResult(rows=[]),
+        ],
+    )
+    resp = await client.get("/clusters/search", params={"q": "signal"}, headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json()["data"][0]["top_signal"] is None
+
+
+async def test_cluster_search_is_watched_reflects_pipeline(client, fake_db, auth_headers):
+    cluster = make_cluster(id=42, name="Freelance invoicing pain")
+    p1 = _src_post()
+    fake_db.stub(
+        scalar=[1],
+        execute=[
+            FakeResult(rows=[cluster]),
+            FakeResult(rows=[(42, p1)]),
+            FakeResult(rows=[("42",)]),  # pipeline row -> source_cluster_id "42"
+        ],
+    )
+    resp = await client.get("/clusters/search", params={"q": "invoic"}, headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json()["data"][0]["is_watched"] is True
+
+
+async def test_cluster_search_min_length_enforced(client, fake_db, auth_headers):
+    resp = await client.get("/clusters/search", params={"q": "a"}, headers=auth_headers)
+    assert resp.status_code == 422
+
+
+async def test_cluster_search_filters_version_and_excludes_singletons(client, fake_db, auth_headers):
+    captured = []
+    orig_execute = fake_db.execute
+
+    async def _capture(statement, params=None):
+        captured.append(str(statement))
+        return await orig_execute(statement, params)
+
+    fake_db.execute = _capture
+    fake_db.stub(
+        scalar=[0],
+        execute=[FakeResult(rows=[]), FakeResult(rows=[]), FakeResult(rows=[])],
+    )
+    resp = await client.get("/clusters/search", params={"q": "invoic"}, headers=auth_headers)
+    assert resp.status_code == 200
+    main_query = captured[0]
+    # singleton clusters excluded + pipeline_version filter applied
+    assert "is_singleton" in main_query
+    assert "pipeline_version" in main_query
