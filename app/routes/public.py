@@ -184,7 +184,6 @@ async def public_cluster_detail(
         "data": {
             **_serialize_cluster(cluster, posts, SAMPLE_POST_COUNT),
             "description": cluster.description,
-            "primary_domain": cluster.primary_domain,
             "posts": [_serialize_post_full(p) for p in posts],
         }
     }

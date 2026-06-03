@@ -88,7 +88,6 @@ def _build_brief_context(
 ) -> str:
     lines = [
         f"Cluster name: {cluster.name or 'Unnamed cluster'}",
-        f"Primary domain: {cluster.primary_domain or 'unknown'}",
         f"Total posts analyzed: {evidence['totalPostsAnalyzed']}",
         f"Growth week-over-week: {cluster.growth_rate_wow}",
         "",
@@ -129,7 +128,6 @@ async def _get_latest_post_count(cluster_id: int, db: AsyncSession) -> int | Non
         select(ClusterSnapshot.post_count)
         .where(
             ClusterSnapshot.cluster_id == cluster_id,
-            ClusterSnapshot.pipeline_version == PIPELINE_VERSION,
         )
         .order_by(ClusterSnapshot.date.desc())
         .limit(1)
@@ -151,7 +149,6 @@ def _serialize_cluster(c: Cluster, post_count: int | None, signals: dict) -> dic
         "growthAcceleration": c.growth_acceleration,
         "status": c.status,
         "description": c.description,
-        "primaryDomain": c.primary_domain,
         "audienceType": c.audience_type,
         "problemCategory": c.problem_category,
         "monetizationCategory": c.monetization_category,
@@ -404,7 +401,6 @@ async def get_trending_clusters(
             select(ClusterSnapshot)
             .where(
                 ClusterSnapshot.cluster_id.in_(cluster_ids),
-                ClusterSnapshot.pipeline_version == PIPELINE_VERSION,
             )
             .distinct(ClusterSnapshot.cluster_id)
             .order_by(ClusterSnapshot.cluster_id, ClusterSnapshot.date.desc())
@@ -559,7 +555,6 @@ async def refresh_cluster_brief(
         select(ClusterSnapshot)
         .where(
             ClusterSnapshot.cluster_id == cluster_id,
-            ClusterSnapshot.pipeline_version == PIPELINE_VERSION,
         )
         .order_by(ClusterSnapshot.date.desc())
         .limit(1)
@@ -621,7 +616,6 @@ async def get_cluster_snapshots(
         select(ClusterSnapshot)
         .where(
             ClusterSnapshot.cluster_id == cluster_id,
-            ClusterSnapshot.pipeline_version == PIPELINE_VERSION,
         )
         .order_by(ClusterSnapshot.date.asc())
     )

@@ -58,7 +58,6 @@ def _serialize(o: Opportunity) -> dict:
         "marketSaturation": o.market_saturation,
         "recommendedNextStep": o.recommended_next_step,
         "topComments": o.top_comments,
-        "needsReview": o.needs_review,
     }
 
 
@@ -105,7 +104,6 @@ async def _build_cluster_map(opportunities: list[Opportunity], db: AsyncSession)
         select(ClusterSnapshot)
         .where(
             ClusterSnapshot.cluster_id.in_(cluster_ids),
-            ClusterSnapshot.pipeline_version == PIPELINE_VERSION,
         )
         .distinct(ClusterSnapshot.cluster_id)
         .order_by(ClusterSnapshot.cluster_id, ClusterSnapshot.date.desc())
@@ -324,7 +322,6 @@ async def search_opportunities(
             select(ClusterSnapshot)
             .where(
                 ClusterSnapshot.cluster_id.in_(cluster_search_ids),
-                ClusterSnapshot.pipeline_version == PIPELINE_VERSION,
             )
             .distinct(ClusterSnapshot.cluster_id)
             .order_by(ClusterSnapshot.cluster_id, ClusterSnapshot.date.desc())

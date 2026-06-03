@@ -61,9 +61,10 @@ class Opportunity(Base):
     launch_count: Mapped[int] = mapped_column(Integer, default=0)
     search_vector: Mapped[str | None] = mapped_column(TSVECTOR, nullable=True)
     # NOTE: hybrid_search RETURNS SETOF opportunities and the /search route
-    # rebuilds Opportunity(**row) from SELECT *. The reconstruction now filters
-    # the row down to mapped columns, so stale scoring columns still present in
-    # the DB (signal_score, pain_score, …) are ignored rather than passed in.
+    # rebuilds Opportunity(**row) from SELECT *. The reconstruction filters the
+    # row down to mapped columns, so live ``opportunities`` columns we don't map
+    # (embedding, noise_filter_*, opportunity_type/_domain, …) are ignored rather
+    # than passed in.
     top_comments: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     primary_problem: Mapped[str | None] = mapped_column(Text, nullable=True)
     target_audience: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -74,7 +75,6 @@ class Opportunity(Base):
     market_saturation: Mapped[str | None] = mapped_column(Text, nullable=True)
     revenue_potential_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     recommended_next_step: Mapped[str | None] = mapped_column(Text, nullable=True)
-    needs_review: Mapped[bool | None] = mapped_column(Boolean, default=False)
     model_version: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
 
@@ -135,7 +135,6 @@ class Cluster(Base):
     growth_rate_mom: Mapped[float | None] = mapped_column(Float, nullable=True)
     post_velocity: Mapped[float | None] = mapped_column(Float, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    primary_domain: Mapped[str | None] = mapped_column(Text, nullable=True)
     audience_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     problem_category: Mapped[str | None] = mapped_column(Text, nullable=True)
     monetization_category: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -160,7 +159,6 @@ class ClusterSnapshot(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     cluster_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    pipeline_version: Mapped[str | None] = mapped_column(Text, nullable=True)
     date: Mapped[date] = mapped_column(Date, nullable=False)
     post_count: Mapped[int] = mapped_column(Integer, nullable=False)
     sample_posts: Mapped[list | None] = mapped_column(JSONB, nullable=True)
@@ -290,19 +288,6 @@ class ClusterMember(Base):
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
-class ClusterScore(Base):
-    __tablename__ = "cluster_scores"
-
-    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
-    cluster_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    pipeline_version: Mapped[str | None] = mapped_column(Text, nullable=True)
-    score_type: Mapped[str] = mapped_column(Text, nullable=False)
-    score_value: Mapped[float | None] = mapped_column(Float, nullable=True)
-    score_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    model_version: Mapped[str | None] = mapped_column(Text, nullable=True)
-    calculated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
-
-
 class RevenueSignal(Base):
     __tablename__ = "revenue_signals"
 
@@ -359,33 +344,6 @@ class ExperimentResult(Base):
     cost: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
-
-
-class ModelRun(Base):
-    __tablename__ = "model_runs"
-
-    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
-    model_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    model_version: Mapped[str | None] = mapped_column(Text, nullable=True)
-    task_type: Mapped[str | None] = mapped_column(Text, nullable=True)
-    input_table: Mapped[str | None] = mapped_column(Text, nullable=True)
-    output_table: Mapped[str | None] = mapped_column(Text, nullable=True)
-    parameters: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
-    completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
-    status: Mapped[str] = mapped_column(Text, default="running")
-
-
-class TrainingExample(Base):
-    __tablename__ = "training_examples"
-
-    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
-    pipeline_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), nullable=True)
-    cluster_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
-    mrr: Mapped[float | None] = mapped_column(Float, nullable=True)
-    signal_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
