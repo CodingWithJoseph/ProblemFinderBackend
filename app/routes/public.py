@@ -244,29 +244,16 @@ async def compute_stats(db: AsyncSession) -> dict:
         .select_from(Cluster)
         .where(Cluster.pipeline_version == PIPELINE_VERSION)
     )
-    high_signal_count = await db.scalar(
-        select(func.count()).where(
-            Opportunity.deleted_at == None,
-            Opportunity.signal_score >= 50,
-            Opportunity.pipeline_version == PIPELINE_VERSION,
-        )
-    )
-    wtp_signal_count = await db.scalar(
-        select(func.count()).where(
-            Opportunity.deleted_at == None,
-            Opportunity.wtp_signal == True,
-            Opportunity.pipeline_version == PIPELINE_VERSION,
-        )
-    )
 
     opportunities_found = opportunity_count or 0
 
+    # highSignalOpportunities / wtpSignals were derived from the legacy
+    # signal_score / wtp_signal columns the simplified pipeline no longer
+    # writes (JOB 3), so they are no longer reported.
     return {
         "conversationsAnalyzed": source_post_count or opportunities_found,
         "clustersDetected": cluster_count or 0,
         "opportunitiesFound": opportunities_found,
-        "highSignalOpportunities": high_signal_count or 0,
-        "wtpSignals": wtp_signal_count or 0,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
     }
 

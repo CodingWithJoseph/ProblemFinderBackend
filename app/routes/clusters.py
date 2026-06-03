@@ -29,22 +29,6 @@ def _iso(value) -> str:
     return str(value)
 
 
-def _pct_to_score(value) -> int:
-    try:
-        raw = float(value)
-    except (TypeError, ValueError):
-        return 0
-    score = raw * 100 if raw <= 1 else raw
-    return max(0, min(100, round(score)))
-
-
-def _clamp_score(value) -> int:
-    try:
-        return max(0, min(100, round(float(value))))
-    except (TypeError, ValueError):
-        return 0
-
-
 def _excerpt(title, description, limit: int = 240) -> str:
     title = (title or "").strip()
     body = (description or "").strip()
@@ -61,12 +45,8 @@ def _brief_response(cluster: Cluster) -> dict:
     }
 
 
-def _build_brief_inputs(cluster: Cluster, posts: list[Opportunity]) -> tuple[dict, dict, float, float]:
+def _build_brief_inputs(cluster: Cluster, posts: list[Opportunity]) -> tuple[dict, dict]:
     total = len(posts)
-    wtp_count = sum(1 for p in posts if p.wtp_signal)
-    workaround_count = sum(1 for p in posts if p.workaround_boolean)
-    wtp_rate = round((wtp_count / total) * 100, 1) if total else 0.0
-    workaround_rate = round((workaround_count / total) * 100, 1) if total else 0.0
 
     dates = sorted(_iso(p.created_at) for p in posts if p.created_at)
     representative_posts = [
@@ -74,7 +54,7 @@ def _build_brief_inputs(cluster: Cluster, posts: list[Opportunity]) -> tuple[dic
             "source": p.source or "reddit",
             "excerpt": _excerpt(p.title, p.description),
             **({"url": p.source_url} if p.source_url else {}),
-            **({"score": round(float(p.signal_score), 1)} if p.signal_score is not None else {}),
+            **({"score": round(float(p.source_score), 1)} if p.source_score is not None else {}),
         }
         for p in posts[:BRIEF_TOP_POSTS]
     ]
@@ -87,41 +67,29 @@ def _build_brief_inputs(cluster: Cluster, posts: list[Opportunity]) -> tuple[dic
             "to": dates[-1] if dates else "",
         },
     }
+    # The simplified pipeline no longer produces pain/urgency/wtp scores; the
+    # only quantitative signal left is post frequency.
     signal_strength = {
-        "painIntensity": _pct_to_score(cluster.avg_pain_score),
-        "urgency": _pct_to_score(cluster.avg_urgency_score),
-        "willingnessToPay": _clamp_score(wtp_rate),
         "frequency": min(100, total),
-        "confidence": _pct_to_score(cluster.confidence_score) or 50,
-        "overallScore": _clamp_score(cluster.signal_score),
     }
-    return evidence, signal_strength, wtp_rate, workaround_rate
+    return evidence, signal_strength
 
 
 def _build_brief_context(
     cluster: Cluster,
     posts: list[Opportunity],
     evidence: dict,
-    wtp_rate: float,
-    workaround_rate: float,
 ) -> str:
     lines = [
         f"Cluster name: {cluster.name or 'Unnamed cluster'}",
         f"Primary domain: {cluster.primary_domain or 'unknown'}",
         f"Total posts analyzed: {evidence['totalPostsAnalyzed']}",
-        f"Overall signal score (0-100): {cluster.signal_score}",
-        f"Avg pain (0-1): {cluster.avg_pain_score}",
-        f"Avg urgency (0-1): {cluster.avg_urgency_score}",
-        f"Avg commercial intent (0-1): {cluster.avg_commercial_intent_score}",
-        f"Avg solution-seeking (0-1): {cluster.avg_solution_seeking_score}",
-        f"Willingness-to-pay rate: {wtp_rate}%",
-        f"Workaround rate: {workaround_rate}%",
         f"Growth week-over-week: {cluster.growth_rate_wow}",
         "",
-        "Top representative posts (highest signal first):",
+        "Top representative posts (most upvoted first):",
     ]
     for i, p in enumerate(posts[:BRIEF_TOP_POSTS], 1):
-        lines.append(f"{i}. [signal {p.signal_score}] {(p.title or '').strip()}")
+        lines.append(f"{i}. [score {p.source_score}] {(p.title or '').strip()}")
         body = (p.description or "").strip()
         if body:
             lines.append(f"   {body[:300]}")
@@ -129,19 +97,15 @@ def _build_brief_context(
 
 
 async def _get_signal_aggregations(cluster_id: int, db: AsyncSession) -> dict:
-    """Compute signal distributions on-read from opportunities."""
+    """Post-count aggregation on-read from opportunities.
+
+    The simplified pipeline no longer writes per-post scoring columns
+    (wtp/workaround/intensity/sentiment/domain), so the on-read signal
+    distribution is reduced to a post count.
+    """
     result = await db.execute(
         text("""
-            SELECT
-                COUNT(*)                                                        AS total,
-                COUNT(*) FILTER (WHERE wtp_signal = true)                       AS wtp_count,
-                COUNT(*) FILTER (WHERE workaround_boolean = true)               AS workaround_count,
-                COUNT(*) FILTER (WHERE intensity = 'low')                       AS intensity_low,
-                COUNT(*) FILTER (WHERE intensity = 'medium')                    AS intensity_medium,
-                COUNT(*) FILTER (WHERE intensity = 'high')                      AS intensity_high,
-                COUNT(*) FILTER (WHERE sentiment = 'positive')                  AS sentiment_positive,
-                COUNT(*) FILTER (WHERE sentiment = 'negative')                  AS sentiment_negative,
-                COUNT(*) FILTER (WHERE sentiment = 'neutral')                   AS sentiment_neutral
+            SELECT COUNT(*) AS total
             FROM opportunities
             WHERE cluster_id = :cluster_id
               AND deleted_at IS NULL
@@ -150,44 +114,7 @@ async def _get_signal_aggregations(cluster_id: int, db: AsyncSession) -> dict:
         {"cluster_id": cluster_id, "pipeline_version": PIPELINE_VERSION},
     )
     row = result.mappings().one()
-    total = row["total"] or 0
-
-    def pct(n):
-        return round((n / total) * 100, 1) if total > 0 else 0.0
-
-    # Most common domain
-    domain_result = await db.execute(
-        text("""
-            SELECT domain, COUNT(*) AS n
-            FROM opportunities
-            WHERE cluster_id = :cluster_id
-              AND deleted_at IS NULL
-              AND domain IS NOT NULL
-              AND pipeline_version = :pipeline_version
-            GROUP BY domain
-            ORDER BY n DESC
-            LIMIT 1
-        """),
-        {"cluster_id": cluster_id, "pipeline_version": PIPELINE_VERSION},
-    )
-    domain_row = domain_result.mappings().one_or_none()
-
-    return {
-        "totalPosts": total,
-        "wtpRate": pct(row["wtp_count"]),
-        "workaroundRate": pct(row["workaround_count"]),
-        "intensity": {
-            "low": pct(row["intensity_low"]),
-            "medium": pct(row["intensity_medium"]),
-            "high": pct(row["intensity_high"]),
-        },
-        "sentiment": {
-            "positive": pct(row["sentiment_positive"]),
-            "negative": pct(row["sentiment_negative"]),
-            "neutral": pct(row["sentiment_neutral"]),
-        },
-        "topDomain": domain_row["domain"] if domain_row else None,
-    }
+    return {"totalPosts": row["total"] or 0}
 
 
 async def _get_latest_post_count(cluster_id: int, db: AsyncSession) -> int | None:
@@ -211,7 +138,6 @@ def _serialize_cluster(c: Cluster, post_count: int | None, signals: dict) -> dic
         "source": c.source,
         "firstSeen": c.first_seen.isoformat() if c.first_seen else None,
         "postCount": post_count,
-        "signalScore": c.signal_score,
         "trending": c.trending,
         "growthRateWow": c.growth_rate_wow,
         "growthRateMom": c.growth_rate_mom,
@@ -225,14 +151,9 @@ def _serialize_cluster(c: Cluster, post_count: int | None, signals: dict) -> dic
         "monetizationCategory": c.monetization_category,
         "authorCount": c.author_count,
         "communityCount": c.community_count,
-        "avgPainScore": c.avg_pain_score,
-        "avgUrgencyScore": c.avg_urgency_score,
-        "avgCommercialIntentScore": c.avg_commercial_intent_score,
-        "avgSolutionSeekingScore": c.avg_solution_seeking_score,
         "revenuePotentialScore": c.revenue_potential_score,
         "competitionScore": c.competition_score,
         "saturationScore": c.saturation_score,
-        "confidenceScore": c.confidence_score,
         "signals": signals,
         "briefGeneratedAt": _iso(c.brief_generated_at) or None,
         "briefModelVersion": c.brief_model_version,
@@ -283,7 +204,6 @@ async def get_trending_clusters(
                 "id": c.id,
                 "name": c.name,
                 "source": c.source,
-                "signalScore": c.signal_score,
                 "trending": c.trending,
                 "growthRateWow": c.growth_rate_wow,
                 "growthRateMom": c.growth_rate_mom,
@@ -362,16 +282,6 @@ async def get_cluster(
                 "description": p.description,
                 "sourceUrl": p.source_url,
                 "sourceScore": p.source_score,
-                "signalScore": p.signal_score,
-                "wtpSignal": p.wtp_signal,
-                "intensity": p.intensity,
-                "sentiment": p.sentiment,
-                "domain": p.domain,
-                "workaroundBoolean": p.workaround_boolean,
-                "intensityScore": p.intensity_score,
-                "sentimentScore": p.sentiment_score,
-                "wtpConfidence": p.wtp_confidence,
-                "workaroundConfidence": p.workaround_confidence,
                 "createdAt": p.created_at,
             }
             for p in posts
@@ -427,7 +337,7 @@ async def refresh_cluster_brief(
             Opportunity.deleted_at == None,
             Opportunity.pipeline_version == PIPELINE_VERSION,
         )
-        .order_by(Opportunity.signal_score.desc().nullslast(), Opportunity.source_score.desc().nullslast())
+        .order_by(Opportunity.source_score.desc().nullslast())
         .limit(500)
     )
     posts = list(posts_result.scalars().all())
@@ -443,8 +353,8 @@ async def refresh_cluster_brief(
     )
     snapshot = snapshot_result.scalar_one_or_none()
 
-    evidence, signal_strength, wtp_rate, workaround_rate = _build_brief_inputs(cluster, posts)
-    context = _build_brief_context(cluster, posts, evidence, wtp_rate, workaround_rate)
+    evidence, signal_strength = _build_brief_inputs(cluster, posts)
+    context = _build_brief_context(cluster, posts, evidence)
 
     content = await generate_opportunity_brief(context)
     if content is None:

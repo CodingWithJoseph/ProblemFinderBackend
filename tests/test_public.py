@@ -105,7 +105,7 @@ async def test_public_search_returns_clusters(public_client, fake_db):
 
 
 async def test_public_stats_shape(public_client, fake_db):
-    fake_db.stub(scalar=[18320, 11234, 324, 4412, 908])
+    fake_db.stub(scalar=[18320, 11234, 324])
     resp = await public_client.get("/public/stats")
     assert resp.status_code == 200
     assert resp.headers["access-control-allow-origin"] == "*"

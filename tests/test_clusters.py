@@ -60,24 +60,13 @@ async def test_trending_clusters_blocked_for_free_plan(client, fake_db, auth_hea
 
 async def test_get_cluster_returns_growth_and_signals(client, fake_db, auth_headers):
     cluster = make_cluster(id=42, growth_rate_wow=0.35, growth_rate_mom=1.2, post_velocity=140.0)
-    agg_row = {
-        "total": 10,
-        "wtp_count": 6,
-        "workaround_count": 3,
-        "intensity_low": 2,
-        "intensity_medium": 3,
-        "intensity_high": 5,
-        "sentiment_positive": 1,
-        "sentiment_negative": 7,
-        "sentiment_neutral": 2,
-    }
-    domain_row = {"domain": "developer tools", "n": 8}
+    # _get_signal_aggregations is now a single post-count query (JOB 3).
+    agg_row = {"total": 10}
     opp = make_opportunity(cluster_id=42)
     fake_db.stub(
         execute=[
             FakeResult(rows=[cluster]),          # cluster lookup
-            FakeResult(mappings=[agg_row]),      # signal aggregation
-            FakeResult(mappings=[domain_row]),   # top domain
+            FakeResult(mappings=[agg_row]),      # signal aggregation (count only)
             FakeResult(rows=[50]),               # latest post count
             FakeResult(rows=[opp]),              # paginated posts
             FakeResult(rows=[(opp.id,)]),        # all post ids
@@ -97,17 +86,16 @@ async def test_get_cluster_returns_growth_and_signals(client, fake_db, auth_head
 
     signals = body["signals"]
     assert signals["totalPosts"] == 10
-    assert signals["wtpRate"] == 60.0           # 6/10
-    assert signals["workaroundRate"] == 30.0    # 3/10
-    assert signals["intensity"]["high"] == 50.0
-    assert signals["topDomain"] == "developer tools"
+    # Scoring distributions removed in JOB 3.
+    assert "wtpRate" not in signals
+    assert "topDomain" not in signals
 
     assert body["postIds"] == [str(opp.id)]
     assert len(body["posts"]) == 1
     post = body["posts"][0]
-    assert post["signalScore"] == opp.signal_score
-    assert post["intensityScore"] == opp.intensity_score
-    assert post["wtpConfidence"] == opp.wtp_confidence
+    assert post["sourceScore"] == opp.source_score
+    assert "signalScore" not in post
+    assert "intensityScore" not in post
 
 
 async def test_get_cluster_not_found(client, fake_db, auth_headers):
@@ -194,14 +182,10 @@ async def test_refresh_cluster_brief_allows_pro_and_stores_json(
 
     cluster = make_cluster(
         id=42,
-        signal_score=73.0,
-        avg_pain_score=0.8,
-        avg_urgency_score=0.6,
-        confidence_score=0.7,
         growth_rate_wow=0.0,
         growth_acceleration=0.0,
     )
-    post = make_opportunity(cluster_id=42, signal_score=87.5, wtp_signal=True, workaround_boolean=True)
+    post = make_opportunity(cluster_id=42, source_score=87.5)
     snapshot = make_snapshot(id=99, cluster_id=42)
     fake_db.stub(
         execute=[
@@ -223,8 +207,9 @@ async def test_refresh_cluster_brief_allows_pro_and_stores_json(
     assert stored["title"] == "Freelance invoicing pain"
     assert stored["evidence"]["totalPostsAnalyzed"] == 1
     assert stored["evidence"]["representativePosts"][0]["score"] == 87.5
-    assert stored["signalStrength"]["overallScore"] == 73
-    assert stored["signalStrength"]["painIntensity"] == 80
+    # signalStrength is now reduced to frequency (no pain/urgency/overall scores).
+    assert stored["signalStrength"]["frequency"] == 1
+    assert "overallScore" not in stored["signalStrength"]
     assert body["modelVersion"] == "claude-test"
     assert cluster.opportunity_brief == stored
     assert cluster.brief_model_version == "claude-test"

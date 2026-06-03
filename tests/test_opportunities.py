@@ -1,8 +1,8 @@
 """Tests for the /opportunities routes.
 
-Focus: the endpoints return the enriched signal fields (signalScore,
-intensityScore, sentimentScore, wtpConfidence, workaroundConfidence) and inline
-cluster growth fields.
+Focus: the endpoints return the (post-JOB-3) non-scoring fields and inline
+cluster growth fields. The legacy signal/wtp/intensity/sentiment fields were
+removed from the API.
 """
 
 import uuid
@@ -21,16 +21,18 @@ from conftest import (
     embedding_response,
 )
 
-SIGNAL_FIELDS = [
-    "signalScore",
-    "intensityScore",
-    "sentimentScore",
-    "wtpConfidence",
-    "workaroundConfidence",
+# Fields the simplified pipeline still exposes.
+KEPT_FIELDS = ["id", "title", "sourceScore", "trending", "numComments"]
+
+# Fields removed in JOB 3 that must NOT appear in responses.
+REMOVED_FIELDS = [
+    "signalScore", "intensityScore", "sentimentScore", "wtpConfidence",
+    "workaroundConfidence", "wtpSignal", "intensity", "sentiment", "domain",
+    "signalStrength", "industryCategory",
 ]
 
 
-async def test_get_opportunities_returns_signal_fields(client, fake_db, auth_headers):
+async def test_get_opportunities_returns_core_fields(client, fake_db, auth_headers):
     opp = make_opportunity(cluster_id=None)
     fake_db.stub(
         execute=[
@@ -49,14 +51,11 @@ async def test_get_opportunities_returns_signal_fields(client, fake_db, auth_hea
     assert len(body["data"]) == 1
 
     item = body["data"][0]
-    for field in SIGNAL_FIELDS:
-        assert field in item, f"missing signal field {field}"
-    assert item["signalScore"] == 87.5
-    assert item["intensityScore"] == 0.95
-    assert item["sentimentScore"] == -0.9
-    assert item["wtpConfidence"] == 0.91
-    assert item["workaroundConfidence"] == 0.42
-    assert item["wtpSignal"] is True
+    for field in KEPT_FIELDS:
+        assert field in item, f"missing field {field}"
+    for field in REMOVED_FIELDS:
+        assert field not in item, f"removed field {field} still present"
+    assert item["sourceScore"] == 120.0
     assert item["trending"] is True
 
 
@@ -96,7 +95,7 @@ async def test_get_opportunities_batch(client, fake_db, auth_headers):
     assert len(data) == 1
     item = data[0]
     assert item["id"] == opp.id
-    for field in SIGNAL_FIELDS:
+    for field in KEPT_FIELDS:
         assert field in item
 
 
@@ -106,10 +105,11 @@ async def test_get_opportunities_batch_empty_ids(client, fake_db, auth_headers):
     assert resp.json() == {"data": []}
 
 
-async def test_search_returns_signal_fields(client, fake_db, auth_headers, monkeypatch):
+async def test_search_returns_core_fields(client, fake_db, auth_headers, monkeypatch):
     # Pro plan so the free-tier search-usage gate is skipped.
     sub = make_subscription(plan=PlanEnum.pro)
-    row = opportunity_row(cluster_id=None, signal_score=72.0, intensity_score=0.67)
+    # Row carries stale scoring columns; reconstruction must ignore them.
+    row = opportunity_row(cluster_id=None, source_score=72.0, signal_score=999.0)
     fake_db.stub(
         execute=[
             FakeResult(rows=[sub]),         # _get_plan
@@ -132,10 +132,9 @@ async def test_search_returns_signal_fields(client, fake_db, auth_headers, monke
     assert body["total"] == 1
     assert body["clusters"] == []
     item = body["data"][0]
-    for field in SIGNAL_FIELDS:
-        assert field in item
-    assert item["signalScore"] == 72.0
-    assert item["intensityScore"] == 0.67
+    assert item["sourceScore"] == 72.0
+    for field in REMOVED_FIELDS:
+        assert field not in item
 
 
 async def test_flag_opportunity_creates_user_flag(client, fake_db, auth_headers):

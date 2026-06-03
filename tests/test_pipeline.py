@@ -19,10 +19,8 @@ from conftest import (
 async def test_pipeline_signal_shape_with_cluster(client, fake_db, auth_headers):
     card = make_pipeline(source_cluster_id="42", notes="watch this", stage="exploring")
     cluster = make_cluster(id=42, growth_rate_wow=0.35, growth_rate_mom=1.2, post_velocity=140.0)
-    opp1 = make_opportunity(cluster_id=42, signal_score=87.5, intensity_score=0.95,
-                            wtp_signal=True, workaround_boolean=True)
-    opp2 = make_opportunity(cluster_id=42, signal_score=72.0, intensity_score=0.67,
-                            wtp_signal=False, workaround_boolean=False)
+    opp1 = make_opportunity(cluster_id=42, source_score=87.5)
+    opp2 = make_opportunity(cluster_id=42, source_score=72.0)
     fake_db.stub(
         execute=[
             FakeResult(rows=[card]),            # pipeline card lookup
@@ -45,19 +43,19 @@ async def test_pipeline_signal_shape_with_cluster(client, fake_db, auth_headers)
     assert body["cluster"]["growthRateMom"] == 1.2
     assert body["cluster"]["postVelocity"] == 140.0
 
-    # aggregate metrics across the two posts
+    # aggregate metrics across the two posts (scoring metrics removed in JOB 3)
     metrics = body["metrics"]
     assert metrics["postCount"] == 2
-    assert metrics["avgSignalScore"] == 79.75       # (87.5 + 72.0) / 2
-    assert metrics["wtpRate"] == 0.5                # 1 of 2
-    assert metrics["workaroundRate"] == 0.5
-    assert metrics["avgIntensityScore"] == 0.81     # (0.95 + 0.67) / 2
+    assert metrics["avgSourceScore"] == 79.75       # (87.5 + 72.0) / 2
+    assert "avgSignalScore" not in metrics
+    assert "wtpRate" not in metrics
 
-    # posts with full signal breakdown
+    # posts with the simplified (non-scoring) shape
     assert len(body["posts"]) == 2
     post = body["posts"][0]
-    for field in ["signalScore", "intensityScore", "sentimentScore", "wtpConfidence", "workaroundConfidence"]:
-        assert field in post
+    assert post["sourceScore"] == 87.5
+    for field in ["signalScore", "intensityScore", "wtpConfidence"]:
+        assert field not in post
 
 
 async def test_pipeline_signal_falls_back_to_post_ids(client, fake_db, auth_headers):
@@ -95,10 +93,7 @@ async def test_pipeline_export_csv_with_cluster_posts(client, fake_db, auth_head
     opp = make_opportunity(
         cluster_id=42,
         title="CSV export should include quoted, useful data",
-        signal_score=91.25,
-        wtp_signal=True,
-        workaround_boolean=False,
-        industry_category="fintech",
+        source_score=91.25,
     )
     fake_db.stub(
         execute=[
@@ -121,15 +116,17 @@ async def test_pipeline_export_csv_with_cluster_posts(client, fake_db, auth_head
     assert row["cluster_id"] == "42"
     assert row["post_id"] == opp.id
     assert row["title"] == "CSV export should include quoted, useful data"
-    assert row["signal_score"] == "91.25"
-    assert row["wtp_signal"] == "True"
-    assert row["industry_category"] == "fintech"
+    assert row["source_score"] == "91.25"
+    # Scoring columns removed from the export (JOB 3).
+    assert "signal_score" not in row
+    assert "wtp_signal" not in row
+    assert "industry_category" not in row
 
 
 async def test_pipeline_export_json_reuses_signal_shape(client, fake_db, auth_headers):
     card = make_pipeline(source_cluster_id=None, post_ids=["a", "b"])
-    opp1 = make_opportunity(cluster_id=None, signal_score=80.0)
-    opp2 = make_opportunity(cluster_id=None, signal_score=60.0)
+    opp1 = make_opportunity(cluster_id=None, source_score=80.0)
+    opp2 = make_opportunity(cluster_id=None, source_score=60.0)
     fake_db.stub(
         execute=[
             FakeResult(rows=[card]),            # pipeline card lookup
@@ -143,7 +140,7 @@ async def test_pipeline_export_json_reuses_signal_shape(client, fake_db, auth_he
     assert body["pipeline"]["id"] == card.id
     assert body["cluster"] is None
     assert body["metrics"]["postCount"] == 2
-    assert body["metrics"]["avgSignalScore"] == 70.0
+    assert body["metrics"]["avgSourceScore"] == 70.0
     assert [post["id"] for post in body["posts"]] == [opp1.id, opp2.id]
 
 

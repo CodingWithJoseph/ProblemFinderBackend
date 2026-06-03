@@ -18,6 +18,15 @@ router = APIRouter(prefix="/opportunities", tags=["opportunities"])
 COUNT_CAP = 10_000
 MAX_PAGE = 500
 
+# Columns actually mapped on the Opportunity model. Used to rebuild ORM objects
+# from raw ``SELECT *`` rows (hybrid_search / similar-posts) while ignoring stale
+# DB columns the simplified pipeline no longer writes.
+_OPPORTUNITY_COLUMNS = {c.name for c in Opportunity.__table__.columns}
+
+
+def _row_to_opportunity(row) -> Opportunity:
+    return Opportunity(**{k: v for k, v in dict(row).items() if k in _OPPORTUNITY_COLUMNS})
+
 
 def _serialize(o: Opportunity) -> dict:
     return {
@@ -26,20 +35,10 @@ def _serialize(o: Opportunity) -> dict:
         "description": o.description,
         "source": o.source,
         "sourceUrl": o.source_url,
-        "domain": o.domain,
         "type": o.type,
         "sourceScore": o.source_score,
-        "signalScore": o.signal_score,
-        "intensityScore": o.intensity_score,
-        "sentimentScore": o.sentiment_score,
-        "wtpConfidence": o.wtp_confidence,
-        "workaroundConfidence": o.workaround_confidence,
         "upvotes": o.upvotes,
         "trending": o.trending,
-        "wtpSignal": o.wtp_signal,
-        "workaroundBoolean": o.workaround_boolean,
-        "intensity": o.intensity,
-        "sentiment": o.sentiment,
         "clusterId": o.cluster_id,
         "numComments": o.num_comments,
         "upvoteRatio": o.upvote_ratio,
@@ -49,21 +48,12 @@ def _serialize(o: Opportunity) -> dict:
         "createdAt": o.created_at,
         "pipelineCount": o.pipeline_count,
         "launchCount": o.launch_count,
-        "signalStrength": o.signal_strength,
-        "signalReason": o.signal_reason,
-        "industryCategory": o.industry_category,
-        "painScore": o.pain_score,
-        "urgencyScore": o.urgency_score,
-        "commercialIntentScore": o.commercial_intent_score,
-        "solutionSeekingScore": o.solution_seeking_score,
         "revenuePotentialScore": o.revenue_potential_score,
-        "confidenceScore": o.confidence_score,
         "primaryProblem": o.primary_problem,
         "targetAudience": o.target_audience,
         "buyerPersona": o.buyer_persona,
         "businessModel": o.business_model,
         "monetizationPath": o.monetization_path,
-        "estimatedWillingnessToPay": o.estimated_willingness_to_pay,
         "competitionLevel": o.competition_level,
         "marketSaturation": o.market_saturation,
         "recommendedNextStep": o.recommended_next_step,
@@ -77,7 +67,6 @@ def _serialize_cluster_inline(c: Cluster, post_count: int | None) -> dict:
         "id": c.id,
         "name": c.name,
         "postCount": post_count,
-        "signalScore": c.signal_score,
         "trending": c.trending,
         "growthRateWow": c.growth_rate_wow,
         "growthRateMom": c.growth_rate_mom,
@@ -139,12 +128,6 @@ async def get_opportunities(
     page: int = Query(1, ge=1),
     pageSize: int = Query(default=20, ge=1, le=100),
     type: str | None = Query(None),
-    min_score: float | None = Query(None),
-    domain: str | None = Query(None),
-    intensity: str | None = Query(None),
-    sentiment: str | None = Query(None),
-    wtp_signal: bool | None = Query(None),
-    workaround_boolean: bool | None = Query(None),
     has_cluster: bool | None = Query(None),
     cluster_id: int | None = Query(None),
     sort: str | None = Query(None),
@@ -167,18 +150,6 @@ async def get_opportunities(
 
     if type:
         query = query.where(Opportunity.type == type)
-    if domain:
-        query = query.where(Opportunity.domain == domain.lower())
-    if intensity:
-        query = query.where(Opportunity.intensity == intensity.lower())
-    if sentiment:
-        query = query.where(Opportunity.sentiment == sentiment.lower())
-    if wtp_signal is not None:
-        query = query.where(Opportunity.wtp_signal == wtp_signal)
-    if workaround_boolean is not None:
-        query = query.where(Opportunity.workaround_boolean == workaround_boolean)
-    if min_score is not None:
-        query = query.where(Opportunity.signal_score >= min_score)
     if has_cluster is True:
         query = query.where(Opportunity.cluster_id != None)
     elif has_cluster is False:
@@ -188,9 +159,7 @@ async def get_opportunities(
 
     if sort == "trending":
         query = query.where(Opportunity.trending == True)
-        query = query.order_by(Opportunity.signal_score.desc().nullslast())
-    elif sort == "signal_score":
-        query = query.order_by(Opportunity.signal_score.desc().nullslast())
+        query = query.order_by(Opportunity.source_score.desc().nullslast())
     elif sort == "source_score":
         query = query.order_by(Opportunity.source_score.desc().nullslast())
     else:
@@ -253,14 +222,14 @@ async def get_top_opportunities(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
-    """Top opportunities by signal score (for the dashboard right column)."""
+    """Top opportunities by source score (for the dashboard right column)."""
     result = await db.execute(
         select(Opportunity)
         .where(
             Opportunity.deleted_at == None,
             Opportunity.pipeline_version == PIPELINE_VERSION,
         )
-        .order_by(Opportunity.signal_score.desc().nullslast())
+        .order_by(Opportunity.source_score.desc().nullslast())
         .limit(limit)
     )
     opportunities = list(result.scalars().all())
@@ -330,8 +299,10 @@ async def search_opportunities(
     )
 
     rows = result.mappings().all()
-    EXCLUDE_COLS = {"embedding", "search_vector"}
-    opportunities = [Opportunity(**{k: v for k, v in dict(row).items() if k not in EXCLUDE_COLS}) for row in rows]
+    # hybrid_search RETURNS SETOF opportunities (SELECT *), which can include
+    # stale scoring columns no longer mapped on the model. Whitelist to mapped
+    # columns so the reconstruction stays null-safe after JOB 3 removals.
+    opportunities = [_row_to_opportunity(row) for row in rows]
 
     cluster_map = await _build_cluster_map(opportunities, db)
 
@@ -365,7 +336,6 @@ async def search_opportunities(
         {
             "id": c.id,
             "name": c.name,
-            "signalScore": c.signal_score,
             "postCount": cluster_snapshot_map.get(c.id),
             "trending": c.trending,
             "growthRateWow": c.growth_rate_wow,
@@ -522,27 +492,10 @@ def _build_next_step_context(opp: Opportunity, problems: list[Problem], cluster:
     lines = [f"OPPORTUNITY: {opp.title}"]
     if opp.description:
         lines.append(f"Description: {opp.description[:600]}")
-    if opp.signal_strength:
-        reason = f" ({opp.signal_reason})" if opp.signal_reason else ""
-        lines.append(f"Signal strength: {opp.signal_strength}{reason}")
-    if opp.industry_category:
-        lines.append(f"Industry: {opp.industry_category}")
     if opp.primary_problem:
         lines.append(f"Primary problem: {opp.primary_problem}")
     if opp.target_audience:
         lines.append(f"Target audience: {opp.target_audience}")
-    score_bits = [
-        f"{label} {round(val, 2)}"
-        for label, val in (
-            ("pain", opp.pain_score),
-            ("urgency", opp.urgency_score),
-            ("commercial intent", opp.commercial_intent_score),
-            ("solution-seeking", opp.solution_seeking_score),
-        )
-        if val is not None
-    ]
-    if score_bits:
-        lines.append("Signal scores: " + ", ".join(score_bits))
 
     if cluster is not None:
         lines.append("")
@@ -550,8 +503,6 @@ def _build_next_step_context(opp: Opportunity, problems: list[Problem], cluster:
         if cluster.description:
             lines.append(f"Cluster description: {cluster.description[:400]}")
         cluster_bits = []
-        if cluster.signal_score is not None:
-            cluster_bits.append(f"signal {round(cluster.signal_score)}")
         if cluster.growth_rate_wow is not None:
             cluster_bits.append(f"WoW growth {round(cluster.growth_rate_wow * 100)}%")
         if cluster.post_velocity is not None:
@@ -568,8 +519,6 @@ def _build_next_step_context(opp: Opportunity, problems: list[Problem], cluster:
                 extras.append(f"pain {p.pain_level}")
             if p.urgency_level:
                 extras.append(f"urgency {p.urgency_level}")
-            if p.willingness_to_pay_signal:
-                extras.append(f"WTP {p.willingness_to_pay_signal}")
             suffix = f" [{', '.join(extras)}]" if extras else ""
             lines.append(f"- {p.title}{suffix}")
     else:
