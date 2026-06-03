@@ -9,26 +9,17 @@ from pydantic import BaseModel
 
 from app.db import get_db, AsyncSessionLocal
 from app.auth import get_uid
+from app.config import PIPELINE_VERSION
 from app.models import Problem, Opportunity
 from app.limits import get_plan, enforce_problems_limit
 from app.openai_client import openai_client, EMBEDDING_MODEL
-from app.routes.opportunities import _serialize as _serialize_opportunity
+from app.routes.opportunities import _serialize as _serialize_opportunity, _row_to_opportunity
 
 router = APIRouter(prefix="/problems", tags=["problems"])
 
 SIMILAR_THRESHOLD = 0.85
 DEFAULT_SIMILAR_POSTS = 10
 MAX_SIMILAR_POSTS = 25
-
-
-def _bucket(score: float | None) -> str | None:
-    if score is None:
-        return None
-    if score >= 0.66:
-        return "high"
-    if score >= 0.33:
-        return "medium"
-    return "low"
 
 
 def _is_uuid(value) -> bool:
@@ -52,9 +43,7 @@ def _serialize(p: Problem) -> dict:
         "painLevel": p.pain_level,
         "urgencyLevel": p.urgency_level,
         "frequencyScore": p.frequency_score,
-        "solutionSeekingScore": p.solution_seeking_score,
         "currentAlternatives": p.current_alternatives,
-        "willingnessToPaySignal": p.willingness_to_pay_signal,
         "buyerType": p.buyer_type,
         "createdAt": p.created_at.isoformat() if p.created_at else None,
         "updatedAt": p.updated_at.isoformat() if p.updated_at else None,
@@ -116,9 +105,7 @@ class PatchProblemBody(BaseModel):
     pain_level: Optional[str] = None
     urgency_level: Optional[str] = None
     frequency_score: Optional[float] = None
-    solution_seeking_score: Optional[float] = None
     current_alternatives: Optional[str] = None
-    willingness_to_pay_signal: Optional[str] = None
     buyer_type: Optional[str] = None
 
 
@@ -199,18 +186,18 @@ async def similar_posts(
             SELECT *, 1 - (embedding <=> CAST(:vec AS vector)) AS similarity
             FROM opportunities
             WHERE embedding IS NOT NULL AND deleted_at IS NULL
+              AND pipeline_version = :pipeline_version
             ORDER BY embedding <=> CAST(:vec AS vector)
             LIMIT :limit
         """),
-        {"vec": vector_str, "limit": limit},
+        {"vec": vector_str, "limit": limit, "pipeline_version": PIPELINE_VERSION},
     )
     mapped = rows.mappings().all()
-    EXCLUDE_COLS = {"embedding", "search_vector", "similarity"}
     data = []
     for row in mapped:
         d = dict(row)
         sim = d.get("similarity")
-        opp = Opportunity(**{k: v for k, v in d.items() if k not in EXCLUDE_COLS})
+        opp = _row_to_opportunity(d)
         data.append({
             **_serialize_opportunity(opp),
             "similarity": round(sim, 4) if sim is not None else None,
@@ -238,17 +225,18 @@ async def create_problem(
         source_post_id=body.source_post_id,
     )
 
-    # Pre-populate signal fields from the linked opportunity (Decision #4);
-    # the user can edit them afterward via PATCH.
+    # Pre-populate the buyer type from the linked opportunity (Decision #4);
+    # the user can edit it afterward via PATCH. The simplified pipeline no
+    # longer produces the pain/urgency/wtp/solution-seeking scores that were
+    # previously copied across.
     if body.source_post_id and _is_uuid(body.source_post_id):
         opp = (await db.execute(
-            select(Opportunity).where(Opportunity.id == body.source_post_id)
+            select(Opportunity).where(
+                Opportunity.id == body.source_post_id,
+                Opportunity.pipeline_version == PIPELINE_VERSION,
+            )
         )).scalar_one_or_none()
         if opp:
-            problem.pain_level = _bucket(opp.pain_score)
-            problem.urgency_level = _bucket(opp.urgency_score)
-            problem.willingness_to_pay_signal = _bucket(opp.wtp_confidence)
-            problem.solution_seeking_score = opp.solution_seeking_score
             problem.buyer_type = opp.buyer_persona
 
     db.add(problem)

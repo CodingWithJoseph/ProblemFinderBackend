@@ -12,37 +12,37 @@ from app.models import (
 )
 
 
-def test_opportunity_serialize_new_fields():
+def test_opportunity_serialize_keeps_non_scoring_fields():
     from app.routes.opportunities import _serialize
     o = Opportunity(
-        title="t", pain_score=0.5, urgency_score=0.3, commercial_intent_score=0.4,
-        solution_seeking_score=0.6, signal_strength="strong", signal_reason="clear demand",
-        industry_category="Software", revenue_potential_score=0.7, confidence_score=0.8,
+        title="t", revenue_potential_score=0.7, primary_problem="invoices",
         needs_review=True,
     )
     d = _serialize(o)
-    assert d["painScore"] == 0.5
-    assert d["urgencyScore"] == 0.3
-    assert d["commercialIntentScore"] == 0.4
-    assert d["solutionSeekingScore"] == 0.6
-    assert d["signalStrength"] == "strong"
-    assert d["signalReason"] == "clear demand"
-    assert d["industryCategory"] == "Software"
     assert d["revenuePotentialScore"] == 0.7
+    assert d["primaryProblem"] == "invoices"
     assert d["needsReview"] is True
+    # Stale scoring fields are no longer exposed (JOB 3).
+    for removed in (
+        "painScore", "urgencyScore", "commercialIntentScore", "solutionSeekingScore",
+        "signalScore", "signalStrength", "signalReason", "industryCategory",
+        "confidenceScore", "wtpSignal", "intensity", "sentiment", "domain",
+    ):
+        assert removed not in d
 
 
-def test_cluster_serialize_new_fields():
+def test_cluster_serialize_drops_scoring_fields():
     from app.routes.clusters import _serialize_cluster
     c = Cluster(id=1, name="c", status="growing", primary_domain="Software",
-                avg_pain_score=0.4, growth_acceleration=0.1, revenue_potential_score=0.7,
+                growth_acceleration=0.1, revenue_potential_score=0.7,
                 competition_score=0.2, saturation_score=0.3)
     d = _serialize_cluster(c, post_count=5, signals={})
     assert d["status"] == "growing"
     assert d["primaryDomain"] == "Software"
-    assert d["avgPainScore"] == 0.4
     assert d["growthAcceleration"] == 0.1
     assert d["revenuePotentialScore"] == 0.7
+    for removed in ("signalScore", "avgPainScore", "avgUrgencyScore", "confidenceScore"):
+        assert removed not in d
 
 
 def test_pipeline_serialize_outcome_mrr_and_signal_post():
@@ -53,31 +53,26 @@ def test_pipeline_serialize_outcome_mrr_and_signal_post():
     assert d["mrr"] == 1200.0
     assert "outcomeNotedAt" in d
 
-    o = Opportunity(title="t", pain_score=0.2, urgency_score=0.9,
-                    signal_strength="weak", industry_category="Finance")
+    o = Opportunity(title="t", source_score=42.0, num_comments=5)
     sd = _serialize_signal_post(o)
-    assert sd["painScore"] == 0.2
-    assert sd["urgencyScore"] == 0.9
-    assert sd["signalStrength"] == "weak"
-    assert sd["industryCategory"] == "Finance"
+    assert sd["sourceScore"] == 42.0
+    assert sd["numComments"] == 5
+    for removed in ("painScore", "urgencyScore", "signalStrength", "industryCategory"):
+        assert removed not in sd
 
 
 def test_problem_serialize_and_helpers():
-    from app.routes.problems import _serialize, _bucket, _is_uuid
+    from app.routes.problems import _serialize, _is_uuid
     p = Problem(pipeline_id="p", user_id="u", title="t", pain_level="high",
-                urgency_level="low", willingness_to_pay_signal="medium",
-                buyer_type="prosumer", solution_seeking_score=0.55)
+                urgency_level="low", buyer_type="prosumer")
     d = _serialize(p)
     assert d["painLevel"] == "high"
     assert d["urgencyLevel"] == "low"
-    assert d["willingnessToPaySignal"] == "medium"
     assert d["buyerType"] == "prosumer"
-    assert d["solutionSeekingScore"] == 0.55
+    # Removed scoring fields no longer serialized (JOB 3).
+    assert "willingnessToPaySignal" not in d
+    assert "solutionSeekingScore" not in d
 
-    assert _bucket(0.9) == "high"
-    assert _bucket(0.4) == "medium"
-    assert _bucket(0.1) == "low"
-    assert _bucket(None) is None
     assert _is_uuid(str(uuid.uuid4())) is True
     assert _is_uuid("not-a-uuid") is False
 

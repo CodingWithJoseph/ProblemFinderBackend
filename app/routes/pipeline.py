@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from app.db import get_db, AsyncSessionLocal
 from app.auth import get_uid
+from app.config import PIPELINE_VERSION
 from app.models import Pipeline, Opportunity, Cluster
 from app.limits import get_plan, limit_for, LimitReached
 
@@ -43,7 +44,6 @@ CAMEL_TO_SNAKE = {
 PIPELINE_STAGES = ("watching", "discovery", "exploring", "validating", "building")
 VALID_STAGES = frozenset(PIPELINE_STAGES)
 
-INTENSITY_MAP = {"low": 1.0, "medium": 2.0, "high": 3.0}
 MAX_COHERENCE_POSTS = 50
 
 EXPORT_CSV_COLUMNS = (
@@ -58,25 +58,8 @@ EXPORT_CSV_COLUMNS = (
     "description",
     "source",
     "source_url",
-    "domain",
     "author",
-    "signal_score",
-    "wtp_signal",
-    "workaround_boolean",
-    "intensity",
-    "sentiment",
-    "intensity_score",
-    "sentiment_score",
-    "wtp_confidence",
-    "workaround_confidence",
-    "pain_score",
-    "urgency_score",
-    "commercial_intent_score",
-    "solution_seeking_score",
-    "signal_strength",
-    "signal_reason",
-    "post_intent",
-    "industry_category",
+    "source_score",
     "num_comments",
     "created_at",
 )
@@ -86,10 +69,7 @@ def _format_cluster_metrics(raw: dict | None) -> dict | None:
     if not raw:
         return None
     return {
-        "avgSignalScore": raw.get("avg_signal_score"),
-        "wtpRate": raw.get("wtp_rate"),
-        "workaroundRate": raw.get("workaround_rate"),
-        "avgIntensity": raw.get("avg_intensity"),
+        "avgSourceScore": raw.get("avg_source_score"),
         "coherenceScore": raw.get("coherence_score"),
         "postCount": raw.get("post_count"),
         "computedAt": raw.get("computed_at"),
@@ -132,25 +112,8 @@ def _serialize_signal_post(o: Opportunity) -> dict:
         "description": o.description,
         "source": o.source,
         "sourceUrl": o.source_url,
-        "domain": o.domain,
         "author": o.author,
-        "signalScore": o.signal_score,
-        "wtpSignal": o.wtp_signal,
-        "workaroundBoolean": o.workaround_boolean,
-        "intensity": o.intensity,
-        "sentiment": o.sentiment,
-        "intensityScore": o.intensity_score,
-        "sentimentScore": o.sentiment_score,
-        "wtpConfidence": o.wtp_confidence,
-        "workaroundConfidence": o.workaround_confidence,
-        "painScore": o.pain_score,
-        "urgencyScore": o.urgency_score,
-        "commercialIntentScore": o.commercial_intent_score,
-        "solutionSeekingScore": o.solution_seeking_score,
-        "signalStrength": o.signal_strength,
-        "signalReason": o.signal_reason,
-        "postIntent": o.post_intent,
-        "industryCategory": o.industry_category,
+        "sourceScore": o.source_score,
         "numComments": o.num_comments,
         "createdAt": o.created_at.isoformat() if o.created_at else None,
     }
@@ -167,7 +130,6 @@ def _serialize_signal_cluster(cluster: Cluster | None) -> dict | None:
     return {
         "id": cluster.id,
         "name": cluster.name,
-        "signalScore": cluster.signal_score,
         "trending": cluster.trending,
         "growthRateWow": cluster.growth_rate_wow,
         "growthRateMom": cluster.growth_rate_mom,
@@ -179,17 +141,7 @@ def _build_signal_metrics(posts: list[Opportunity]) -> dict:
     count = len(posts)
     return {
         "postCount": count,
-        "wtpRate": round(sum(1 for p in posts if p.wtp_signal) / count, 4) if count else None,
-        "workaroundRate": round(sum(1 for p in posts if p.workaround_boolean) / count, 4) if count else None,
-        "avgIntensityScore": _avg([p.intensity_score for p in posts]),
-        "avgSentimentScore": _avg([p.sentiment_score for p in posts]),
-        "avgSignalScore": _avg([p.signal_score for p in posts]),
-        "avgWtpConfidence": _avg([p.wtp_confidence for p in posts]),
-        "avgWorkaroundConfidence": _avg([p.workaround_confidence for p in posts]),
-        "avgPainScore": _avg([p.pain_score for p in posts]),
-        "avgUrgencyScore": _avg([p.urgency_score for p in posts]),
-        "avgCommercialIntentScore": _avg([p.commercial_intent_score for p in posts]),
-        "avgSolutionSeekingScore": _avg([p.solution_seeking_score for p in posts]),
+        "avgSourceScore": _avg([p.source_score for p in posts]),
     }
 
 
@@ -215,22 +167,35 @@ async def _load_pipeline_signal_data(
             cluster_int_id = None
 
     if cluster_int_id is not None:
-        cluster_result = await db.execute(select(Cluster).where(Cluster.id == cluster_int_id))
+        cluster_result = await db.execute(
+            select(Cluster).where(
+                Cluster.id == cluster_int_id,
+                Cluster.pipeline_version == PIPELINE_VERSION,
+            )
+        )
         cluster = cluster_result.scalar_one_or_none()
 
     # Full cluster view: ALL posts in the cluster; fall back to the card's post_ids.
     if cluster_int_id is not None:
         posts_result = await db.execute(
             select(Opportunity)
-            .where(Opportunity.cluster_id == cluster_int_id, Opportunity.deleted_at == None)
-            .order_by(Opportunity.signal_score.desc().nullslast())
+            .where(
+                Opportunity.cluster_id == cluster_int_id,
+                Opportunity.deleted_at == None,
+                Opportunity.pipeline_version == PIPELINE_VERSION,
+            )
+            .order_by(Opportunity.source_score.desc().nullslast())
         )
         posts = list(posts_result.scalars().all())
     elif card.post_ids:
         posts_result = await db.execute(
             select(Opportunity)
-            .where(Opportunity.id.in_(card.post_ids), Opportunity.deleted_at == None)
-            .order_by(Opportunity.signal_score.desc().nullslast())
+            .where(
+                Opportunity.id.in_(card.post_ids),
+                Opportunity.deleted_at == None,
+                Opportunity.pipeline_version == PIPELINE_VERSION,
+            )
+            .order_by(Opportunity.source_score.desc().nullslast())
         )
         posts = list(posts_result.scalars().all())
     else:
@@ -283,25 +248,8 @@ def _build_signal_csv(card: Pipeline, cluster_payload: dict | None, posts: list[
             "description": post.description,
             "source": post.source,
             "source_url": post.source_url,
-            "domain": post.domain,
             "author": post.author,
-            "signal_score": post.signal_score,
-            "wtp_signal": post.wtp_signal,
-            "workaround_boolean": post.workaround_boolean,
-            "intensity": post.intensity,
-            "sentiment": post.sentiment,
-            "intensity_score": post.intensity_score,
-            "sentiment_score": post.sentiment_score,
-            "wtp_confidence": post.wtp_confidence,
-            "workaround_confidence": post.workaround_confidence,
-            "pain_score": post.pain_score,
-            "urgency_score": post.urgency_score,
-            "commercial_intent_score": post.commercial_intent_score,
-            "solution_seeking_score": post.solution_seeking_score,
-            "signal_strength": post.signal_strength,
-            "signal_reason": post.signal_reason,
-            "post_intent": post.post_intent,
-            "industry_category": post.industry_category,
+            "source_score": post.source_score,
             "num_comments": post.num_comments,
             "created_at": _csv_value(post.created_at),
         })
@@ -342,11 +290,11 @@ async def _compute_and_write_metrics(pipeline_id: str, post_ids: list[str]) -> N
             result = await db.execute(
                 select(
                     Opportunity.id,
-                    Opportunity.signal_score,
-                    Opportunity.wtp_signal,
-                    Opportunity.workaround_boolean,
-                    Opportunity.intensity,
-                ).where(Opportunity.id.in_(post_ids))
+                    Opportunity.source_score,
+                ).where(
+                    Opportunity.id.in_(post_ids),
+                    Opportunity.pipeline_version == PIPELINE_VERSION,
+                )
             )
             rows = result.all()
 
@@ -354,15 +302,8 @@ async def _compute_and_write_metrics(pipeline_id: str, post_ids: list[str]) -> N
                 return
 
             count = len(rows)
-            scores = [r.signal_score for r in rows if r.signal_score is not None]
-            wtp_count = sum(1 for r in rows if r.wtp_signal)
-            workaround_count = sum(1 for r in rows if r.workaround_boolean)
-            intensities = [INTENSITY_MAP[r.intensity] for r in rows if r.intensity in INTENSITY_MAP]
-
-            avg_signal_score = round(sum(scores) / len(scores), 2) if scores else None
-            wtp_rate = round(wtp_count / count, 4)
-            workaround_rate = round(workaround_count / count, 4)
-            avg_intensity = round(sum(intensities) / len(intensities), 4) if intensities else None
+            scores = [r.source_score for r in rows if r.source_score is not None]
+            avg_source_score = round(sum(scores) / len(scores), 2) if scores else None
 
             # Coherence score: average pairwise cosine similarity using embeddings
             coherence_score: float | None = None
@@ -374,9 +315,10 @@ async def _compute_and_write_metrics(pipeline_id: str, post_ids: list[str]) -> N
                     text(
                         "SELECT id::text, embedding::text AS emb "
                         "FROM opportunities "
-                        "WHERE id::text = ANY(:ids) AND embedding IS NOT NULL"
+                        "WHERE id::text = ANY(:ids) AND embedding IS NOT NULL "
+                        "AND pipeline_version = :pipeline_version"
                     ),
-                    {"ids": sample},
+                    {"ids": sample, "pipeline_version": PIPELINE_VERSION},
                 )
                 emb_rows = emb_result.all()
                 parsed = [_parse_embedding(r[1]) for r in emb_rows]
@@ -398,10 +340,7 @@ async def _compute_and_write_metrics(pipeline_id: str, post_ids: list[str]) -> N
                     coherence_score = 1.0
 
             metrics = {
-                "avg_signal_score": avg_signal_score,
-                "wtp_rate": wtp_rate,
-                "workaround_rate": workaround_rate,
-                "avg_intensity": avg_intensity,
+                "avg_source_score": avg_source_score,
                 "coherence_score": coherence_score,
                 "post_count": count,
                 "computed_at": datetime.now(timezone.utc).isoformat(),
@@ -417,17 +356,20 @@ async def _compute_and_write_metrics(pipeline_id: str, post_ids: list[str]) -> N
 
 
 async def _fetch_posts_for_cards(cards: list[Pipeline], db: AsyncSession) -> dict[str, list[dict]]:
-    """Batch-fetch {id, title, signalScore} for all post_ids across the given pipeline cards."""
+    """Batch-fetch {id, title, sourceScore} for all post_ids across the given pipeline cards."""
     all_ids = list({pid for c in cards for pid in (c.post_ids or [])})
     if not all_ids:
         return {str(c.id): [] for c in cards}
 
     result = await db.execute(
-        select(Opportunity.id, Opportunity.title, Opportunity.signal_score)
-        .where(Opportunity.id.in_(all_ids))
+        select(Opportunity.id, Opportunity.title, Opportunity.source_score)
+        .where(
+            Opportunity.id.in_(all_ids),
+            Opportunity.pipeline_version == PIPELINE_VERSION,
+        )
     )
     post_map: dict[str, dict] = {
-        str(row.id): {"id": str(row.id), "title": row.title, "signalScore": row.signal_score}
+        str(row.id): {"id": str(row.id), "title": row.title, "sourceScore": row.source_score}
         for row in result
     }
 
@@ -438,7 +380,12 @@ async def _fetch_posts_for_cards(cards: list[Pipeline], db: AsyncSession) -> dic
 
 
 async def _update_opportunity_counts(opportunity_id: str, action: str, db: AsyncSession) -> None:
-    result = await db.execute(select(Opportunity).where(Opportunity.id == opportunity_id))
+    result = await db.execute(
+        select(Opportunity).where(
+            Opportunity.id == opportunity_id,
+            Opportunity.pipeline_version == PIPELINE_VERSION,
+        )
+    )
     opp = result.scalar_one_or_none()
     if not opp:
         return

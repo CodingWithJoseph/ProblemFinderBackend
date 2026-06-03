@@ -87,8 +87,9 @@ async def test_similar_posts_returns_opportunities(client, fake_db, auth_headers
     assert len(body["data"]) == 1
     item = body["data"][0]
     assert item["similarity"] == 0.93
-    assert item["signalScore"] == row["signal_score"]
-    assert "intensityScore" in item
+    assert item["sourceScore"] == row["source_score"]
+    assert "signalScore" not in item
+    assert "intensityScore" not in item
 
 
 async def test_similar_posts_not_ready_when_no_embedding(client, fake_db, auth_headers):
