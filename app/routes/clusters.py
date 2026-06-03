@@ -332,6 +332,48 @@ async def search_clusters(
     return await _materialize_discovery(base, order_clauses, limit, offset, uid, db)
 
 
+@router.get("/browse")
+async def browse_clusters(
+    limit: int = Query(SEARCH_DEFAULT_LIMIT, ge=1, le=SEARCH_MAX_LIMIT),
+    offset: int = Query(0, ge=0),
+    sort: str = Query("largest"),
+    subreddit: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Default (no-query) cluster discovery feed with sort + subreddit filter."""
+    member_stats = _member_stats_subquery()
+    base = (
+        select(Cluster)
+        .join(member_stats, member_stats.c.cluster_id == Cluster.id)
+        .where(
+            Cluster.pipeline_version == PIPELINE_VERSION,
+            Cluster.is_singleton == False,
+        )
+    )
+
+    if subreddit:
+        member_exists = (
+            select(ClusterMember.id)
+            .join(SourcePost, ClusterMember.source_post_id == SourcePost.id)
+            .where(
+                ClusterMember.cluster_id == Cluster.id,
+                ClusterMember.pipeline_version == PIPELINE_VERSION,
+                SourcePost.source_community_id == subreddit,
+            )
+        )
+        base = base.where(member_exists.exists())
+
+    if sort == "newest":
+        order_clauses = [member_stats.c.last_posted.desc().nullslast()]
+    elif sort == "trending":
+        order_clauses = [Cluster.growth_rate_wow.desc().nullslast()]
+    else:  # "largest" (default)
+        order_clauses = [member_stats.c.post_count.desc()]
+
+    return await _materialize_discovery(base, order_clauses, limit, offset, uid, db)
+
+
 @router.get("/trending")
 async def get_trending_clusters(
     limit: int = Query(10, ge=1, le=50),

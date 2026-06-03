@@ -334,3 +334,64 @@ async def test_cluster_search_filters_version_and_excludes_singletons(client, fa
     # singleton clusters excluded + pipeline_version filter applied
     assert "is_singleton" in main_query
     assert "pipeline_version" in main_query
+
+
+async def test_cluster_browse_sort_modes(client, fake_db, auth_headers):
+    for sort_mode, expect in [("largest", "post_count"), ("newest", "last_posted"), ("trending", "growth_rate_wow")]:
+        captured = []
+        orig_execute = fake_db.execute
+
+        async def _capture(statement, params=None, _c=captured, _o=orig_execute):
+            _c.append(str(statement))
+            return await _o(statement, params)
+
+        fake_db.execute = _capture
+        fake_db.stub(
+            scalar=[0],
+            execute=[FakeResult(rows=[]), FakeResult(rows=[]), FakeResult(rows=[])],
+        )
+        resp = await client.get("/clusters/browse", params={"sort": sort_mode}, headers=auth_headers)
+        assert resp.status_code == 200, sort_mode
+        assert "ORDER BY" in captured[0].upper()
+        assert expect in captured[0], (sort_mode, captured[0])
+        fake_db.execute = orig_execute
+
+
+async def test_cluster_browse_subreddit_filter(client, fake_db, auth_headers):
+    captured = []
+    orig_execute = fake_db.execute
+
+    async def _capture(statement, params=None):
+        captured.append(str(statement))
+        return await orig_execute(statement, params)
+
+    fake_db.execute = _capture
+    fake_db.stub(
+        scalar=[0],
+        execute=[FakeResult(rows=[]), FakeResult(rows=[]), FakeResult(rows=[])],
+    )
+    resp = await client.get("/clusters/browse", params={"subreddit": "r/freelance"}, headers=auth_headers)
+    assert resp.status_code == 200
+    # subreddit filter adds an EXISTS subquery against source_community_id
+    assert "EXISTS" in captured[0].upper()
+    assert "source_community_id" in captured[0]
+
+
+async def test_cluster_browse_returns_shape(client, fake_db, auth_headers):
+    cluster = make_cluster(id=9, name="AI agents for ops")
+    p1 = _src_post(source_community_id="r/SaaS", score=300)
+    fake_db.stub(
+        scalar=[1],
+        execute=[
+            FakeResult(rows=[cluster]),
+            FakeResult(rows=[(9, p1)]),
+            FakeResult(rows=[]),
+        ],
+    )
+    resp = await client.get("/clusters/browse", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["data"][0]["id"] == 9
+    assert body["data"][0]["post_count"] == 1
+    assert body["data"][0]["subreddits"] == ["r/SaaS"]
