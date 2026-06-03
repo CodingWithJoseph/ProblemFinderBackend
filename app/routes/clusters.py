@@ -5,6 +5,7 @@ from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
 from app.auth import get_uid
+from app.config import PIPELINE_VERSION
 from app.models import Cluster, ClusterSnapshot, Opportunity, ClusterMember, SourcePost
 from app.limits import get_plan, ai_clusters_allowed, is_pro_plus, LimitReached
 from app.brief import assemble_brief, new_meta, momentum_from_growth
@@ -144,8 +145,9 @@ async def _get_signal_aggregations(cluster_id: int, db: AsyncSession) -> dict:
             FROM opportunities
             WHERE cluster_id = :cluster_id
               AND deleted_at IS NULL
+              AND pipeline_version = :pipeline_version
         """),
-        {"cluster_id": cluster_id},
+        {"cluster_id": cluster_id, "pipeline_version": PIPELINE_VERSION},
     )
     row = result.mappings().one()
     total = row["total"] or 0
@@ -161,11 +163,12 @@ async def _get_signal_aggregations(cluster_id: int, db: AsyncSession) -> dict:
             WHERE cluster_id = :cluster_id
               AND deleted_at IS NULL
               AND domain IS NOT NULL
+              AND pipeline_version = :pipeline_version
             GROUP BY domain
             ORDER BY n DESC
             LIMIT 1
         """),
-        {"cluster_id": cluster_id},
+        {"cluster_id": cluster_id, "pipeline_version": PIPELINE_VERSION},
     )
     domain_row = domain_result.mappings().one_or_none()
 
@@ -191,7 +194,10 @@ async def _get_latest_post_count(cluster_id: int, db: AsyncSession) -> int | Non
     """Get post count from the most recent snapshot."""
     result = await db.execute(
         select(ClusterSnapshot.post_count)
-        .where(ClusterSnapshot.cluster_id == cluster_id)
+        .where(
+            ClusterSnapshot.cluster_id == cluster_id,
+            ClusterSnapshot.pipeline_version == PIPELINE_VERSION,
+        )
         .order_by(ClusterSnapshot.date.desc())
         .limit(1)
     )
@@ -248,7 +254,10 @@ async def get_trending_clusters(
 
     result = await db.execute(
         select(Cluster)
-        .where(Cluster.trending == True)
+        .where(
+            Cluster.trending == True,
+            Cluster.pipeline_version == PIPELINE_VERSION,
+        )
         .order_by(Cluster.growth_rate_wow.desc().nullslast())
         .limit(limit)
     )
@@ -259,7 +268,10 @@ async def get_trending_clusters(
     if cluster_ids:
         snapshots_result = await db.execute(
             select(ClusterSnapshot)
-            .where(ClusterSnapshot.cluster_id.in_(cluster_ids))
+            .where(
+                ClusterSnapshot.cluster_id.in_(cluster_ids),
+                ClusterSnapshot.pipeline_version == PIPELINE_VERSION,
+            )
             .distinct(ClusterSnapshot.cluster_id)
             .order_by(ClusterSnapshot.cluster_id, ClusterSnapshot.date.desc())
         )
@@ -292,7 +304,10 @@ async def get_cluster(
     uid: str = Depends(get_uid),
 ):
     result = await db.execute(
-        select(Cluster).where(Cluster.id == cluster_id)
+        select(Cluster).where(
+            Cluster.id == cluster_id,
+            Cluster.pipeline_version == PIPELINE_VERSION,
+        )
     )
     cluster = result.scalar_one_or_none()
 
@@ -308,6 +323,7 @@ async def get_cluster(
         .where(
             Opportunity.cluster_id == cluster_id,
             Opportunity.deleted_at == None,
+            Opportunity.pipeline_version == PIPELINE_VERSION,
         )
         .order_by(Opportunity.source_score.desc().nullslast())
         .offset((page - 1) * pageSize)
@@ -321,6 +337,7 @@ async def get_cluster(
         .where(
             Opportunity.cluster_id == cluster_id,
             Opportunity.deleted_at == None,
+            Opportunity.pipeline_version == PIPELINE_VERSION,
         )
     )
 
@@ -330,6 +347,7 @@ async def get_cluster(
         .where(
             Opportunity.cluster_id == cluster_id,
             Opportunity.deleted_at == None,
+            Opportunity.pipeline_version == PIPELINE_VERSION,
         )
     )
     post_ids = [str(row[0]) for row in all_ids_result]
@@ -370,7 +388,12 @@ async def get_cluster_brief(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
-    result = await db.execute(select(Cluster).where(Cluster.id == cluster_id))
+    result = await db.execute(
+        select(Cluster).where(
+            Cluster.id == cluster_id,
+            Cluster.pipeline_version == PIPELINE_VERSION,
+        )
+    )
     cluster = result.scalar_one_or_none()
     if not cluster:
         raise HTTPException(status_code=404, detail="Cluster not found")
@@ -387,7 +410,12 @@ async def refresh_cluster_brief(
     if not is_pro_plus(plan):
         raise LimitReached("opportunity_brief", plan, status_code=403)
 
-    result = await db.execute(select(Cluster).where(Cluster.id == cluster_id))
+    result = await db.execute(
+        select(Cluster).where(
+            Cluster.id == cluster_id,
+            Cluster.pipeline_version == PIPELINE_VERSION,
+        )
+    )
     cluster = result.scalar_one_or_none()
     if not cluster:
         raise HTTPException(status_code=404, detail="Cluster not found")
@@ -397,6 +425,7 @@ async def refresh_cluster_brief(
         .where(
             Opportunity.cluster_id == cluster_id,
             Opportunity.deleted_at == None,
+            Opportunity.pipeline_version == PIPELINE_VERSION,
         )
         .order_by(Opportunity.signal_score.desc().nullslast(), Opportunity.source_score.desc().nullslast())
         .limit(500)
@@ -405,7 +434,10 @@ async def refresh_cluster_brief(
 
     snapshot_result = await db.execute(
         select(ClusterSnapshot)
-        .where(ClusterSnapshot.cluster_id == cluster_id)
+        .where(
+            ClusterSnapshot.cluster_id == cluster_id,
+            ClusterSnapshot.pipeline_version == PIPELINE_VERSION,
+        )
         .order_by(ClusterSnapshot.date.desc())
         .limit(1)
     )
@@ -446,19 +478,28 @@ async def get_cluster_snapshots(
     uid: str = Depends(get_uid),
 ):
     cluster_result = await db.execute(
-        select(Cluster).where(Cluster.id == cluster_id)
+        select(Cluster).where(
+            Cluster.id == cluster_id,
+            Cluster.pipeline_version == PIPELINE_VERSION,
+        )
     )
     cluster = cluster_result.scalar_one_or_none()
 
     cluster_exists = await db.scalar(
-        select(func.count()).where(Cluster.id == cluster_id)
+        select(func.count()).where(
+            Cluster.id == cluster_id,
+            Cluster.pipeline_version == PIPELINE_VERSION,
+        )
     )
     if not cluster_exists:
         raise HTTPException(status_code=404, detail="Cluster not found")
 
     result = await db.execute(
         select(ClusterSnapshot)
-        .where(ClusterSnapshot.cluster_id == cluster_id)
+        .where(
+            ClusterSnapshot.cluster_id == cluster_id,
+            ClusterSnapshot.pipeline_version == PIPELINE_VERSION,
+        )
         .order_by(ClusterSnapshot.date.asc())
     )
     snapshots = result.scalars().all()
@@ -493,14 +534,22 @@ async def get_cluster_members(
     result = await db.execute(
         select(ClusterMember, SourcePost)
         .join(SourcePost, ClusterMember.source_post_id == SourcePost.id, isouter=True)
-        .where(ClusterMember.cluster_id == cluster_id)
+        .where(
+            ClusterMember.cluster_id == cluster_id,
+            ClusterMember.pipeline_version == PIPELINE_VERSION,
+        )
         .order_by(ClusterMember.created_at.desc())
         .offset(offset)
         .limit(pageSize)
     )
     rows = result.all()
     total = await db.scalar(
-        select(func.count()).select_from(ClusterMember).where(ClusterMember.cluster_id == cluster_id)
+        select(func.count())
+        .select_from(ClusterMember)
+        .where(
+            ClusterMember.cluster_id == cluster_id,
+            ClusterMember.pipeline_version == PIPELINE_VERSION,
+        )
     )
 
     return {

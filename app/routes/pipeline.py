@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from app.db import get_db, AsyncSessionLocal
 from app.auth import get_uid
+from app.config import PIPELINE_VERSION
 from app.models import Pipeline, Opportunity, Cluster
 from app.limits import get_plan, limit_for, LimitReached
 
@@ -215,21 +216,34 @@ async def _load_pipeline_signal_data(
             cluster_int_id = None
 
     if cluster_int_id is not None:
-        cluster_result = await db.execute(select(Cluster).where(Cluster.id == cluster_int_id))
+        cluster_result = await db.execute(
+            select(Cluster).where(
+                Cluster.id == cluster_int_id,
+                Cluster.pipeline_version == PIPELINE_VERSION,
+            )
+        )
         cluster = cluster_result.scalar_one_or_none()
 
     # Full cluster view: ALL posts in the cluster; fall back to the card's post_ids.
     if cluster_int_id is not None:
         posts_result = await db.execute(
             select(Opportunity)
-            .where(Opportunity.cluster_id == cluster_int_id, Opportunity.deleted_at == None)
+            .where(
+                Opportunity.cluster_id == cluster_int_id,
+                Opportunity.deleted_at == None,
+                Opportunity.pipeline_version == PIPELINE_VERSION,
+            )
             .order_by(Opportunity.signal_score.desc().nullslast())
         )
         posts = list(posts_result.scalars().all())
     elif card.post_ids:
         posts_result = await db.execute(
             select(Opportunity)
-            .where(Opportunity.id.in_(card.post_ids), Opportunity.deleted_at == None)
+            .where(
+                Opportunity.id.in_(card.post_ids),
+                Opportunity.deleted_at == None,
+                Opportunity.pipeline_version == PIPELINE_VERSION,
+            )
             .order_by(Opportunity.signal_score.desc().nullslast())
         )
         posts = list(posts_result.scalars().all())
@@ -346,7 +360,10 @@ async def _compute_and_write_metrics(pipeline_id: str, post_ids: list[str]) -> N
                     Opportunity.wtp_signal,
                     Opportunity.workaround_boolean,
                     Opportunity.intensity,
-                ).where(Opportunity.id.in_(post_ids))
+                ).where(
+                    Opportunity.id.in_(post_ids),
+                    Opportunity.pipeline_version == PIPELINE_VERSION,
+                )
             )
             rows = result.all()
 
@@ -374,9 +391,10 @@ async def _compute_and_write_metrics(pipeline_id: str, post_ids: list[str]) -> N
                     text(
                         "SELECT id::text, embedding::text AS emb "
                         "FROM opportunities "
-                        "WHERE id::text = ANY(:ids) AND embedding IS NOT NULL"
+                        "WHERE id::text = ANY(:ids) AND embedding IS NOT NULL "
+                        "AND pipeline_version = :pipeline_version"
                     ),
-                    {"ids": sample},
+                    {"ids": sample, "pipeline_version": PIPELINE_VERSION},
                 )
                 emb_rows = emb_result.all()
                 parsed = [_parse_embedding(r[1]) for r in emb_rows]
@@ -424,7 +442,10 @@ async def _fetch_posts_for_cards(cards: list[Pipeline], db: AsyncSession) -> dic
 
     result = await db.execute(
         select(Opportunity.id, Opportunity.title, Opportunity.signal_score)
-        .where(Opportunity.id.in_(all_ids))
+        .where(
+            Opportunity.id.in_(all_ids),
+            Opportunity.pipeline_version == PIPELINE_VERSION,
+        )
     )
     post_map: dict[str, dict] = {
         str(row.id): {"id": str(row.id), "title": row.title, "signalScore": row.signal_score}
@@ -438,7 +459,12 @@ async def _fetch_posts_for_cards(cards: list[Pipeline], db: AsyncSession) -> dic
 
 
 async def _update_opportunity_counts(opportunity_id: str, action: str, db: AsyncSession) -> None:
-    result = await db.execute(select(Opportunity).where(Opportunity.id == opportunity_id))
+    result = await db.execute(
+        select(Opportunity).where(
+            Opportunity.id == opportunity_id,
+            Opportunity.pipeline_version == PIPELINE_VERSION,
+        )
+    )
     opp = result.scalar_one_or_none()
     if not opp:
         return

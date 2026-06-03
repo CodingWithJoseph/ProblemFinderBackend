@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 from app.db import get_db
 from app.auth import get_uid
+from app.config import PIPELINE_VERSION
 from app.openai_client import openai_client
 from app.models import Opportunity, SearchUsage, Subscription, PlanEnum, Cluster, ClusterSnapshot, Problem, Pipeline, UserFlag
 from app.limits import enforce_search_limit
@@ -103,12 +104,20 @@ async def _build_cluster_map(opportunities: list[Opportunity], db: AsyncSession)
     if not cluster_ids:
         return {}
 
-    clusters_result = await db.execute(select(Cluster).where(Cluster.id.in_(cluster_ids)))
+    clusters_result = await db.execute(
+        select(Cluster).where(
+            Cluster.id.in_(cluster_ids),
+            Cluster.pipeline_version == PIPELINE_VERSION,
+        )
+    )
     clusters = clusters_result.scalars().all()
 
     snapshots_result = await db.execute(
         select(ClusterSnapshot)
-        .where(ClusterSnapshot.cluster_id.in_(cluster_ids))
+        .where(
+            ClusterSnapshot.cluster_id.in_(cluster_ids),
+            ClusterSnapshot.pipeline_version == PIPELINE_VERSION,
+        )
         .distinct(ClusterSnapshot.cluster_id)
         .order_by(ClusterSnapshot.cluster_id, ClusterSnapshot.date.desc())
     )
@@ -151,7 +160,10 @@ async def get_opportunities(
     page = min(page, MAX_PAGE)
     offset = (page - 1) * pageSize
 
-    query = select(Opportunity).where(Opportunity.deleted_at == None)
+    query = select(Opportunity).where(
+        Opportunity.deleted_at == None,
+        Opportunity.pipeline_version == PIPELINE_VERSION,
+    )
 
     if type:
         query = query.where(Opportunity.type == type)
@@ -227,6 +239,7 @@ async def get_opportunities_by_ids(
         select(Opportunity).where(
             Opportunity.id.in_(uuid_list),
             Opportunity.deleted_at == None,
+            Opportunity.pipeline_version == PIPELINE_VERSION,
         )
     )
     opportunities = result.scalars().all()
@@ -243,7 +256,10 @@ async def get_top_opportunities(
     """Top opportunities by signal score (for the dashboard right column)."""
     result = await db.execute(
         select(Opportunity)
-        .where(Opportunity.deleted_at == None)
+        .where(
+            Opportunity.deleted_at == None,
+            Opportunity.pipeline_version == PIPELINE_VERSION,
+        )
         .order_by(Opportunity.signal_score.desc().nullslast())
         .limit(limit)
     )
@@ -322,7 +338,10 @@ async def search_opportunities(
     # Search clusters by name similarity
     matching_clusters_result = await db.execute(
         select(Cluster)
-        .where(Cluster.name.ilike(f"%{q}%"))
+        .where(
+            Cluster.name.ilike(f"%{q}%"),
+            Cluster.pipeline_version == PIPELINE_VERSION,
+        )
         .limit(5)
     )
     matching_clusters = matching_clusters_result.scalars().all()
@@ -332,7 +351,10 @@ async def search_opportunities(
     if cluster_search_ids:
         cluster_snapshots_result = await db.execute(
             select(ClusterSnapshot)
-            .where(ClusterSnapshot.cluster_id.in_(cluster_search_ids))
+            .where(
+                ClusterSnapshot.cluster_id.in_(cluster_search_ids),
+                ClusterSnapshot.pipeline_version == PIPELINE_VERSION,
+            )
             .distinct(ClusterSnapshot.cluster_id)
             .order_by(ClusterSnapshot.cluster_id, ClusterSnapshot.date.desc())
         )
@@ -397,6 +419,7 @@ async def flag_opportunity(
         select(Opportunity).where(
             Opportunity.id == opportunity_id,
             Opportunity.deleted_at == None,
+            Opportunity.pipeline_version == PIPELINE_VERSION,
         )
     )).scalar_one_or_none()
     if not opportunity:
@@ -463,7 +486,10 @@ async def pipeline_action(
     uid: str = Depends(get_uid),
 ):
     result = await db.execute(
-        select(Opportunity).where(Opportunity.id == opportunity_id)
+        select(Opportunity).where(
+            Opportunity.id == opportunity_id,
+            Opportunity.pipeline_version == PIPELINE_VERSION,
+        )
     )
     opportunity = result.scalar_one_or_none()
 
@@ -565,7 +591,10 @@ async def recommend_next_step(
     cluster. Intended to be called once the user has defined problems for the pipeline.
     Idempotent — re-call to refresh."""
     opp = (await db.execute(
-        select(Opportunity).where(Opportunity.id == opportunity_id)
+        select(Opportunity).where(
+            Opportunity.id == opportunity_id,
+            Opportunity.pipeline_version == PIPELINE_VERSION,
+        )
     )).scalar_one_or_none()
     if not opp:
         raise HTTPException(status_code=404, detail="Opportunity not found")
@@ -588,7 +617,10 @@ async def recommend_next_step(
     cluster = None
     if opp.cluster_id is not None:
         cluster = (await db.execute(
-            select(Cluster).where(Cluster.id == opp.cluster_id)
+            select(Cluster).where(
+                Cluster.id == opp.cluster_id,
+                Cluster.pipeline_version == PIPELINE_VERSION,
+            )
         )).scalar_one_or_none()
 
     context = _build_next_step_context(opp, problems, cluster)

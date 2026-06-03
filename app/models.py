@@ -59,6 +59,7 @@ class Opportunity(Base):
     wtp_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     workaround_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     cluster_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pipeline_version: Mapped[str | None] = mapped_column(Text, nullable=True)
     num_comments: Mapped[int | None] = mapped_column(Integer, nullable=True)
     upvote_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
     feed: Mapped[str | None] = mapped_column(String(50), nullable=True)
@@ -149,6 +150,7 @@ class Cluster(Base):
     name: Mapped[str | None] = mapped_column(Text, nullable=True)
     first_seen: Mapped[date | None] = mapped_column(Date, nullable=True)
     source: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    pipeline_version: Mapped[str | None] = mapped_column(Text, nullable=True)
     signal_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     trending: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     growth_rate_wow: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -182,6 +184,7 @@ class ClusterSnapshot(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     cluster_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    pipeline_version: Mapped[str | None] = mapped_column(Text, nullable=True)
     date: Mapped[date] = mapped_column(Date, nullable=False)
     post_count: Mapped[int] = mapped_column(Integer, nullable=False)
     sample_posts: Mapped[list | None] = mapped_column(JSONB, nullable=True)
@@ -279,6 +282,7 @@ class SourcePost(Base):
 
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     source: Mapped[str] = mapped_column(Text, nullable=False)
+    pipeline_version: Mapped[str | None] = mapped_column(Text, default="v1")
     source_post_id: Mapped[str] = mapped_column(Text, nullable=False)
     source_community_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_author_id: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -306,6 +310,7 @@ class ClusterMember(Base):
 
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     cluster_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    pipeline_version: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_post_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), nullable=True)
     similarity_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     membership_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -319,6 +324,7 @@ class ClusterScore(Base):
 
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     cluster_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    pipeline_version: Mapped[str | None] = mapped_column(Text, nullable=True)
     score_type: Mapped[str] = mapped_column(Text, nullable=False)
     score_value: Mapped[float | None] = mapped_column(Float, nullable=True)
     score_reason: Mapped[str | None] = mapped_column(Text, nullable=True)

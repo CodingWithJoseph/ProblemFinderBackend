@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from app.db import get_db, AsyncSessionLocal
 from app.auth import get_uid
+from app.config import PIPELINE_VERSION
 from app.models import Problem, Opportunity
 from app.limits import get_plan, enforce_problems_limit
 from app.openai_client import openai_client, EMBEDDING_MODEL
@@ -199,10 +200,11 @@ async def similar_posts(
             SELECT *, 1 - (embedding <=> CAST(:vec AS vector)) AS similarity
             FROM opportunities
             WHERE embedding IS NOT NULL AND deleted_at IS NULL
+              AND pipeline_version = :pipeline_version
             ORDER BY embedding <=> CAST(:vec AS vector)
             LIMIT :limit
         """),
-        {"vec": vector_str, "limit": limit},
+        {"vec": vector_str, "limit": limit, "pipeline_version": PIPELINE_VERSION},
     )
     mapped = rows.mappings().all()
     EXCLUDE_COLS = {"embedding", "search_vector", "similarity"}
@@ -242,7 +244,10 @@ async def create_problem(
     # the user can edit them afterward via PATCH.
     if body.source_post_id and _is_uuid(body.source_post_id):
         opp = (await db.execute(
-            select(Opportunity).where(Opportunity.id == body.source_post_id)
+            select(Opportunity).where(
+                Opportunity.id == body.source_post_id,
+                Opportunity.pipeline_version == PIPELINE_VERSION,
+            )
         )).scalar_one_or_none()
         if opp:
             problem.pain_level = _bucket(opp.pain_score)
