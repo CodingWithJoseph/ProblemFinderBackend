@@ -16,12 +16,10 @@ def test_opportunity_serialize_keeps_non_scoring_fields():
     from app.routes.opportunities import _serialize
     o = Opportunity(
         title="t", revenue_potential_score=0.7, primary_problem="invoices",
-        needs_review=True,
     )
     d = _serialize(o)
     assert d["revenuePotentialScore"] == 0.7
     assert d["primaryProblem"] == "invoices"
-    assert d["needsReview"] is True
     # Stale scoring fields are no longer exposed (JOB 3).
     for removed in (
         "painScore", "urgencyScore", "commercialIntentScore", "solutionSeekingScore",
@@ -33,12 +31,11 @@ def test_opportunity_serialize_keeps_non_scoring_fields():
 
 def test_cluster_serialize_drops_scoring_fields():
     from app.routes.clusters import _serialize_cluster
-    c = Cluster(id=1, name="c", status="growing", primary_domain="Software",
+    c = Cluster(id=1, name="c", status="growing",
                 growth_acceleration=0.1, revenue_potential_score=0.7,
                 competition_score=0.2, saturation_score=0.3)
     d = _serialize_cluster(c, post_count=5, signals={})
     assert d["status"] == "growing"
-    assert d["primaryDomain"] == "Software"
     assert d["growthAcceleration"] == 0.1
     assert d["revenuePotentialScore"] == 0.7
     for removed in ("signalScore", "avgPainScore", "avgUrgencyScore", "confidenceScore"):
