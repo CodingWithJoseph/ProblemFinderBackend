@@ -1,12 +1,13 @@
+from collections import Counter
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, func, text
+from sqlalchemy import select, func, text, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
 from app.auth import get_uid
 from app.config import PIPELINE_VERSION
-from app.models import Cluster, ClusterSnapshot, Opportunity, ClusterMember, SourcePost
+from app.models import Cluster, ClusterSnapshot, Opportunity, ClusterMember, SourcePost, Pipeline
 from app.limits import get_plan, ai_clusters_allowed, is_pro_plus, LimitReached
 from app.brief import assemble_brief, new_meta, momentum_from_growth
 from app.anthropic_client import generate_opportunity_brief, brief_model_version
@@ -15,6 +16,11 @@ router = APIRouter(prefix="/clusters", tags=["clusters"])
 
 SUFFICIENT_HISTORY_DAYS = 7
 BRIEF_TOP_POSTS = 8
+
+# --- Cluster search / browse (cluster-first discovery) ---------------------
+SEARCH_DEFAULT_LIMIT = 20
+SEARCH_MAX_LIMIT = 50
+SEARCH_SAMPLE_POSTS = 3
 
 
 def _iso(value) -> str:
@@ -159,6 +165,213 @@ def _serialize_cluster(c: Cluster, post_count: int | None, signals: dict) -> dic
         "briefModelVersion": c.brief_model_version,
         "hasOpportunityBrief": c.opportunity_brief is not None,
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Cluster-first discovery: search + browse
+#
+# These endpoints make the *cluster* the primary unit of search (posts live
+# inside clusters). They read the v2 simplified pipeline tables — cluster_members
+# joined to source_posts — which is where post_count, subreddits, date ranges and
+# noise_filter_reason live (the legacy ``opportunities`` table has none of these).
+# Clusters have no embedding column, so the optional pgvector cosine tiebreaker
+# from the spec is skipped (documented decision).
+# ──────────────────────────────────────────────────────────────────────────
+
+
+async def _posts_by_cluster_v2(cluster_ids: list[int], db: AsyncSession) -> dict[int, list[SourcePost]]:
+    """Map cluster_id -> its v2 source_posts (highest reddit_score first)."""
+    if not cluster_ids:
+        return {}
+    rows = (await db.execute(
+        select(ClusterMember.cluster_id, SourcePost)
+        .join(SourcePost, ClusterMember.source_post_id == SourcePost.id)
+        .where(
+            ClusterMember.cluster_id.in_(cluster_ids),
+            ClusterMember.pipeline_version == PIPELINE_VERSION,
+        )
+    )).all()
+    grouped: dict[int, list[SourcePost]] = {}
+    for cid, sp in rows:
+        grouped.setdefault(cid, []).append(sp)
+    for posts in grouped.values():
+        posts.sort(key=lambda p: (p.score is not None, p.score or 0), reverse=True)
+    return grouped
+
+
+async def _watched_cluster_ids(uid: str, cluster_ids: list[int], db: AsyncSession) -> set[int]:
+    """Set of the given cluster ids the user is currently watching.
+
+    A cluster is "watched" when the user has a non-removed pipeline card whose
+    ``source_cluster_id`` (stored as text) equals the cluster id.
+    """
+    if not cluster_ids:
+        return set()
+    str_ids = [str(cid) for cid in cluster_ids]
+    rows = (await db.execute(
+        select(Pipeline.source_cluster_id).where(
+            Pipeline.user_id == uid,
+            Pipeline.source_cluster_id.in_(str_ids),
+            Pipeline.removed_at == None,
+        )
+    )).all()
+    watched: set[int] = set()
+    for (scid,) in rows:
+        try:
+            watched.add(int(scid))
+        except (TypeError, ValueError):
+            continue
+    return watched
+
+
+def _sample_post(sp: SourcePost) -> dict:
+    return {
+        "id": sp.id,
+        "title": sp.title,
+        "subreddit": sp.source_community_id,
+        "reddit_score": sp.score,
+        "noise_filter_reason": sp.noise_filter_reason,
+    }
+
+
+def _derive_top_signal(posts: list[SourcePost]) -> str | None:
+    """Most common non-empty noise_filter_reason across the given (top) posts."""
+    reasons = [p.noise_filter_reason for p in posts if p.noise_filter_reason]
+    if not reasons:
+        return None
+    return Counter(reasons).most_common(1)[0][0]
+
+
+def _serialize_discovery_cluster(
+    c: Cluster, posts: list[SourcePost], watched_ids: set[int]
+) -> dict:
+    top_posts = posts[:SEARCH_SAMPLE_POSTS]
+    subreddits = sorted({p.source_community_id for p in posts if p.source_community_id})
+    dates = sorted(_iso(p.posted_at) for p in posts if p.posted_at)
+    return {
+        "id": c.id,
+        "name": c.name,
+        "post_count": len(posts),
+        "trending_status": c.status if c.status else ("trending" if c.trending else None),
+        "growth_rate": c.growth_rate_wow,
+        "date_range_start": dates[0] if dates else None,
+        "date_range_end": dates[-1] if dates else None,
+        "subreddits": subreddits,
+        "is_singleton": bool(c.is_singleton),
+        "top_signal": _derive_top_signal(top_posts),
+        "sample_posts": [_sample_post(p) for p in top_posts],
+        "is_watched": c.id in watched_ids,
+    }
+
+
+def _member_stats_subquery():
+    """Per-cluster post_count + most-recent post date over the v2 pipeline."""
+    return (
+        select(
+            ClusterMember.cluster_id.label("cluster_id"),
+            func.count().label("post_count"),
+            func.max(SourcePost.posted_at).label("last_posted"),
+        )
+        .join(SourcePost, ClusterMember.source_post_id == SourcePost.id)
+        .where(ClusterMember.pipeline_version == PIPELINE_VERSION)
+        .group_by(ClusterMember.cluster_id)
+        .subquery()
+    )
+
+
+async def _materialize_discovery(
+    base, order_clauses: list, limit: int, offset: int, uid: str, db: AsyncSession
+) -> dict:
+    """Shared tail for search/browse: count, page, hydrate posts + watched state."""
+    total = await db.scalar(select(func.count()).select_from(base.subquery()))
+
+    query = base.order_by(*order_clauses).offset(offset).limit(limit)
+    clusters = list((await db.execute(query)).scalars().all())
+
+    cluster_ids = [c.id for c in clusters]
+    posts_map = await _posts_by_cluster_v2(cluster_ids, db)
+    watched_ids = await _watched_cluster_ids(uid, cluster_ids, db)
+
+    return {
+        "data": [
+            _serialize_discovery_cluster(c, posts_map.get(c.id, []), watched_ids)
+            for c in clusters
+        ],
+        "total": total or 0,
+    }
+
+
+@router.get("/search")
+async def search_clusters(
+    q: str = Query(..., min_length=2),
+    limit: int = Query(SEARCH_DEFAULT_LIMIT, ge=1, le=SEARCH_MAX_LIMIT),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Cluster-first search. Matches clusters by name (full phrase + per-token
+    ILIKE), ordered by post_count desc with recency as tiebreaker."""
+    conditions = [Cluster.name.ilike(f"%{q}%")]
+    for token in (t for t in q.split() if len(t) >= 2):
+        conditions.append(Cluster.name.ilike(f"%{token}%"))
+
+    member_stats = _member_stats_subquery()
+    base = (
+        select(Cluster)
+        .join(member_stats, member_stats.c.cluster_id == Cluster.id)
+        .where(
+            Cluster.pipeline_version == PIPELINE_VERSION,
+            Cluster.is_singleton == False,
+            or_(*conditions),
+        )
+    )
+    order_clauses = [
+        member_stats.c.post_count.desc(),
+        member_stats.c.last_posted.desc().nullslast(),
+    ]
+    return await _materialize_discovery(base, order_clauses, limit, offset, uid, db)
+
+
+@router.get("/browse")
+async def browse_clusters(
+    limit: int = Query(SEARCH_DEFAULT_LIMIT, ge=1, le=SEARCH_MAX_LIMIT),
+    offset: int = Query(0, ge=0),
+    sort: str = Query("largest"),
+    subreddit: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Default (no-query) cluster discovery feed with sort + subreddit filter."""
+    member_stats = _member_stats_subquery()
+    base = (
+        select(Cluster)
+        .join(member_stats, member_stats.c.cluster_id == Cluster.id)
+        .where(
+            Cluster.pipeline_version == PIPELINE_VERSION,
+            Cluster.is_singleton == False,
+        )
+    )
+
+    if subreddit:
+        member_exists = (
+            select(ClusterMember.id)
+            .join(SourcePost, ClusterMember.source_post_id == SourcePost.id)
+            .where(
+                ClusterMember.cluster_id == Cluster.id,
+                ClusterMember.pipeline_version == PIPELINE_VERSION,
+                SourcePost.source_community_id == subreddit,
+            )
+        )
+        base = base.where(member_exists.exists())
+
+    if sort == "newest":
+        order_clauses = [member_stats.c.last_posted.desc().nullslast()]
+    elif sort == "trending":
+        order_clauses = [Cluster.growth_rate_wow.desc().nullslast()]
+    else:  # "largest" (default)
+        order_clauses = [member_stats.c.post_count.desc()]
+
+    return await _materialize_discovery(base, order_clauses, limit, offset, uid, db)
 
 
 @router.get("/trending")

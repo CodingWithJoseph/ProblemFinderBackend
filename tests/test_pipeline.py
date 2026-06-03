@@ -151,3 +151,88 @@ async def test_pipeline_export_not_found(client, fake_db, auth_headers):
         headers=auth_headers,
     )
     assert resp.status_code == 404
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# BACKEND JOB 4: watch / unwatch
+# ──────────────────────────────────────────────────────────────────────────
+
+from app.models import PlanEnum
+from conftest import make_subscription
+
+
+async def test_watch_cluster_creates_card(client, fake_db, auth_headers):
+    cluster = make_cluster(id=42, name="Freelance invoicing pain")
+    opp = make_opportunity(cluster_id=42)
+    fake_db.stub(execute=[
+        FakeResult(rows=[]),                                       # _find_watch_card -> none
+        FakeResult(rows=[cluster]),                               # cluster lookup
+        FakeResult(rows=[]),                                      # active cards (none)
+        FakeResult(rows=[make_subscription(plan=PlanEnum.pro)]),  # get_plan
+        FakeResult(rows=[(opp.id,)]),                            # opportunity ids in cluster
+    ])
+    resp = await client.post("/pipeline/watch", json={"cluster_id": "42"}, headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["is_watched"] is True
+    assert body["pipeline_id"]
+
+    assert len(fake_db.added) == 1
+    card = fake_db.added[0]
+    assert card.stage == "watching"
+    assert card.source_cluster_id == "42"
+    assert card.name == "Freelance invoicing pain"
+    assert opp.id in card.post_ids
+    assert fake_db.commit_count == 1
+
+
+async def test_watch_cluster_idempotent(client, fake_db, auth_headers):
+    existing = make_pipeline(source_cluster_id="42")
+    fake_db.stub(execute=[FakeResult(rows=[existing])])
+    resp = await client.post("/pipeline/watch", json={"cluster_id": "42"}, headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["is_watched"] is True
+    assert body["pipeline_id"] == existing.id
+    assert fake_db.added == []  # no new card created
+
+
+async def test_watch_cluster_404_when_cluster_missing(client, fake_db, auth_headers):
+    fake_db.stub(execute=[
+        FakeResult(rows=[]),   # no existing watch
+        FakeResult(rows=[]),   # no cluster
+    ])
+    resp = await client.post("/pipeline/watch", json={"cluster_id": "999"}, headers=auth_headers)
+    assert resp.status_code == 404
+
+
+async def test_watch_cluster_free_plan_cap(client, fake_db, auth_headers):
+    cluster = make_cluster(id=42)
+    active = [make_pipeline(), make_pipeline(), make_pipeline()]  # at the free cap (3)
+    fake_db.stub(execute=[
+        FakeResult(rows=[]),                                        # no existing watch
+        FakeResult(rows=[cluster]),                                # cluster lookup
+        FakeResult(rows=active),                                   # active cards
+        FakeResult(rows=[make_subscription(plan=PlanEnum.free)]),  # get_plan
+    ])
+    resp = await client.post("/pipeline/watch", json={"cluster_id": "42"}, headers=auth_headers)
+    assert resp.status_code == 403
+    assert resp.json()["error"] == "limit_reached"
+
+
+async def test_unwatch_cluster_removes_card(client, fake_db, auth_headers):
+    card = make_pipeline(source_cluster_id="42")
+    fake_db.stub(execute=[FakeResult(rows=[card])])
+    resp = await client.delete("/pipeline/watch/42", headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json()["is_watched"] is False
+    assert card.removed_at is not None
+    assert fake_db.commit_count == 1
+
+
+async def test_unwatch_cluster_noop_when_not_watched(client, fake_db, auth_headers):
+    fake_db.stub(execute=[FakeResult(rows=[])])
+    resp = await client.delete("/pipeline/watch/42", headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json()["is_watched"] is False
+    assert fake_db.commit_count == 0

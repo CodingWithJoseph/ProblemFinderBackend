@@ -427,6 +427,10 @@ class LaunchBody(BaseModel):
     product_name: str
 
 
+class WatchBody(BaseModel):
+    cluster_id: str
+
+
 @router.get("")
 async def get_pipeline(
     db: AsyncSession = Depends(get_db),
@@ -442,6 +446,102 @@ async def get_pipeline(
     cards = result.scalars().all()
     posts_map = await _fetch_posts_for_cards(list(cards), db)
     return {"data": [_serialize(c, posts=posts_map.get(str(c.id), [])) for c in cards]}
+
+
+async def _find_watch_card(uid: str, cluster_id: str, db: AsyncSession) -> Pipeline | None:
+    """The user's active (non-removed) pipeline card watching this cluster, if any."""
+    return (await db.execute(
+        select(Pipeline).where(
+            Pipeline.user_id == uid,
+            Pipeline.source_cluster_id == str(cluster_id),
+            Pipeline.removed_at == None,
+        )
+    )).scalar_one_or_none()
+
+
+@router.post("/watch")
+async def watch_cluster(
+    body: WatchBody,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Add a cluster to the user's pipeline at the Watching stage.
+
+    Watching a cluster is modeled as a pipeline card whose ``source_cluster_id``
+    points at the cluster and whose stage is ``watching`` (the backlog). The card
+    is seeded with the cluster's opportunity ids so the Signal workspace can load
+    its posts. Idempotent: re-watching returns the existing card.
+    """
+    existing = await _find_watch_card(uid, body.cluster_id, db)
+    if existing:
+        return {"is_watched": True, "pipeline_id": str(existing.id)}
+
+    try:
+        cluster_int_id = int(body.cluster_id)
+    except (TypeError, ValueError):
+        cluster_int_id = None
+
+    cluster = None
+    if cluster_int_id is not None:
+        cluster = (await db.execute(
+            select(Cluster).where(
+                Cluster.id == cluster_int_id,
+                Cluster.pipeline_version == PIPELINE_VERSION,
+            )
+        )).scalar_one_or_none()
+    if not cluster:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+
+    # Free plan caps active pipeline cards — watching consumes the same resource
+    # as creating a pipeline card, so enforce the same limit.
+    active_cards = (await db.execute(
+        select(Pipeline).where(
+            Pipeline.user_id == uid,
+            Pipeline.launched_at == None,
+            Pipeline.removed_at == None,
+        )
+    )).scalars().all()
+    plan = await get_plan(uid, db)
+    cap = limit_for(plan, "max_pipeline_cards")
+    if cap is not None and len(active_cards) >= cap:
+        raise LimitReached("pipeline", plan, status_code=403)
+
+    post_id_rows = (await db.execute(
+        select(Opportunity.id).where(
+            Opportunity.cluster_id == cluster_int_id,
+            Opportunity.deleted_at == None,
+            Opportunity.pipeline_version == PIPELINE_VERSION,
+        )
+    )).all()
+    post_ids = [str(r[0]) for r in post_id_rows]
+
+    card = Pipeline(
+        user_id=uid,
+        name=cluster.name or f"Cluster {body.cluster_id}",
+        post_ids=post_ids,
+        source_cluster_id=str(body.cluster_id),
+        stage="watching",
+    )
+    db.add(card)
+    await db.commit()
+    await db.refresh(card)
+    return {"is_watched": True, "pipeline_id": str(card.id)}
+
+
+@router.delete("/watch/{cluster_id}")
+async def unwatch_cluster(
+    cluster_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Remove a cluster from the user's pipeline (soft-delete the watch card)."""
+    card = await _find_watch_card(uid, cluster_id, db)
+    if card:
+        now = datetime.now(timezone.utc)
+        card.removed_at = now
+        card.updated_at = now
+        await db.commit()
+    return {"is_watched": False}
 
 
 @router.get("/{pipeline_id}/signal")
