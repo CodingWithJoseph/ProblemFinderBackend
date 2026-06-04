@@ -46,7 +46,6 @@ class Opportunity(Base):
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     source_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    upvotes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     trending: Mapped[bool] = mapped_column(Boolean, default=False)
     cluster_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     pipeline_version: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -66,14 +65,6 @@ class Opportunity(Base):
     # (embedding, noise_filter_*, opportunity_type/_domain, …) are ignored rather
     # than passed in.
     top_comments: Mapped[list | None] = mapped_column(JSONB, nullable=True)
-    primary_problem: Mapped[str | None] = mapped_column(Text, nullable=True)
-    target_audience: Mapped[str | None] = mapped_column(Text, nullable=True)
-    buyer_persona: Mapped[str | None] = mapped_column(Text, nullable=True)
-    business_model: Mapped[str | None] = mapped_column(Text, nullable=True)
-    monetization_path: Mapped[str | None] = mapped_column(Text, nullable=True)
-    competition_level: Mapped[str | None] = mapped_column(Text, nullable=True)
-    market_saturation: Mapped[str | None] = mapped_column(Text, nullable=True)
-    revenue_potential_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     recommended_next_step: Mapped[str | None] = mapped_column(Text, nullable=True)
     model_version: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
@@ -134,10 +125,6 @@ class Cluster(Base):
     growth_rate_wow: Mapped[float | None] = mapped_column(Float, nullable=True)
     growth_rate_mom: Mapped[float | None] = mapped_column(Float, nullable=True)
     post_velocity: Mapped[float | None] = mapped_column(Float, nullable=True)
-    description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    audience_type: Mapped[str | None] = mapped_column(Text, nullable=True)
-    problem_category: Mapped[str | None] = mapped_column(Text, nullable=True)
-    monetization_category: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Rolled up from child opportunities by the AI pipeline: the most-frequent
     # child value as the primary (TEXT) plus the distinct set (JSONB). Filtered
     # on the scalar columns in /clusters/browse + /clusters/search.
@@ -148,9 +135,6 @@ class Cluster(Base):
     author_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     community_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     growth_acceleration: Mapped[float | None] = mapped_column(Float, nullable=True)
-    revenue_potential_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    competition_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    saturation_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Single-post clusters (see migration add_cluster_is_singleton.sql). Public
     # endpoints exclude these by default.
@@ -169,16 +153,9 @@ class ClusterSnapshot(Base):
     date: Mapped[date | None] = mapped_column(Date, nullable=True)
     post_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     sample_posts: Mapped[list | None] = mapped_column(JSONB, nullable=True)
-    comment_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    unique_author_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    unique_community_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    avg_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # avg_comments is read by the AI pipeline's trending detector; the other
+    # per-snapshot aggregates were dropped (unused by API + UI). See 0008.
     avg_comments: Mapped[float | None] = mapped_column(Float, nullable=True)
-    growth_acceleration: Mapped[float | None] = mapped_column(Float, nullable=True)
-    engagement_velocity: Mapped[float | None] = mapped_column(Float, nullable=True)
-    revenue_potential_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    top_keywords: Mapped[list | None] = mapped_column(JSONB, nullable=True)
-    top_entities: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
 
 class Pipeline(Base):
@@ -292,65 +269,6 @@ class ClusterMember(Base):
     membership_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     assigned_by: Mapped[str | None] = mapped_column(Text, default="model")
     model_version: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
-
-
-class RevenueSignal(Base):
-    __tablename__ = "revenue_signals"
-
-    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id: Mapped[str] = mapped_column(Text, nullable=False)
-    cluster_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    opportunity_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), nullable=True)
-    pipeline_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), nullable=True)
-    domain: Mapped[str | None] = mapped_column(Text, nullable=True)
-    business_model: Mapped[str | None] = mapped_column(Text, nullable=True)
-    offer_type: Mapped[str | None] = mapped_column(Text, nullable=True)
-    price_point: Mapped[float | None] = mapped_column(Numeric, nullable=True)
-    revenue_amount: Mapped[float | None] = mapped_column(Numeric, nullable=True)
-    revenue_period: Mapped[str | None] = mapped_column(Text, nullable=True)
-    conversion_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    customer_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    source_channel: Mapped[str | None] = mapped_column(Text, nullable=True)
-    attribution_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
-    reported_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
-
-
-class Experiment(Base):
-    __tablename__ = "experiments"
-
-    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id: Mapped[str] = mapped_column(Text, nullable=False)
-    cluster_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    opportunity_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), nullable=True)
-    pipeline_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), nullable=True)
-    experiment_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    hypothesis: Mapped[str | None] = mapped_column(Text, nullable=True)
-    target_audience: Mapped[str | None] = mapped_column(Text, nullable=True)
-    offer: Mapped[str | None] = mapped_column(Text, nullable=True)
-    channel: Mapped[str | None] = mapped_column(Text, nullable=True)
-    status: Mapped[str] = mapped_column(Text, default="planned")
-    started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
-    ended_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
-
-
-class ExperimentResult(Base):
-    __tablename__ = "experiment_results"
-
-    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
-    experiment_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), nullable=True)
-    impressions: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    clicks: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    signups: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    replies: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    purchases: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    conversion_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
-    revenue_generated: Mapped[float | None] = mapped_column(Numeric, nullable=True)
-    cost: Mapped[float | None] = mapped_column(Numeric, nullable=True)
-    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-    result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 

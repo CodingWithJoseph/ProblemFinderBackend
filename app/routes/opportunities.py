@@ -37,7 +37,6 @@ def _serialize(o: Opportunity) -> dict:
         "sourceUrl": o.source_url,
         "type": o.type,
         "sourceScore": o.source_score,
-        "upvotes": o.upvotes,
         "trending": o.trending,
         "clusterId": o.cluster_id,
         "numComments": o.num_comments,
@@ -48,14 +47,6 @@ def _serialize(o: Opportunity) -> dict:
         "createdAt": o.created_at,
         "pipelineCount": o.pipeline_count,
         "launchCount": o.launch_count,
-        "revenuePotentialScore": o.revenue_potential_score,
-        "primaryProblem": o.primary_problem,
-        "targetAudience": o.target_audience,
-        "buyerPersona": o.buyer_persona,
-        "businessModel": o.business_model,
-        "monetizationPath": o.monetization_path,
-        "competitionLevel": o.competition_level,
-        "marketSaturation": o.market_saturation,
         "recommendedNextStep": o.recommended_next_step,
         "topComments": o.top_comments,
     }
@@ -501,16 +492,10 @@ def _build_next_step_context(opp: Opportunity, problems: list[Problem], cluster:
     lines = [f"OPPORTUNITY: {opp.title}"]
     if opp.description:
         lines.append(f"Description: {opp.description[:600]}")
-    if opp.primary_problem:
-        lines.append(f"Primary problem: {opp.primary_problem}")
-    if opp.target_audience:
-        lines.append(f"Target audience: {opp.target_audience}")
 
     if cluster is not None:
         lines.append("")
         lines.append(f"CLUSTER: {cluster.name or 'unnamed'}")
-        if cluster.description:
-            lines.append(f"Cluster description: {cluster.description[:400]}")
         cluster_bits = []
         if cluster.growth_rate_wow is not None:
             cluster_bits.append(f"WoW growth {round(cluster.growth_rate_wow * 100)}%")

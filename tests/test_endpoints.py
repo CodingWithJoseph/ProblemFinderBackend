@@ -50,23 +50,6 @@ async def client():
     await engine.dispose()
 
 
-async def test_revenue_signals_crud(client):
-    created = (await client.post("/revenue-signals", json={"domain": "Finance", "revenue_amount": 1000})).json()
-    sid = created["data"]["id"]
-    assert created["data"]["domain"] == "Finance"
-    listed = (await client.get("/revenue-signals")).json()
-    assert any(r["id"] == sid for r in listed["data"])
-    await client.delete(f"/revenue-signals/{sid}")
-
-
-async def test_experiments_with_results(client):
-    exp = (await client.post("/experiments", json={"experiment_name": "lp test"})).json()["data"]
-    res = await client.post(f"/experiments/{exp['id']}/results", json={"impressions": 100, "purchases": 2})
-    assert res.status_code == 200
-    full = (await client.get(f"/experiments/{exp['id']}")).json()["data"]
-    assert len(full["results"]) == 1
-
-
 async def test_dashboard_summary(client):
     r = await client.get("/dashboard/summary")
     assert r.status_code == 200
