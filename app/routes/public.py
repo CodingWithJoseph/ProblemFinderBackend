@@ -88,7 +88,7 @@ async def _posts_by_cluster(cluster_ids: list[int], db: AsyncSession) -> dict[in
     for cid, sp in rows:
         grouped.setdefault(cid, []).append(sp)
     for posts in grouped.values():
-        posts.sort(key=lambda p: (p.score is not None, p.score), reverse=True)
+        posts.sort(key=lambda p: (p.score is not None, p.score or 0), reverse=True)
     return grouped
 
 

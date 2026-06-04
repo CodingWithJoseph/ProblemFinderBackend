@@ -103,7 +103,9 @@ async def enforce_problems_limit(uid: str, plan: PlanEnum, pipeline_id: str, db:
     if cap is None:
         return
     res = await db.execute(
-        select(func.count()).where(Problem.pipeline_id == pipeline_id)
+        select(func.count()).where(
+            Problem.pipeline_id == pipeline_id, Problem.user_id == uid
+        )
     )
     if (res.scalar() or 0) >= cap:
         raise LimitReached("problems", plan, status_code=403)
@@ -114,7 +116,9 @@ async def enforce_tasks_limit(uid: str, plan: PlanEnum, pipeline_id: str, db: As
     if cap is None:
         return
     res = await db.execute(
-        select(func.count()).where(Task.pipeline_id == pipeline_id)
+        select(func.count()).where(
+            Task.pipeline_id == pipeline_id, Task.user_id == uid
+        )
     )
     if (res.scalar() or 0) >= cap:
         raise LimitReached("tasks", plan, status_code=403)

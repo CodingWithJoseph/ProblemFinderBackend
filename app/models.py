@@ -165,9 +165,9 @@ class ClusterSnapshot(Base):
     __tablename__ = "cluster_snapshots"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    cluster_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    date: Mapped[date] = mapped_column(Date, nullable=False)
-    post_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    cluster_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    post_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     sample_posts: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     comment_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     unique_author_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -213,7 +213,7 @@ class Problem(Base):
     __tablename__ = "problems"
 
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
-    pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), nullable=False)
+    pipeline_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), nullable=True)
     user_id: Mapped[str] = mapped_column(String(128), nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -234,7 +234,7 @@ class Task(Base):
 
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     problem_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), nullable=True)
-    pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), nullable=False)
+    pipeline_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), nullable=True)
     user_id: Mapped[str] = mapped_column(String(128), nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)

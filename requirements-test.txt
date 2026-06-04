@@ -14,3 +14,4 @@ httpx
 pgvector
 pytest
 pytest-asyncio
+aiosqlite

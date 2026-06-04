@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Literal
 from fastapi import APIRouter, Depends, Query, HTTPException
-from sqlalchemy import select, func, cast, Date, text
+from sqlalchemy import select, func, cast, Date, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 from app.db import get_db
@@ -466,22 +466,34 @@ async def pipeline_action(
     pipeline_count = opportunity.pipeline_count or 0
     launch_count = opportunity.launch_count or 0
 
+    # Mutate counters atomically in SQL (column = column +/- 1, floored at 0) so
+    # concurrent actions can't lose updates. The response echoes the expected
+    # post-action values computed from the row we just read.
+    pcount = func.coalesce(Opportunity.pipeline_count, 0)
     if body.action == "add":
-        opportunity.pipeline_count = pipeline_count + 1
+        values = {"pipeline_count": pcount + 1}
+        new_pipeline_count, new_launch_count = pipeline_count + 1, launch_count
     elif body.action == "remove":
-        opportunity.pipeline_count = max(0, pipeline_count - 1)
+        values = {"pipeline_count": func.greatest(0, pcount - 1)}
+        new_pipeline_count, new_launch_count = max(0, pipeline_count - 1), launch_count
     elif body.action == "launch":
-        opportunity.pipeline_count = max(0, pipeline_count - 1)
-        opportunity.launch_count = launch_count + 1
+        values = {
+            "pipeline_count": func.greatest(0, pcount - 1),
+            "launch_count": func.coalesce(Opportunity.launch_count, 0) + 1,
+        }
+        new_pipeline_count, new_launch_count = max(0, pipeline_count - 1), launch_count + 1
     else:
         raise HTTPException(status_code=400, detail="Invalid action")
 
+    await db.execute(
+        update(Opportunity).where(Opportunity.id == opportunity_id).values(**values)
+    )
     await db.commit()
 
     return {
         "success": True,
-        "pipelineCount": opportunity.pipeline_count,
-        "launchCount": opportunity.launch_count,
+        "pipelineCount": new_pipeline_count,
+        "launchCount": new_launch_count,
     }
 
 

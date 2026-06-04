@@ -4,7 +4,11 @@ Centralised like openai_client. Defensive by design: if no API key is configured
 generate_next_step returns None, so the feature degrades gracefully instead of
 breaking the request. The static system prompt is marked for prompt caching.
 """
+import logging
+
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 _settings = get_settings()
 
@@ -23,7 +27,7 @@ def _get_client():
                 from anthropic import AsyncAnthropic
                 _client = AsyncAnthropic(api_key=_settings.anthropic_api_key)
             except Exception as exc:  # SDK missing or misconfigured
-                print(f"anthropic client init failed: {exc}")
+                logger.warning("anthropic client init failed: %s", exc)
                 _client = None
     return _client
 
@@ -55,7 +59,7 @@ async def generate_next_step(context: str) -> str | None:
         ).strip()
         return text or None
     except Exception as exc:  # never let an advisory feature break the request
-        print(f"anthropic generate_next_step failed: {exc}")
+        logger.warning("anthropic generate_next_step failed: %s", exc)
         return None
 
 
@@ -88,5 +92,5 @@ async def generate_opportunity_brief(context: str) -> dict | None:
         ).strip()
         return parse_brief_content(text)
     except Exception as exc:  # advisory feature — never break the request
-        print(f"anthropic generate_opportunity_brief failed: {exc}")
+        logger.warning("anthropic generate_opportunity_brief failed: %s", exc)
         return None

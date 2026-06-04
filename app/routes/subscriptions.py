@@ -7,7 +7,10 @@ from app.models import Subscription, PlanEnum
 from app.auth import get_uid, get_firestore
 from app.config import get_settings
 from datetime import datetime, timezone
+import logging
 import stripe
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 stripe.api_key = settings.stripe_secret_key
@@ -54,7 +57,7 @@ def _write_plan_to_firestore(uid: str, plan: str):
         fs = get_firestore()
         fs.collection('users').document(uid).update({'plan': plan})
     except Exception as e:
-        print(f"Firestore write failed: {e}")
+        logger.warning("firestore plan write failed for %s: %s", uid, e)
 
 
 def _get_stripe_attr(obj, key: str, default=None):
@@ -218,12 +221,19 @@ async def stripe_webhook(
     event_type = event["type"]
     data = event["data"]["object"]
 
-    if event_type == "checkout.session.completed":
-        await _handle_checkout_completed(data, db)
-    elif event_type == "customer.subscription.updated":
-        await _sync_subscription(data, db)
-    elif event_type == "customer.subscription.deleted":
-        await _handle_cancellation(data, db)
+    # A handler bug must not 500 — Stripe would retry the same broken event
+    # indefinitely. The signature was already verified above (400 on failure),
+    # so by here the event is trusted; ack it with 200 even if handling fails.
+    try:
+        if event_type == "checkout.session.completed":
+            await _handle_checkout_completed(data, db)
+        elif event_type == "customer.subscription.updated":
+            await _sync_subscription(data, db)
+        elif event_type == "customer.subscription.deleted":
+            await _handle_cancellation(data, db)
+    except Exception:
+        logger.exception("stripe webhook handler failed for event %s", event_type)
+        return {"received": True, "handled": False}
 
     return {"received": True}
 
@@ -244,7 +254,7 @@ async def _get_uid_from_stripe_sub(stripe_sub, db: AsyncSession) -> str | None:
         if metadata and "uid" in metadata:
             return metadata["uid"]
     except Exception as e:
-        print(f"GET_UID: metadata error={e}")
+        logger.warning("stripe uid metadata lookup failed: %s", e)
 
     try:
         customer = stripe_sub.customer if not isinstance(stripe_sub, dict) else stripe_sub.get("customer")
@@ -256,9 +266,9 @@ async def _get_uid_from_stripe_sub(stripe_sub, db: AsyncSession) -> str | None:
             if existing:
                 return existing.uid
     except Exception as e:
-        print(f"GET_UID: customer lookup error={e}")
+        logger.warning("stripe uid customer lookup failed: %s", e)
 
-    print("GET_UID: no uid found")
+    logger.info("stripe webhook: could not resolve uid for subscription")
     return None
 
 
@@ -306,8 +316,10 @@ async def _sync_subscription(
     sub.stripe_price_id = price_id
     sub.plan = plan
     sub.cancel_at_period_end = cancel_at_period_end
-    sub.current_period_end = datetime.fromtimestamp(
-        current_period_end, tz=timezone.utc
+    sub.current_period_end = (
+        datetime.fromtimestamp(current_period_end, tz=timezone.utc)
+        if current_period_end
+        else None
     )
 
     await db.flush()
