@@ -138,6 +138,13 @@ class Cluster(Base):
     audience_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     problem_category: Mapped[str | None] = mapped_column(Text, nullable=True)
     monetization_category: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Rolled up from child opportunities by the AI pipeline: the most-frequent
+    # child value as the primary (TEXT) plus the distinct set (JSONB). Filtered
+    # on the scalar columns in /clusters/browse + /clusters/search.
+    opportunity_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    opportunity_domain: Mapped[str | None] = mapped_column(Text, nullable=True)
+    opportunity_types: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    opportunity_domains: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     author_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     community_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     growth_acceleration: Mapped[float | None] = mapped_column(Float, nullable=True)

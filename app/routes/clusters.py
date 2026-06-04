@@ -276,6 +276,20 @@ def _member_stats_subquery():
     )
 
 
+def _skip_filter(value: str | None) -> bool:
+    """A taxonomy filter is skipped when it's absent, blank, or "All"."""
+    return value is None or value.strip() == "" or value.strip().lower() == "all"
+
+
+def _apply_taxonomy_filters(base, opportunity_type: str | None, opportunity_domain: str | None):
+    """Add equality filters on the cluster's primary type/domain when provided."""
+    if not _skip_filter(opportunity_type):
+        base = base.where(Cluster.opportunity_type == opportunity_type)
+    if not _skip_filter(opportunity_domain):
+        base = base.where(Cluster.opportunity_domain == opportunity_domain)
+    return base
+
+
 async def _materialize_discovery(
     base, order_clauses: list, limit: int, offset: int, uid: str, db: AsyncSession
 ) -> dict:
@@ -304,6 +318,8 @@ async def search_clusters(
     limit: int = Query(SEARCH_DEFAULT_LIMIT, ge=1, le=SEARCH_MAX_LIMIT),
     offset: int = Query(0, ge=0),
     min_posts: int = Query(1, ge=1),
+    opportunity_type: str | None = Query(None),
+    opportunity_domain: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
@@ -324,6 +340,7 @@ async def search_clusters(
             or_(*conditions),
         )
     )
+    base = _apply_taxonomy_filters(base, opportunity_type, opportunity_domain)
     order_clauses = [
         member_stats.c.post_count.desc(),
         member_stats.c.last_posted.desc().nullslast(),
@@ -338,6 +355,8 @@ async def browse_clusters(
     sort: str = Query("largest"),
     subreddit: str | None = Query(None),
     min_posts: int = Query(1, ge=1),
+    opportunity_type: str | None = Query(None),
+    opportunity_domain: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
@@ -352,6 +371,7 @@ async def browse_clusters(
             member_stats.c.post_count >= min_posts,
         )
     )
+    base = _apply_taxonomy_filters(base, opportunity_type, opportunity_domain)
 
     if subreddit:
         member_exists = (
