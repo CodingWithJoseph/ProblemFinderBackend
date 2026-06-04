@@ -35,7 +35,7 @@ def _serialize(o: Opportunity) -> dict:
         "description": o.description,
         "source": o.source,
         "sourceUrl": o.source_url,
-        "type": o.type,
+        "opportunityType": o.opportunity_type,
         "sourceScore": o.source_score,
         "trending": o.trending,
         "clusterId": o.cluster_id,
@@ -116,7 +116,7 @@ async def _get_plan(uid: str, db: AsyncSession) -> PlanEnum:
 async def get_opportunities(
     page: int = Query(1, ge=1),
     pageSize: int = Query(default=20, ge=1, le=100),
-    type: str | None = Query(None),
+    opportunity_type: str | None = Query(None),
     has_cluster: bool | None = Query(None),
     cluster_id: int | None = Query(None),
     sort: str | None = Query(None),
@@ -137,8 +137,8 @@ async def get_opportunities(
         Opportunity.pipeline_version == PIPELINE_VERSION,
     )
 
-    if type:
-        query = query.where(Opportunity.type == type)
+    if opportunity_type:
+        query = query.where(Opportunity.opportunity_type == opportunity_type)
     if has_cluster is True:
         query = query.where(Opportunity.cluster_id != None)
     elif has_cluster is False:

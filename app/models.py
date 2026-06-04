@@ -44,7 +44,7 @@ class Opportunity(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     source: Mapped[str] = mapped_column(String(50), nullable=False)
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    opportunity_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     source_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     trending: Mapped[bool] = mapped_column(Boolean, default=False)
     cluster_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -62,7 +62,7 @@ class Opportunity(Base):
     # NOTE: hybrid_search RETURNS SETOF opportunities and the /search route
     # rebuilds Opportunity(**row) from SELECT *. The reconstruction filters the
     # row down to mapped columns, so live ``opportunities`` columns we don't map
-    # (embedding, noise_filter_*, opportunity_type/_domain, …) are ignored rather
+    # (embedding, noise_filter_*, opportunity_domain, …) are ignored rather
     # than passed in.
     top_comments: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     recommended_next_step: Mapped[str | None] = mapped_column(Text, nullable=True)

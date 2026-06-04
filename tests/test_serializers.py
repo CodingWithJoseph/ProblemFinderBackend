@@ -13,9 +13,9 @@ from app.models import (
 
 def test_opportunity_serialize_keeps_non_scoring_fields():
     from app.routes.opportunities import _serialize
-    o = Opportunity(title="t", type="software", recommended_next_step="ship it")
+    o = Opportunity(title="t", opportunity_type="software", recommended_next_step="ship it")
     d = _serialize(o)
-    assert d["type"] == "software"
+    assert d["opportunityType"] == "software"
     assert d["recommendedNextStep"] == "ship it"
     # Stale scoring + dropped enrichment fields are no longer exposed.
     for removed in (
