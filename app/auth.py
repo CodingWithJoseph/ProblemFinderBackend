@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 from pathlib import Path
 
 from fastapi import Depends, HTTPException, status
@@ -9,6 +10,7 @@ from firebase_admin import auth, credentials, initialize_app, get_app, firestore
 from app.config import get_settings
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
@@ -47,7 +49,7 @@ async def get_uid(
         decoded = auth.verify_id_token(token.credentials)
         return decoded["uid"]
     except Exception as e:
-        print(f"Token verification failed: {str(e)}")
+        logger.info("token verification failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",

@@ -1,3 +1,4 @@
+import logging
 import math
 import uuid
 from datetime import datetime, timezone
@@ -16,6 +17,8 @@ from app.openai_client import openai_client, EMBEDDING_MODEL
 from app.routes.opportunities import _serialize as _serialize_opportunity, _row_to_opportunity
 
 router = APIRouter(prefix="/problems", tags=["problems"])
+
+logger = logging.getLogger(__name__)
 
 SIMILAR_THRESHOLD = 0.85
 DEFAULT_SIMILAR_POSTS = 10
@@ -88,7 +91,8 @@ async def _embed_problem(problem_id: str) -> None:
             problem.updated_at = datetime.now(timezone.utc)
             await db.commit()
         except Exception:
-            pass  # Background task - never surface errors to the request
+            # Background task — never surface to the request, but log it.
+            logger.exception("problem embedding computation failed")
 
 
 class CreateProblemBody(BaseModel):

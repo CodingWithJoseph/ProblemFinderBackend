@@ -1,3 +1,10 @@
+# Runtime dependencies for the backend API.
+#
+# NOTE: pin concrete versions from the deploy environment's `pip freeze`
+# (commit a requirements.lock.txt) — left unpinned here to avoid guessing
+# versions that differ from production. Test-only deps (pytest, pytest-asyncio,
+# aiosqlite) live in requirements-test.txt, not here.
+
 fastapi
 uvicorn
 sqlalchemy[asyncio]
@@ -10,6 +17,3 @@ openai
 anthropic
 httpx
 pgvector
-pytest
-pytest-asyncio
-aiosqlite

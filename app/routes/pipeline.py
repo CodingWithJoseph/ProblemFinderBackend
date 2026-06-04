@@ -1,11 +1,12 @@
 import csv
 import io
+import logging
 from datetime import datetime, timezone
 from typing import Literal, Optional
 import math
 import random
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query, Response
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
@@ -14,6 +15,8 @@ from app.auth import get_uid
 from app.config import PIPELINE_VERSION
 from app.models import Pipeline, Opportunity, Cluster
 from app.limits import get_plan, limit_for, LimitReached
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
@@ -352,7 +355,8 @@ async def _compute_and_write_metrics(pipeline_id: str, post_ids: list[str]) -> N
                 pipeline.cluster_metrics = metrics
                 await db.commit()
         except Exception:
-            pass  # Background task - don't surface errors to the user
+            # Background task — don't surface to the user, but don't go blind.
+            logger.exception("cluster_metrics computation failed for pipeline %s", pipeline_id)
 
 
 async def _fetch_posts_for_cards(cards: list[Pipeline], db: AsyncSession) -> dict[str, list[dict]]:
@@ -389,15 +393,27 @@ async def _update_opportunity_counts(opportunity_id: str, action: str, db: Async
     opp = result.scalar_one_or_none()
     if not opp:
         return
-    pipeline_count = opp.pipeline_count or 0
-    launch_count = opp.launch_count or 0
+    # Atomic counter updates so concurrent add/remove/launch can't lose writes.
+    pcount = func.coalesce(Opportunity.pipeline_count, 0)
     if action == "add":
-        opp.pipeline_count = pipeline_count + 1
+        values = {"pipeline_count": pcount + 1}
     elif action == "remove":
-        opp.pipeline_count = max(0, pipeline_count - 1)
+        values = {"pipeline_count": func.greatest(0, pcount - 1)}
     elif action == "launch":
-        opp.pipeline_count = max(0, pipeline_count - 1)
-        opp.launch_count = launch_count + 1
+        values = {
+            "pipeline_count": func.greatest(0, pcount - 1),
+            "launch_count": func.coalesce(Opportunity.launch_count, 0) + 1,
+        }
+    else:
+        return
+    await db.execute(
+        update(Opportunity)
+        .where(
+            Opportunity.id == opportunity_id,
+            Opportunity.pipeline_version == PIPELINE_VERSION,
+        )
+        .values(**values)
+    )
 
 
 class CreatePipelineBody(BaseModel):
