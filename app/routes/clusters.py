@@ -303,6 +303,7 @@ async def search_clusters(
     q: str = Query(..., min_length=2),
     limit: int = Query(SEARCH_DEFAULT_LIMIT, ge=1, le=SEARCH_MAX_LIMIT),
     offset: int = Query(0, ge=0),
+    min_posts: int = Query(1, ge=1),
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
@@ -319,6 +320,7 @@ async def search_clusters(
         .where(
             Cluster.pipeline_version == PIPELINE_VERSION,
             Cluster.is_singleton == False,
+            member_stats.c.post_count >= min_posts,
             or_(*conditions),
         )
     )
@@ -335,6 +337,7 @@ async def browse_clusters(
     offset: int = Query(0, ge=0),
     sort: str = Query("largest"),
     subreddit: str | None = Query(None),
+    min_posts: int = Query(1, ge=1),
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
@@ -346,6 +349,7 @@ async def browse_clusters(
         .where(
             Cluster.pipeline_version == PIPELINE_VERSION,
             Cluster.is_singleton == False,
+            member_stats.c.post_count >= min_posts,
         )
     )
 

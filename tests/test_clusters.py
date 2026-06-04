@@ -395,3 +395,47 @@ async def test_cluster_browse_returns_shape(client, fake_db, auth_headers):
     assert body["data"][0]["id"] == 9
     assert body["data"][0]["post_count"] == 1
     assert body["data"][0]["subreddits"] == ["r/SaaS"]
+
+
+async def test_cluster_browse_min_posts_filter(client, fake_db, auth_headers):
+    captured = []
+    orig_execute = fake_db.execute
+
+    async def _capture(statement, params=None):
+        captured.append(str(statement))
+        return await orig_execute(statement, params)
+
+    fake_db.execute = _capture
+    fake_db.stub(
+        scalar=[0],
+        execute=[FakeResult(rows=[]), FakeResult(rows=[]), FakeResult(rows=[])],
+    )
+    resp = await client.get("/clusters/browse", params={"min_posts": 5}, headers=auth_headers)
+    assert resp.status_code == 200
+    # min_posts applies a post_count >= N predicate on the member-stats subquery
+    assert "post_count >=" in captured[0]
+
+
+async def test_cluster_browse_min_posts_rejects_below_one(client, fake_db, auth_headers):
+    resp = await client.get("/clusters/browse", params={"min_posts": 0}, headers=auth_headers)
+    assert resp.status_code == 422
+
+
+async def test_cluster_search_min_posts_filter(client, fake_db, auth_headers):
+    captured = []
+    orig_execute = fake_db.execute
+
+    async def _capture(statement, params=None):
+        captured.append(str(statement))
+        return await orig_execute(statement, params)
+
+    fake_db.execute = _capture
+    fake_db.stub(
+        scalar=[0],
+        execute=[FakeResult(rows=[]), FakeResult(rows=[]), FakeResult(rows=[])],
+    )
+    resp = await client.get(
+        "/clusters/search", params={"q": "invoic", "min_posts": 3}, headers=auth_headers
+    )
+    assert resp.status_code == 200
+    assert "post_count >=" in captured[0]
