@@ -395,3 +395,101 @@ async def test_cluster_browse_returns_shape(client, fake_db, auth_headers):
     assert body["data"][0]["id"] == 9
     assert body["data"][0]["post_count"] == 1
     assert body["data"][0]["subreddits"] == ["r/SaaS"]
+
+
+async def test_cluster_browse_min_posts_filter(client, fake_db, auth_headers):
+    captured = []
+    orig_execute = fake_db.execute
+
+    async def _capture(statement, params=None):
+        captured.append(str(statement))
+        return await orig_execute(statement, params)
+
+    fake_db.execute = _capture
+    fake_db.stub(
+        scalar=[0],
+        execute=[FakeResult(rows=[]), FakeResult(rows=[]), FakeResult(rows=[])],
+    )
+    resp = await client.get("/clusters/browse", params={"min_posts": 5}, headers=auth_headers)
+    assert resp.status_code == 200
+    # min_posts applies a post_count >= N predicate on the member-stats subquery
+    assert "post_count >=" in captured[0]
+
+
+async def test_cluster_browse_min_posts_rejects_below_one(client, fake_db, auth_headers):
+    resp = await client.get("/clusters/browse", params={"min_posts": 0}, headers=auth_headers)
+    assert resp.status_code == 422
+
+
+async def test_cluster_search_min_posts_filter(client, fake_db, auth_headers):
+    captured = []
+    orig_execute = fake_db.execute
+
+    async def _capture(statement, params=None):
+        captured.append(str(statement))
+        return await orig_execute(statement, params)
+
+    fake_db.execute = _capture
+    fake_db.stub(
+        scalar=[0],
+        execute=[FakeResult(rows=[]), FakeResult(rows=[]), FakeResult(rows=[])],
+    )
+    resp = await client.get(
+        "/clusters/search", params={"q": "invoic", "min_posts": 3}, headers=auth_headers
+    )
+    assert resp.status_code == 200
+    assert "post_count >=" in captured[0]
+
+
+def _capture_main_query(fake_db):
+    """Wire a capture wrapper + empty result queue; return the captured list."""
+    captured = []
+    orig_execute = fake_db.execute
+
+    async def _capture(statement, params=None):
+        captured.append(str(statement))
+        return await orig_execute(statement, params)
+
+    fake_db.execute = _capture
+    fake_db.stub(
+        scalar=[0],
+        execute=[FakeResult(rows=[]), FakeResult(rows=[]), FakeResult(rows=[])],
+    )
+    return captured
+
+
+async def test_cluster_browse_type_and_domain_filters(client, fake_db, auth_headers):
+    captured = _capture_main_query(fake_db)
+    resp = await client.get(
+        "/clusters/browse",
+        params={"opportunity_type": "Digital", "opportunity_domain": "Finance and Insurance"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    assert "opportunity_type =" in captured[0]
+    assert "opportunity_domain =" in captured[0]
+
+
+async def test_cluster_search_type_and_domain_filters(client, fake_db, auth_headers):
+    captured = _capture_main_query(fake_db)
+    resp = await client.get(
+        "/clusters/search",
+        params={"q": "invoic", "opportunity_type": "Physical", "opportunity_domain": "Home Services"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    assert "opportunity_type =" in captured[0]
+    assert "opportunity_domain =" in captured[0]
+
+
+async def test_cluster_browse_all_value_skips_taxonomy_filters(client, fake_db, auth_headers):
+    captured = _capture_main_query(fake_db)
+    resp = await client.get(
+        "/clusters/browse",
+        params={"opportunity_type": "All", "opportunity_domain": ""},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    # "All"/empty are treated as "no filter"
+    assert "opportunity_type =" not in captured[0]
+    assert "opportunity_domain =" not in captured[0]
