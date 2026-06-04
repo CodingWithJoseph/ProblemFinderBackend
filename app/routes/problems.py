@@ -239,20 +239,6 @@ async def create_problem(
         source_post_id=body.source_post_id,
     )
 
-    # Pre-populate the buyer type from the linked opportunity (Decision #4);
-    # the user can edit it afterward via PATCH. The simplified pipeline no
-    # longer produces the pain/urgency/wtp/solution-seeking scores that were
-    # previously copied across.
-    if body.source_post_id and _is_uuid(body.source_post_id):
-        opp = (await db.execute(
-            select(Opportunity).where(
-                Opportunity.id == body.source_post_id,
-                Opportunity.pipeline_version == PIPELINE_VERSION,
-            )
-        )).scalar_one_or_none()
-        if opp:
-            problem.buyer_type = opp.buyer_persona
-
     db.add(problem)
     await db.commit()
     await db.refresh(problem)

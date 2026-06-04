@@ -7,38 +7,41 @@ import uuid
 from datetime import date
 
 from app.models import (
-    Opportunity, Cluster, Pipeline, Problem,
-    RevenueSignal, Experiment, ExperimentResult, DomainSnapshot,
+    Opportunity, Cluster, Pipeline, Problem, DomainSnapshot,
 )
 
 
 def test_opportunity_serialize_keeps_non_scoring_fields():
     from app.routes.opportunities import _serialize
-    o = Opportunity(
-        title="t", revenue_potential_score=0.7, primary_problem="invoices",
-    )
+    o = Opportunity(title="t", type="software", recommended_next_step="ship it")
     d = _serialize(o)
-    assert d["revenuePotentialScore"] == 0.7
-    assert d["primaryProblem"] == "invoices"
-    # Stale scoring fields are no longer exposed (JOB 3).
+    assert d["type"] == "software"
+    assert d["recommendedNextStep"] == "ship it"
+    # Stale scoring + dropped enrichment fields are no longer exposed.
     for removed in (
         "painScore", "urgencyScore", "commercialIntentScore", "solutionSeekingScore",
         "signalScore", "signalStrength", "signalReason", "industryCategory",
         "confidenceScore", "wtpSignal", "intensity", "sentiment", "domain",
+        # dropped in migration 0008 (NULL-forever enrichment columns)
+        "revenuePotentialScore", "primaryProblem", "targetAudience", "buyerPersona",
+        "businessModel", "monetizationPath", "competitionLevel", "marketSaturation",
+        "upvotes",
     ):
         assert removed not in d
 
 
 def test_cluster_serialize_drops_scoring_fields():
     from app.routes.clusters import _serialize_cluster
-    c = Cluster(id=1, name="c", status="growing",
-                growth_acceleration=0.1, revenue_potential_score=0.7,
-                competition_score=0.2, saturation_score=0.3)
+    c = Cluster(id=1, name="c", status="growing", growth_acceleration=0.1)
     d = _serialize_cluster(c, post_count=5, signals={})
     assert d["status"] == "growing"
     assert d["growthAcceleration"] == 0.1
-    assert d["revenuePotentialScore"] == 0.7
-    for removed in ("signalScore", "avgPainScore", "avgUrgencyScore", "confidenceScore"):
+    # dropped in migration 0008 (never populated / never rendered)
+    for removed in (
+        "signalScore", "avgPainScore", "avgUrgencyScore", "confidenceScore",
+        "revenuePotentialScore", "competitionScore", "saturationScore",
+        "description", "audienceType", "problemCategory", "monetizationCategory",
+    ):
         assert removed not in d
 
 
@@ -72,30 +75,6 @@ def test_problem_serialize_and_helpers():
 
     assert _is_uuid(str(uuid.uuid4())) is True
     assert _is_uuid("not-a-uuid") is False
-
-
-def test_revenue_signal_serialize():
-    from app.routes.revenue_signals import _serialize
-    r = RevenueSignal(user_id="u", domain="Finance", price_point=29,
-                      revenue_amount=2900, customer_count=100, conversion_count=3)
-    d = _serialize(r)
-    assert d["domain"] == "Finance"
-    assert d["pricePoint"] == 29.0
-    assert d["revenueAmount"] == 2900.0
-    assert d["customerCount"] == 100
-
-
-def test_experiment_serialize_with_results():
-    from app.routes.experiments import _serialize, _serialize_result
-    e = Experiment(user_id="u", experiment_name="landing page", status="running")
-    res = ExperimentResult(experiment_id="e", impressions=1000, clicks=50,
-                           purchases=3, revenue_generated=297)
-    d = _serialize(e, [res])
-    assert d["experimentName"] == "landing page"
-    assert d["status"] == "running"
-    assert len(d["results"]) == 1
-    assert d["results"][0]["impressions"] == 1000
-    assert d["results"][0]["revenueGenerated"] == 297.0
 
 
 def test_domain_snapshot_serialize():
