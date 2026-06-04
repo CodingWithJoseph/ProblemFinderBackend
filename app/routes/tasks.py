@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from app.db import get_db
 from app.auth import get_uid
-from app.models import Task
+from app.models import Task, Pipeline, Problem
 from app.limits import get_plan, enforce_tasks_limit
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -64,6 +64,26 @@ async def create_task(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
+    # Verify the caller owns the target pipeline (prevents attaching tasks to
+    # another user's pipeline_id).
+    owns = (await db.execute(
+        select(Pipeline.id).where(
+            Pipeline.id == body.pipeline_id, Pipeline.user_id == uid
+        )
+    )).scalar_one_or_none()
+    if owns is None:
+        raise HTTPException(status_code=404, detail="Pipeline card not found")
+
+    # If a problem is linked, it must belong to the caller too.
+    if body.problem_id is not None:
+        owns_problem = (await db.execute(
+            select(Problem.id).where(
+                Problem.id == body.problem_id, Problem.user_id == uid
+            )
+        )).scalar_one_or_none()
+        if owns_problem is None:
+            raise HTTPException(status_code=404, detail="Problem not found")
+
     # Free plan: cap tasks per pipeline (403 with limit_reached on overflow).
     plan = await get_plan(uid, db)
     await enforce_tasks_limit(uid, plan, body.pipeline_id, db)

@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from app.db import get_db, AsyncSessionLocal
 from app.auth import get_uid
 from app.config import PIPELINE_VERSION
-from app.models import Problem, Opportunity
+from app.models import Problem, Opportunity, Pipeline
 from app.limits import get_plan, enforce_problems_limit
 from app.openai_client import openai_client, EMBEDDING_MODEL
 from app.routes.opportunities import _serialize as _serialize_opportunity, _row_to_opportunity
@@ -213,6 +213,16 @@ async def create_problem(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
+    # Verify the caller owns the target pipeline before attaching anything to
+    # it (prevents writing problems under another user's pipeline_id).
+    owns = (await db.execute(
+        select(Pipeline.id).where(
+            Pipeline.id == body.pipeline_id, Pipeline.user_id == uid
+        )
+    )).scalar_one_or_none()
+    if owns is None:
+        raise HTTPException(status_code=404, detail="Pipeline card not found")
+
     # Free plan: cap problems per pipeline (403 with limit_reached on overflow).
     plan = await get_plan(uid, db)
     await enforce_problems_limit(uid, plan, body.pipeline_id, db)

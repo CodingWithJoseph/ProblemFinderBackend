@@ -17,6 +17,11 @@ async def test_create_problem_schedules_embedding_task(client, fake_db, auth_hea
     embed_mock = AsyncMock()
     monkeypatch.setattr(prob_module, "_embed_problem", embed_mock)
 
+    # First execute is the pipeline-ownership check; seed it so the caller is
+    # treated as the owner. Remaining queries fall through to empty defaults
+    # (no subscription -> free plan, zero existing problems).
+    fake_db.stub(execute=[FakeResult(scalar="11111111-1111-1111-1111-111111111111")])
+
     resp = await client.post(
         "/problems",
         headers=auth_headers,
@@ -32,6 +37,20 @@ async def test_create_problem_schedules_embedding_task(client, fake_db, auth_hea
     embed_mock.assert_awaited_once()
     assert fake_db.commit_count >= 1
     assert len(fake_db.added) == 1
+
+
+async def test_create_problem_rejects_unowned_pipeline(client, fake_db, auth_headers):
+    # Ownership check (first execute) returns no row -> caller does not own the
+    # pipeline -> 404, and nothing is written.
+    fake_db.stub(execute=[FakeResult(rows=[])])
+
+    resp = await client.post(
+        "/problems",
+        headers=auth_headers,
+        json={"pipeline_id": "22222222-2222-2222-2222-222222222222", "title": "Not my pipeline"},
+    )
+    assert resp.status_code == 404
+    assert len(fake_db.added) == 0
 
 
 async def test_patch_problem_reembeds_on_title_change(client, fake_db, auth_headers, monkeypatch):
