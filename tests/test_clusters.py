@@ -477,3 +477,13 @@ async def test_cluster_browse_all_value_skips_taxonomy_filters(client, fake_db, 
     # "All"/empty are treated as "no filter"
     assert "opportunity_type =" not in captured[0]
     assert "opportunity_domain =" not in captured[0]
+
+
+async def test_cluster_domains_returns_distinct_sorted(client, fake_db, auth_headers):
+    # The DB returns distinct opportunity_domain values as 1-tuples; the endpoint
+    # flattens them into a plain list under "data".
+    fake_db.stub(execute=[FakeResult(rows=[("E-commerce",), ("Fintech",), ("Health",)])])
+
+    resp = await client.get("/clusters/domains", headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json() == {"data": ["E-commerce", "Fintech", "Health"]}
