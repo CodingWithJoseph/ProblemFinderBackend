@@ -81,10 +81,16 @@ def test_domain_snapshot_serialize():
     from app.routes.domain_snapshots import _serialize
     s = DomainSnapshot(domain="Software", snapshot_date=date(2026, 5, 1),
                        opportunity_count=42, avg_signal_score=55.5,
-                       total_reported_revenue=10000)
+                       avg_growth_rate=0.12)
     d = _serialize(s)
     assert d["domain"] == "Software"
     assert d["snapshotDate"] == "2026-05-01"
     assert d["opportunityCount"] == 42
     assert d["avgSignalScore"] == 55.5
-    assert d["totalReportedRevenue"] == 10000.0
+    assert d["avgGrowthRate"] == 0.12
+    # Columns dropped from live domain_snapshots are no longer serialized.
+    for removed in (
+        "avgRevenuePotentialScore", "avgCommercialIntentScore", "avgPainScore",
+        "totalReportedRevenue", "avgConversionRate",
+    ):
+        assert removed not in d
