@@ -238,7 +238,6 @@ def _src_post(**kw):
         url="https://reddit.com/r/freelance/1",
         score=240,
         num_comments=18,
-        noise_filter_reason="commercial_intent",
         posted_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
     )
     defaults.update(kw)
@@ -272,26 +271,11 @@ async def test_cluster_search_returns_clusters_not_posts(client, fake_db, auth_h
     # sample posts carry the post-level fields
     assert item["sample_posts"][0]["reddit_score"] == 240
     assert item["sample_posts"][0]["subreddit"] == "r/freelance"
-    assert item["sample_posts"][0]["noise_filter_reason"] == "commercial_intent"
-    # top_signal derived from most common noise_filter_reason
-    assert item["top_signal"] == "commercial_intent"
+    # noise_filter_reason / top_signal were dropped (source_posts has no
+    # noise_filter_reason column in the live schema).
+    assert "noise_filter_reason" not in item["sample_posts"][0]
+    assert "top_signal" not in item
     assert item["is_watched"] is False
-
-
-async def test_cluster_search_top_signal_null_when_no_reasons(client, fake_db, auth_headers):
-    cluster = make_cluster(id=5, name="No-signal cluster")
-    p1 = _src_post(noise_filter_reason=None)
-    fake_db.stub(
-        scalar=[1],
-        execute=[
-            FakeResult(rows=[cluster]),
-            FakeResult(rows=[(5, p1)]),
-            FakeResult(rows=[]),
-        ],
-    )
-    resp = await client.get("/clusters/search", params={"q": "signal"}, headers=auth_headers)
-    assert resp.status_code == 200
-    assert resp.json()["data"][0]["top_signal"] is None
 
 
 async def test_cluster_search_is_watched_reflects_pipeline(client, fake_db, auth_headers):

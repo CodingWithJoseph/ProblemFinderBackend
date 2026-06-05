@@ -1,4 +1,3 @@
-from collections import Counter
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -162,8 +161,8 @@ def _serialize_cluster(c: Cluster, post_count: int | None, signals: dict) -> dic
 #
 # These endpoints make the *cluster* the primary unit of search (posts live
 # inside clusters). They read the v2 simplified pipeline tables — cluster_members
-# joined to source_posts — which is where post_count, subreddits, date ranges and
-# noise_filter_reason live (the legacy ``opportunities`` table has none of these).
+# joined to source_posts — which is where post_count, subreddits and date ranges
+# live (the legacy ``opportunities`` table has none of these).
 # Clusters have no embedding column, so the optional pgvector cosine tiebreaker
 # from the spec is skipped (documented decision).
 # ──────────────────────────────────────────────────────────────────────────
@@ -220,16 +219,7 @@ def _sample_post(sp: SourcePost) -> dict:
         "title": sp.title,
         "subreddit": sp.source_community_id,
         "reddit_score": sp.score,
-        "noise_filter_reason": sp.noise_filter_reason,
     }
-
-
-def _derive_top_signal(posts: list[SourcePost]) -> str | None:
-    """Most common non-empty noise_filter_reason across the given (top) posts."""
-    reasons = [p.noise_filter_reason for p in posts if p.noise_filter_reason]
-    if not reasons:
-        return None
-    return Counter(reasons).most_common(1)[0][0]
 
 
 def _serialize_discovery_cluster(
@@ -248,7 +238,6 @@ def _serialize_discovery_cluster(
         "date_range_end": dates[-1] if dates else None,
         "subreddits": subreddits,
         "is_singleton": bool(c.is_singleton),
-        "top_signal": _derive_top_signal(top_posts),
         "sample_posts": [_sample_post(p) for p in top_posts],
         "is_watched": c.id in watched_ids,
     }

@@ -4,7 +4,7 @@ from app.db import Base
 from datetime import datetime, date, timezone
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects.postgresql import TSVECTOR, JSONB, UUID as PGUUID, ARRAY
-from sqlalchemy import String, Text, Integer, Boolean, Float, Numeric, DateTime, Date, TIMESTAMP
+from sqlalchemy import String, Text, Integer, Boolean, Float, DateTime, Date, TIMESTAMP
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -62,8 +62,7 @@ class Opportunity(Base):
     # NOTE: hybrid_search RETURNS SETOF opportunities and the /search route
     # rebuilds Opportunity(**row) from SELECT *. The reconstruction filters the
     # row down to mapped columns, so live ``opportunities`` columns we don't map
-    # (embedding, noise_filter_*, opportunity_domain, …) are ignored rather
-    # than passed in.
+    # (embedding, opportunity_domain, …) are ignored rather than passed in.
     top_comments: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     recommended_next_step: Mapped[str | None] = mapped_column(Text, nullable=True)
     model_version: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
@@ -247,10 +246,6 @@ class SourcePost(Base):
     num_comments: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_deleted: Mapped[bool | None] = mapped_column(Boolean, default=False)
     is_removed: Mapped[bool | None] = mapped_column(Boolean, default=False)
-    # Simplified-pipeline noise filter result (see migration
-    # add_pipeline_version_source_posts.sql).
-    noise_filter_keep: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    noise_filter_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     language: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     content_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -282,10 +277,5 @@ class DomainSnapshot(Base):
     opportunity_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     avg_signal_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     avg_growth_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
-    avg_revenue_potential_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    avg_commercial_intent_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    avg_pain_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    total_reported_revenue: Mapped[float | None] = mapped_column(Numeric, nullable=True)
-    avg_conversion_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
     top_clusters: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))

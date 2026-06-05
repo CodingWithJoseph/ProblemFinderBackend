@@ -9,10 +9,6 @@ from app.models import DomainSnapshot
 router = APIRouter(prefix="/domain-snapshots", tags=["domain_snapshots"])
 
 
-def _f(v):
-    return float(v) if v is not None else None
-
-
 def _serialize(s: DomainSnapshot) -> dict:
     return {
         "id": s.id,
@@ -22,11 +18,6 @@ def _serialize(s: DomainSnapshot) -> dict:
         "opportunityCount": s.opportunity_count,
         "avgSignalScore": s.avg_signal_score,
         "avgGrowthRate": s.avg_growth_rate,
-        "avgRevenuePotentialScore": s.avg_revenue_potential_score,
-        "avgCommercialIntentScore": s.avg_commercial_intent_score,
-        "avgPainScore": s.avg_pain_score,
-        "totalReportedRevenue": _f(s.total_reported_revenue),
-        "avgConversionRate": s.avg_conversion_rate,
         "topClusters": s.top_clusters,
         "createdAt": s.created_at.isoformat() if s.created_at else None,
     }
