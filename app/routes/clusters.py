@@ -430,6 +430,36 @@ async def get_trending_clusters(
     }
 
 
+@router.get("/domains")
+async def list_cluster_domains(
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Distinct opportunity_domain values across active clusters.
+
+    Clusters are the single source of truth for which domains exist, so the
+    Search "Domain" filter reads from here (not domain_snapshots, which is a
+    time-series analytics table). Scoped to the current pipeline version so the
+    returned labels correspond to clusters that can actually surface in
+    search/browse results. Sorted alphabetically.
+
+    NOTE: declared before ``/{cluster_id}`` so "domains" isn't captured by the
+    integer path param.
+    """
+    result = await db.execute(
+        select(Cluster.opportunity_domain)
+        .where(
+            Cluster.pipeline_version == PIPELINE_VERSION,
+            Cluster.opportunity_domain.isnot(None),
+            func.trim(Cluster.opportunity_domain) != "",
+        )
+        .distinct()
+        .order_by(Cluster.opportunity_domain.asc())
+    )
+    domains = [d for (d,) in result.all()]
+    return {"data": domains}
+
+
 @router.get("/{cluster_id}")
 async def get_cluster(
     cluster_id: int,
