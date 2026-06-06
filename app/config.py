@@ -5,7 +5,7 @@ from pathlib import Path
 # Pipeline data version. The simplified ("v2") pipeline is the only version the
 # API surfaces; every query that touches pipeline-produced tables filters on
 # this value. Never hardcode the literal string — import this constant.
-PIPELINE_VERSION = "v1"
+PIPELINE_VERSION = "v2"
 
 
 class Settings(BaseSettings):
