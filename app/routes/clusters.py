@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import ValidationError
 from sqlalchemy import select, func, text, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
@@ -9,12 +10,25 @@ from app.config import PIPELINE_VERSION
 from app.models import Cluster, ClusterSnapshot, Opportunity, ClusterMember, SourcePost, Pipeline
 from app.limits import get_plan, ai_clusters_allowed, is_pro_plus, LimitReached
 from app.brief import assemble_brief, new_meta, momentum_from_growth
-from app.anthropic_client import generate_opportunity_brief, brief_model_version
+from app.anthropic_client import (
+    generate_opportunity_brief,
+    brief_model_version,
+    generate_discovery_brief,
+    BriefGenerationError,
+)
+from app.prompts.briefs import (
+    DISCOVERY_SYSTEM_PROMPT,
+    DiscoveryBrief,
+    build_discovery_user_prompt,
+    is_fresh,
+)
 
 router = APIRouter(prefix="/clusters", tags=["clusters"])
 
 SUFFICIENT_HISTORY_DAYS = 7
 BRIEF_TOP_POSTS = 8
+DISCOVERY_TOP_POSTS = 5
+BRIEF_UNAVAILABLE = "Brief generation temporarily unavailable"
 
 # --- Cluster search / browse (cluster-first discovery) ---------------------
 SEARCH_DEFAULT_LIMIT = 20
@@ -41,10 +55,11 @@ def _excerpt(title, description, limit: int = 240) -> str:
     return joined[:limit].rstrip()
 
 
-def _brief_response(cluster: Cluster) -> dict:
+def _build_brief_response(cluster: Cluster) -> dict:
+    """Build-stage (legacy founder) brief response consumed by Report/Building."""
     return {
         "clusterId": cluster.id,
-        "brief": cluster.opportunity_brief,
+        "brief": cluster.brief_build,
         "generatedAt": _iso(cluster.brief_generated_at) or None,
         "modelVersion": cluster.brief_model_version,
     }
@@ -152,7 +167,7 @@ def _serialize_cluster(c: Cluster, post_count: int | None, signals: dict) -> dic
         "signals": signals,
         "briefGeneratedAt": _iso(c.brief_generated_at) or None,
         "briefModelVersion": c.brief_model_version,
-        "hasOpportunityBrief": c.opportunity_brief is not None,
+        "hasOpportunityBrief": c.brief_build is not None,
     }
 
 
@@ -537,22 +552,133 @@ async def get_cluster(
     }
 
 
-@router.get("/{cluster_id}/brief")
-async def get_cluster_brief(
-    cluster_id: int,
-    db: AsyncSession = Depends(get_db),
-    uid: str = Depends(get_uid),
-):
+async def _fetch_cluster(cluster_id: int, db: AsyncSession) -> Cluster | None:
     result = await db.execute(
         select(Cluster).where(
             Cluster.id == cluster_id,
             Cluster.pipeline_version == PIPELINE_VERSION,
         )
     )
-    cluster = result.scalar_one_or_none()
+    return result.scalar_one_or_none()
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Staged opportunity briefs
+#
+# Four stages, each with its own column + prompt (see app/prompts/briefs.py):
+#   discovery  → Signal page            (implemented — generated with Claude)
+#   market     → Research / Market page  (scaffolded — coming_soon stub)
+#   validation → Validate page           (scaffolded — coming_soon stub)
+#   build      → Building / Report page   (legacy founder brief, generated via
+#                                          /brief/refresh and read here)
+#
+# Shared lifecycle: check cache → generate if null or stale → store → return.
+# Cache TTL is 7 days; ?refresh=true forces regeneration.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+@router.get("/{cluster_id}/brief/discovery", response_model=DiscoveryBrief)
+async def get_discovery_brief(
+    cluster_id: int,
+    refresh: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Discovery brief for the Signal page — "is this worth investigating?".
+
+    Returns the cached brief when it exists and is fresh (< 7 days) unless
+    ``?refresh=true``; otherwise generates a new one with Claude and caches it.
+    The system prompt is server-side only and never returned to the client.
+    """
+    cluster = await _fetch_cluster(cluster_id, db)
     if not cluster:
         raise HTTPException(status_code=404, detail="Cluster not found")
-    return _brief_response(cluster)
+
+    # Serve fresh cache unless a refresh was explicitly requested.
+    if not refresh and cluster.brief_discovery:
+        try:
+            cached = DiscoveryBrief(**{**cluster.brief_discovery, "cached": True})
+        except ValidationError:
+            cached = None  # stored shape predates this schema → regenerate
+        if cached is not None and is_fresh(cached.generated_at):
+            return cached
+
+    # Top 5 representative posts for this cluster (highest-scored first).
+    posts = list((await db.execute(
+        select(Opportunity)
+        .where(
+            Opportunity.cluster_id == cluster_id,
+            Opportunity.deleted_at == None,
+            Opportunity.pipeline_version == PIPELINE_VERSION,
+        )
+        .order_by(Opportunity.source_score.desc().nullslast())
+        .limit(DISCOVERY_TOP_POSTS)
+    )).scalars().all())
+
+    user_prompt = build_discovery_user_prompt(cluster, posts)
+    try:
+        content = await generate_discovery_brief(DISCOVERY_SYSTEM_PROMPT, user_prompt)
+        brief = DiscoveryBrief(
+            **content,
+            generated_at=datetime.now(timezone.utc),
+            cached=False,
+        )
+    except BriefGenerationError:
+        # API failure or unparseable JSON — do not cache.
+        raise HTTPException(status_code=503, detail=BRIEF_UNAVAILABLE)
+    except ValidationError:
+        # Parsed JSON but not in the required shape — treat as a parse failure.
+        raise HTTPException(status_code=503, detail=BRIEF_UNAVAILABLE)
+
+    # Cache (generated_at lives inside the document) and return.
+    cluster.brief_discovery = brief.model_dump(mode="json")
+    await db.commit()
+    return brief
+
+
+@router.get("/{cluster_id}/brief/market")
+async def get_market_brief(
+    cluster_id: int,
+    refresh: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Market brief (Research / Market page) — scaffolded, not yet generated."""
+    cluster = await _fetch_cluster(cluster_id, db)
+    if not cluster:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+    return {"status": "coming_soon"}
+
+
+@router.get("/{cluster_id}/brief/validation")
+async def get_validation_brief(
+    cluster_id: int,
+    refresh: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Validation brief (Validate page) — scaffolded, not yet generated."""
+    cluster = await _fetch_cluster(cluster_id, db)
+    if not cluster:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+    return {"status": "coming_soon"}
+
+
+@router.get("/{cluster_id}/brief/build")
+async def get_build_brief(
+    cluster_id: int,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Build brief (Building / Report page) — the migrated legacy founder brief.
+
+    Returns the cached build brief (generated on demand via /brief/refresh). The
+    Report and Building pages render ``brief`` from this response.
+    """
+    cluster = await _fetch_cluster(cluster_id, db)
+    if not cluster:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+    return _build_brief_response(cluster)
 
 
 @router.post("/{cluster_id}/brief/refresh")
@@ -612,17 +738,17 @@ async def refresh_cluster_brief(
         cluster.id,
         snapshot.id if snapshot else "",
         model,
-        refreshed=cluster.opportunity_brief is not None,
+        refreshed=cluster.brief_build is not None,
     )
     brief = assemble_brief(content, meta=meta, evidence=evidence, signal_strength=signal_strength)
     generated_at = datetime.fromisoformat(meta["generatedAt"])
 
-    cluster.opportunity_brief = brief
+    cluster.brief_build = brief
     cluster.brief_generated_at = generated_at
     cluster.brief_model_version = model
 
     await db.commit()
-    return _brief_response(cluster)
+    return _build_brief_response(cluster)
 
 
 @router.get("/{cluster_id}/snapshots")
