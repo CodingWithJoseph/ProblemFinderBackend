@@ -104,7 +104,7 @@ async def test_get_cluster_not_found(client, fake_db, auth_headers):
     assert resp.status_code == 404
 
 
-async def test_get_cluster_brief_returns_stored_brief(client, fake_db, auth_headers):
+async def test_get_build_brief_returns_stored_brief(client, fake_db, auth_headers):
     brief = {
         "id": "brief-1",
         "clusterId": "42",
@@ -113,13 +113,13 @@ async def test_get_cluster_brief_returns_stored_brief(client, fake_db, auth_head
     }
     cluster = make_cluster(
         id=42,
-        opportunity_brief=brief,
+        brief_build=brief,
         brief_generated_at=datetime(2026, 5, 31, 12, 0, tzinfo=timezone.utc),
         brief_model_version="claude-sonnet-4-6",
     )
     fake_db.stub(execute=[FakeResult(rows=[cluster])])
 
-    resp = await client.get("/clusters/42/brief", headers=auth_headers)
+    resp = await client.get("/clusters/42/brief/build", headers=auth_headers)
     assert resp.status_code == 200
 
     body = resp.json()
@@ -129,10 +129,10 @@ async def test_get_cluster_brief_returns_stored_brief(client, fake_db, auth_head
     assert body["modelVersion"] == "claude-sonnet-4-6"
 
 
-async def test_get_cluster_brief_handles_missing_brief(client, fake_db, auth_headers):
+async def test_get_build_brief_handles_missing_brief(client, fake_db, auth_headers):
     fake_db.stub(execute=[FakeResult(rows=[make_cluster(id=42)])])
 
-    resp = await client.get("/clusters/42/brief", headers=auth_headers)
+    resp = await client.get("/clusters/42/brief/build", headers=auth_headers)
     assert resp.status_code == 200
     assert resp.json() == {
         "clusterId": 42,
@@ -140,6 +140,133 @@ async def test_get_cluster_brief_handles_missing_brief(client, fake_db, auth_hea
         "generatedAt": None,
         "modelVersion": None,
     }
+
+
+def _discovery_content():
+    return {
+        "opportunitySummary": {
+            "title": "Self-serve invoicing for freelancers",
+            "oneLineSummary": "Stop chasing late invoices automatically.",
+            "problemSummary": "Freelancers lose hours every week chasing payments.",
+        },
+        "audience": {
+            "primaryUser": "Solo freelancers",
+            "secondaryUsers": ["Small agencies"],
+            "buyerType": "B2C",
+            "estimatedMarketSize": "~50M freelancers globally; large but fragmented.",
+        },
+        "productAngles": ["Automated reminders", "Stripe-native invoicing"],
+        "risks": ["Crowded market", "Low willingness to pay"],
+        "validationQuestions": ["Will users pay?", "How acute is the pain?", "Who decides?"],
+        "recommendedNextStep": "Interview 10 freelancers about their invoicing workflow.",
+    }
+
+
+async def test_discovery_brief_generates_and_caches(client, fake_db, auth_headers, monkeypatch):
+    captured = {}
+
+    async def fake_generate(system: str, user: str):
+        captured["system"] = system
+        captured["user"] = user
+        return _discovery_content()
+
+    monkeypatch.setattr(clusters_route, "generate_discovery_brief", fake_generate)
+
+    cluster = make_cluster(
+        id=42,
+        name="Freelance invoicing pain",
+        summary="People hate chasing invoices.",
+        top_tfidf_terms=[{"term": "invoice", "score": 0.9}, {"term": "late", "score": 0.7}],
+        source_breakdown=[{"platform": "reddit", "site": "freelance", "count": 12}],
+        brief_discovery=None,
+    )
+    post = make_opportunity(cluster_id=42, source_score=240.0)
+    fake_db.stub(execute=[FakeResult(rows=[cluster]), FakeResult(rows=[post])])
+
+    resp = await client.get("/clusters/42/brief/discovery", headers=auth_headers)
+    assert resp.status_code == 200
+
+    body = resp.json()
+    assert body["cached"] is False
+    assert "generated_at" in body
+    assert body["opportunitySummary"]["title"] == "Self-serve invoicing for freelancers"
+    assert body["audience"]["buyerType"] == "B2C"
+    assert len(body["validationQuestions"]) == 3
+    # Cached to the cluster, committed, and the prompt was built from real data.
+    assert cluster.brief_discovery is not None
+    assert cluster.brief_discovery["cached"] is False
+    assert fake_db.commit_count == 1
+    assert "Cluster: Freelance invoicing pain" in captured["user"]
+    assert "r/freelance: 12 posts" in captured["user"]
+
+
+async def test_discovery_brief_returns_fresh_cache(client, fake_db, auth_headers, monkeypatch):
+    def _boom(*a, **k):
+        raise AssertionError("should not generate when a fresh cache exists")
+
+    monkeypatch.setattr(clusters_route, "generate_discovery_brief", _boom)
+
+    cached = {**_discovery_content(), "generated_at": datetime.now(timezone.utc).isoformat(), "cached": False}
+    cluster = make_cluster(id=42, brief_discovery=cached)
+    fake_db.stub(execute=[FakeResult(rows=[cluster])])
+
+    resp = await client.get("/clusters/42/brief/discovery", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["cached"] is True
+    assert fake_db.commit_count == 0
+
+
+async def test_discovery_brief_refresh_param_forces_regeneration(client, fake_db, auth_headers, monkeypatch):
+    calls = {"n": 0}
+
+    async def fake_generate(system: str, user: str):
+        calls["n"] += 1
+        return _discovery_content()
+
+    monkeypatch.setattr(clusters_route, "generate_discovery_brief", fake_generate)
+
+    cached = {**_discovery_content(), "generated_at": datetime.now(timezone.utc).isoformat(), "cached": False}
+    cluster = make_cluster(id=42, brief_discovery=cached)
+    post = make_opportunity(cluster_id=42, source_score=10.0)
+    fake_db.stub(execute=[FakeResult(rows=[cluster]), FakeResult(rows=[post])])
+
+    resp = await client.get("/clusters/42/brief/discovery?refresh=true", headers=auth_headers)
+    assert resp.status_code == 200
+    assert calls["n"] == 1
+    assert resp.json()["cached"] is False
+
+
+async def test_discovery_brief_unavailable_returns_503(client, fake_db, auth_headers, monkeypatch):
+    from app.anthropic_client import BriefGenerationError
+
+    async def fake_generate(system: str, user: str):
+        raise BriefGenerationError("api down")
+
+    monkeypatch.setattr(clusters_route, "generate_discovery_brief", fake_generate)
+
+    cluster = make_cluster(id=42, brief_discovery=None)
+    post = make_opportunity(cluster_id=42)
+    fake_db.stub(execute=[FakeResult(rows=[cluster]), FakeResult(rows=[post])])
+
+    resp = await client.get("/clusters/42/brief/discovery", headers=auth_headers)
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "Brief generation temporarily unavailable"
+    assert fake_db.commit_count == 0
+
+
+async def test_discovery_brief_cluster_not_found(client, fake_db, auth_headers):
+    fake_db.stub(execute=[FakeResult(rows=[])])
+    resp = await client.get("/clusters/999/brief/discovery", headers=auth_headers)
+    assert resp.status_code == 404
+
+
+async def test_market_and_validation_briefs_return_coming_soon(client, fake_db, auth_headers):
+    for stage in ("market", "validation"):
+        fake_db.stub(execute=[FakeResult(rows=[make_cluster(id=42)])])
+        resp = await client.get(f"/clusters/42/brief/{stage}", headers=auth_headers)
+        assert resp.status_code == 200, stage
+        assert resp.json() == {"status": "coming_soon"}
 
 
 async def test_refresh_cluster_brief_blocks_free_users(client, fake_db, auth_headers):
@@ -211,7 +338,7 @@ async def test_refresh_cluster_brief_allows_pro_and_stores_json(
     assert stored["signalStrength"]["frequency"] == 1
     assert "overallScore" not in stored["signalStrength"]
     assert body["modelVersion"] == "claude-test"
-    assert cluster.opportunity_brief == stored
+    assert cluster.brief_build == stored
     assert cluster.brief_model_version == "claude-test"
     assert cluster.brief_generated_at is not None
     assert fake_db.commit_count == 1
