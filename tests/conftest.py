@@ -65,8 +65,10 @@ from app.models import (  # noqa: E402
     PlanEnum,
     Cluster,
     ClusterSnapshot,
+    ClusterMember,
     Pipeline,
     Problem,
+    SourcePost,
 )
 from app.routes.opportunities import router as opportunities_router  # noqa: E402
 from app.routes.clusters import router as clusters_router  # noqa: E402
@@ -307,6 +309,43 @@ def make_snapshot(**kw):
     )
     defaults.update(kw)
     return ClusterSnapshot(**defaults)
+
+
+def make_source_post(**kw):
+    defaults = dict(
+        id=str(uuid.uuid4()),
+        source="reddit",
+        source_post_id="reddit-1",
+        source_community_id="r/freelance",
+        source_author_id="freelancer42",
+        title="Invoicing eats my whole week",
+        body="Freelancers waste hours chasing invoices.",
+        url="https://reddit.com/r/freelance/1",
+        top_comments=[{"body": "Same problem here"}],
+        posted_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        scraped_at=datetime(2026, 5, 2, tzinfo=timezone.utc),
+        score=120,
+        upvote_ratio=0.95,
+        num_comments=12,
+        is_deleted=False,
+        is_removed=False,
+    )
+    defaults.update(kw)
+    return SourcePost(**defaults)
+
+
+def make_cluster_member(**kw):
+    defaults = dict(
+        id=str(uuid.uuid4()),
+        cluster_id=42,
+        source_post_id=str(uuid.uuid4()),
+        similarity_score=0.91,
+        membership_confidence=0.88,
+        assigned_by="model",
+        model_version="v2",
+    )
+    defaults.update(kw)
+    return ClusterMember(**defaults)
 
 
 def make_pipeline(**kw):

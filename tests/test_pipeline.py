@@ -7,25 +7,39 @@ aggregate metrics computed across those posts.
 
 import csv
 import io
+import pytest
 
 from conftest import (
     FakeResult,
     make_pipeline,
     make_cluster,
+    make_cluster_member,
     make_opportunity,
+    make_source_post,
 )
 
 
 async def test_pipeline_signal_shape_with_cluster(client, fake_db, auth_headers):
     card = make_pipeline(source_cluster_id="42", notes="watch this", stage="exploring")
-    cluster = make_cluster(id=42, growth_rate_wow=0.35, growth_rate_mom=1.2, post_velocity=140.0)
-    opp1 = make_opportunity(cluster_id=42, source_score=87.5)
-    opp2 = make_opportunity(cluster_id=42, source_score=72.0)
+    cluster = make_cluster(
+        id=42,
+        growth_rate_wow=0.35,
+        growth_rate_mom=1.2,
+        post_velocity=140.0,
+        persistence_score=0.78,
+        source_breakdown=[{"platform": "reddit", "site": "freelance", "count": 2}],
+        top_tfidf_terms=[{"term": "invoice", "score": 1.2}],
+        post_volume_by_date=[{"date": "2026-05-01", "count": 2}],
+    )
+    post1 = make_source_post(score=88, num_comments=10)
+    post2 = make_source_post(score=72, num_comments=5)
+    member1 = make_cluster_member(source_post_id=post1.id, similarity_score=0.95)
+    member2 = make_cluster_member(source_post_id=post2.id, similarity_score=0.85)
     fake_db.stub(
         execute=[
             FakeResult(rows=[card]),            # pipeline card lookup
             FakeResult(rows=[cluster]),         # source cluster lookup
-            FakeResult(rows=[opp1, opp2]),      # cluster posts
+            FakeResult(rows=[(member1, post1), (member2, post2)]),  # canonical posts
         ]
     )
 
@@ -42,18 +56,21 @@ async def test_pipeline_signal_shape_with_cluster(client, fake_db, auth_headers)
     assert body["cluster"]["growthRateWow"] == 0.35
     assert body["cluster"]["growthRateMom"] == 1.2
     assert body["cluster"]["postVelocity"] == 140.0
+    assert body["cluster"]["persistenceScore"] == 0.78
+    assert body["analytics"]["topTerms"][0]["term"] == "invoice"
 
-    # aggregate metrics across the two posts (scoring metrics removed in JOB 3)
+    # aggregate metrics across canonical source posts
     metrics = body["metrics"]
     assert metrics["postCount"] == 2
-    assert metrics["avgSourceScore"] == 79.75       # (87.5 + 72.0) / 2
+    assert metrics["avgSourceScore"] == 80.0
+    assert metrics["commentCount"] == 15
     assert "avgSignalScore" not in metrics
     assert "wtpRate" not in metrics
 
     # posts with the simplified (non-scoring) shape
     assert len(body["posts"]) == 2
     post = body["posts"][0]
-    assert post["sourceScore"] == 87.5
+    assert post["sourceScore"] == 88
     for field in ["signalScore", "intensityScore", "wtpConfidence"]:
         assert field not in post
 
@@ -85,6 +102,71 @@ async def test_pipeline_signal_not_found(client, fake_db, auth_headers):
         headers=auth_headers,
     )
     assert resp.status_code == 404
+
+
+@pytest.mark.parametrize("stage", ["watching", "discovery", "exploring", "validating", "building"])
+async def test_pipeline_signal_accepts_every_active_stage(stage, client, fake_db, auth_headers):
+    card = make_pipeline(stage=stage)
+    fake_db.stub(execute=[FakeResult(rows=[card])])
+    resp = await client.get(f"/pipeline/{card.id}/signal", headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json()["pipeline"]["stage"] == stage
+
+
+async def test_pipeline_signal_rejects_removed_card(client, fake_db, auth_headers):
+    fake_db.stub(execute=[FakeResult(rows=[])])
+    resp = await client.get(
+        "/pipeline/44444444-4444-4444-4444-444444444444/signal",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Active pipeline card not found"
+
+
+async def test_pipeline_signal_evidence_cluster_posts(client, fake_db, auth_headers):
+    card = make_pipeline(source_cluster_id="42")
+    post = make_source_post(posted_at=None, scraped_at=make_pipeline().created_at)
+    member = make_cluster_member(source_post_id=post.id)
+    fake_db.stub(
+        execute=[
+            FakeResult(rows=[card]),
+            FakeResult(rows=[(member, post)]),
+            FakeResult(rows=[("r/freelance",)]),
+        ],
+        scalar=[1],
+    )
+    resp = await client.get(
+        f"/pipeline/{card.id}/signal/evidence?sort=similarity",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["data"][0]["dateType"] == "observed"
+    assert body["data"][0]["similarityScore"] == member.similarity_score
+    assert body["communities"] == ["r/freelance"]
+
+
+async def test_pipeline_signal_evidence_detail_checks_membership(client, fake_db, auth_headers):
+    card = make_pipeline(source_cluster_id="42")
+    post = make_source_post()
+    member = make_cluster_member(source_post_id=post.id)
+    fake_db.stub(execute=[FakeResult(rows=[card]), FakeResult(rows=[(member, post)])])
+    resp = await client.get(
+        f"/pipeline/{card.id}/signal/evidence/{post.id}",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["body"] == post.body
+    assert resp.json()["topComments"] == post.top_comments
+
+
+async def test_pipeline_signal_brief_unavailable_without_cluster(client, fake_db, auth_headers):
+    card = make_pipeline(source_cluster_id=None)
+    fake_db.stub(execute=[FakeResult(rows=[card])])
+    resp = await client.get(f"/pipeline/{card.id}/signal/brief", headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json()["available"] is False
 
 
 async def test_pipeline_export_csv_with_cluster_posts(client, fake_db, auth_headers):
