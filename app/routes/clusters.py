@@ -246,6 +246,9 @@ def _serialize_discovery_cluster(
     return {
         "id": c.id,
         "name": c.name,
+        "summary": c.summary,
+        "opportunity_type": c.opportunity_type,
+        "opportunity_domain": c.opportunity_domain,
         "post_count": len(posts),
         "trending_status": c.status if c.status else ("trending" if c.trending else None),
         "growth_rate": c.growth_rate_wow,
@@ -279,11 +282,17 @@ def _skip_filter(value: str | None) -> bool:
 
 
 def _apply_taxonomy_filters(base, opportunity_type: str | None, opportunity_domain: str | None):
-    """Add equality filters on the cluster's primary type/domain when provided."""
+    """Add case-insensitive filters on the cluster's primary type/domain when provided."""
     if not _skip_filter(opportunity_type):
-        base = base.where(Cluster.opportunity_type == opportunity_type)
+        base = base.where(
+            func.lower(func.trim(Cluster.opportunity_type)) == opportunity_type.strip().lower()
+        )
+
     if not _skip_filter(opportunity_domain):
-        base = base.where(Cluster.opportunity_domain == opportunity_domain)
+        base = base.where(
+            func.lower(func.trim(Cluster.opportunity_domain)) == opportunity_domain.strip().lower()
+        )
+
     return base
 
 

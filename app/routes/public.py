@@ -107,6 +107,7 @@ def _serialize_cluster(c: Cluster, posts: list[SourcePost], sample_count: int) -
     return {
         "id": c.id,
         "name": c.name,
+        "summary": c.summary,
         "post_count": len(posts),
         "trending_status": _trending_status(c),
         "growth_rate": c.growth_rate_wow,
