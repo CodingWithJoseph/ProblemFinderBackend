@@ -6,15 +6,16 @@ from typing import Literal, Optional
 import math
 import random
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query, Response
-from sqlalchemy import select, text, update, func
+from sqlalchemy import select, text, update, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
 from app.db import get_db, AsyncSessionLocal
 from app.auth import get_uid
 from app.config import PIPELINE_VERSION
-from app.models import Pipeline, Opportunity, Cluster
+from app.models import Pipeline, Opportunity, Cluster, ClusterMember, SourcePost
 from app.limits import get_plan, limit_for, LimitReached
+from app.routes.clusters import get_discovery_brief
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +146,142 @@ def _build_signal_metrics(posts: list[Opportunity]) -> dict:
     return {
         "postCount": count,
         "avgSourceScore": _avg([p.source_score for p in posts]),
+    }
+
+
+def _iso_or_none(value) -> str | None:
+    return value.isoformat() if value else None
+
+
+def _cluster_id_from_card(card: Pipeline) -> int | None:
+    try:
+        return int(card.source_cluster_id) if card.source_cluster_id else None
+    except (TypeError, ValueError):
+        return None
+
+
+async def _get_active_pipeline_card(pipeline_id: str, db: AsyncSession, uid: str) -> Pipeline:
+    result = await db.execute(
+        select(Pipeline).where(
+            Pipeline.id == pipeline_id,
+            Pipeline.user_id == uid,
+            Pipeline.launched_at == None,
+            Pipeline.removed_at == None,
+        )
+    )
+    card = result.scalar_one_or_none()
+    if not card:
+        raise HTTPException(status_code=404, detail="Active pipeline card not found")
+    return card
+
+
+def _serialize_source_signal_post(member: ClusterMember, post: SourcePost) -> dict:
+    observed_at = post.posted_at or post.scraped_at
+    return {
+        "id": post.id,
+        "title": post.title or "Untitled post",
+        "description": post.body,
+        "source": post.source_community_id or post.source,
+        "sourceUrl": post.url or post.permalink,
+        "author": post.source_author_id,
+        "sourceScore": post.score,
+        "numComments": post.num_comments,
+        "createdAt": _iso_or_none(observed_at),
+        "similarityScore": member.similarity_score,
+    }
+
+
+def _serialize_signal_cluster_workspace(
+    cluster: Cluster,
+    rows: list[tuple[ClusterMember, SourcePost]],
+) -> dict:
+    posts = [post for _, post in rows]
+    dates = sorted(
+        observed
+        for post in posts
+        if (observed := _iso_or_none(post.posted_at or post.scraped_at))
+    )
+    return {
+        **_serialize_signal_cluster(cluster),
+        "summary": cluster.summary,
+        "opportunityType": cluster.opportunity_type,
+        "opportunityDomain": cluster.opportunity_domain,
+        "postCount": len(posts),
+        "commentCount": sum(post.num_comments or 0 for post in posts),
+        "averageUpvoteRatio": _avg([post.upvote_ratio for post in posts]),
+        "persistenceScore": cluster.persistence_score,
+        "intraClusterDensity": cluster.intra_cluster_density,
+        "silhouetteScore": cluster.silhouette_score,
+        "authorCount": cluster.author_count,
+        "communityCount": cluster.community_count,
+        "growthAcceleration": cluster.growth_acceleration,
+        "status": cluster.status,
+        "dateRange": {
+            "from": dates[0] if dates else None,
+            "to": dates[-1] if dates else None,
+        },
+    }
+
+
+def _serialize_workspace_metrics(rows: list[tuple[ClusterMember, SourcePost]]) -> dict:
+    posts = [post for _, post in rows]
+    return {
+        "postCount": len(posts),
+        "avgSourceScore": _avg([post.score for post in posts]),
+        "commentCount": sum(post.num_comments or 0 for post in posts),
+        "averageUpvoteRatio": _avg([post.upvote_ratio for post in posts]),
+    }
+
+
+def _serialize_evidence_summary(member: ClusterMember | None, post: SourcePost | Opportunity) -> dict:
+    if isinstance(post, SourcePost):
+        observed_at = post.posted_at or post.scraped_at
+        body = post.body
+        return {
+            "id": post.id,
+            "title": post.title or "Untitled post",
+            "excerpt": (body or "")[:300],
+            "community": post.source_community_id or post.source,
+            "source": post.source,
+            "engagement": post.score,
+            "numComments": post.num_comments,
+            "upvoteRatio": post.upvote_ratio,
+            "similarityScore": member.similarity_score if member else None,
+            "observedAt": _iso_or_none(observed_at),
+            "dateType": "posted" if post.posted_at else "observed",
+            "url": post.url or post.permalink,
+        }
+
+    return {
+        "id": post.id,
+        "title": post.title or "Untitled post",
+        "excerpt": (post.description or "")[:300],
+        "community": post.source,
+        "source": post.source,
+        "engagement": post.source_score,
+        "numComments": post.num_comments,
+        "upvoteRatio": post.upvote_ratio,
+        "similarityScore": None,
+        "observedAt": _iso_or_none(post.created_at),
+        "dateType": "observed",
+        "url": post.source_url,
+    }
+
+
+def _serialize_evidence_detail(member: ClusterMember | None, post: SourcePost | Opportunity) -> dict:
+    summary = _serialize_evidence_summary(member, post)
+    if isinstance(post, SourcePost):
+        return {
+            **summary,
+            "body": post.body,
+            "author": post.source_author_id,
+            "topComments": post.top_comments or [],
+        }
+    return {
+        **summary,
+        "body": post.description,
+        "author": post.author,
+        "topComments": post.top_comments or [],
     }
 
 
@@ -566,14 +703,244 @@ async def get_pipeline_signal(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
-    """Cluster metrics + all cluster posts with full signal breakdown.
+    """Real-data Signal workspace anchored to an active user pipeline card."""
+    card = await _get_active_pipeline_card(pipeline_id, db, uid)
+    cluster_id = _cluster_id_from_card(card)
 
-    The pipeline is the anchor (notes live here). Posts are the full set in the
-    pipeline's source_cluster_id; falls back to the card's post_ids if there is
-    no system cluster behind it.
-    """
-    card, cluster_payload, metrics, posts = await _load_pipeline_signal_data(pipeline_id, db, uid)
-    return _serialize_pipeline_signal_payload(card, cluster_payload, metrics, posts)
+    cluster = None
+    member_rows: list[tuple[ClusterMember, SourcePost]] = []
+    if cluster_id is not None:
+        cluster = (await db.execute(
+            select(Cluster).where(
+                Cluster.id == cluster_id,
+                Cluster.pipeline_version == PIPELINE_VERSION,
+            )
+        )).scalar_one_or_none()
+        if cluster:
+            member_rows = list((await db.execute(
+                select(ClusterMember, SourcePost)
+                .join(SourcePost, ClusterMember.source_post_id == SourcePost.id)
+                .where(
+                    ClusterMember.cluster_id == cluster_id,
+                    ClusterMember.pipeline_version == PIPELINE_VERSION,
+                    SourcePost.is_deleted.isnot(True),
+                    SourcePost.is_removed.isnot(True),
+                )
+                .order_by(SourcePost.score.desc().nullslast())
+            )).all())
+
+    if cluster:
+        cluster_payload = _serialize_signal_cluster_workspace(cluster, member_rows)
+        metrics = _serialize_workspace_metrics(member_rows)
+        posts = [_serialize_source_signal_post(member, post) for member, post in member_rows]
+        analytics = {
+            "sourceBreakdown": cluster.source_breakdown or [],
+            "topTerms": cluster.top_tfidf_terms or [],
+            "postVolumeByDate": cluster.post_volume_by_date or [],
+        }
+        return {
+            "pipeline": {
+                "id": card.id,
+                "name": card.name,
+                "notes": card.notes,
+                "sourceClusterId": card.source_cluster_id,
+                "stage": card.stage,
+            },
+            "cluster": cluster_payload,
+            "metrics": metrics,
+            "analytics": analytics,
+            "availability": {"clusterAnalytics": True, "brief": True},
+            "posts": posts,
+        }
+
+    opportunities = []
+    if card.post_ids:
+        opportunities = list((await db.execute(
+            select(Opportunity)
+            .where(
+                Opportunity.id.in_(card.post_ids),
+                Opportunity.deleted_at == None,
+                Opportunity.pipeline_version == PIPELINE_VERSION,
+            )
+            .order_by(Opportunity.source_score.desc().nullslast())
+        )).scalars().all())
+
+    return {
+        **_serialize_pipeline_signal_payload(
+            card,
+            None,
+            {
+                **_build_signal_metrics(opportunities),
+                "commentCount": sum(post.num_comments or 0 for post in opportunities),
+                "averageUpvoteRatio": _avg([post.upvote_ratio for post in opportunities]),
+            },
+            opportunities,
+        ),
+        "analytics": None,
+        "availability": {"clusterAnalytics": False, "brief": False},
+    }
+
+
+@router.get("/{pipeline_id}/signal/evidence")
+async def get_pipeline_signal_evidence(
+    pipeline_id: str,
+    q: str | None = Query(None),
+    community: str | None = Query(None),
+    sort: Literal["engagement", "newest", "comments", "similarity"] = Query("engagement"),
+    page: int = Query(1, ge=1),
+    pageSize: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Paginated, searchable evidence for a pipeline Signal workspace."""
+    card = await _get_active_pipeline_card(pipeline_id, db, uid)
+    cluster_id = _cluster_id_from_card(card)
+    offset = (page - 1) * pageSize
+
+    if cluster_id is not None:
+        conditions = [
+            ClusterMember.cluster_id == cluster_id,
+            ClusterMember.pipeline_version == PIPELINE_VERSION,
+            SourcePost.is_deleted.isnot(True),
+            SourcePost.is_removed.isnot(True),
+        ]
+        if q:
+            conditions.append(or_(SourcePost.title.ilike(f"%{q}%"), SourcePost.body.ilike(f"%{q}%")))
+        if community:
+            conditions.append(SourcePost.source_community_id == community)
+
+        order = {
+            "newest": func.coalesce(SourcePost.posted_at, SourcePost.scraped_at).desc().nullslast(),
+            "comments": SourcePost.num_comments.desc().nullslast(),
+            "similarity": ClusterMember.similarity_score.desc().nullslast(),
+        }.get(sort, SourcePost.score.desc().nullslast())
+
+        base = (
+            select(ClusterMember, SourcePost)
+            .join(SourcePost, ClusterMember.source_post_id == SourcePost.id)
+            .where(*conditions)
+        )
+        total = await db.scalar(
+            select(func.count())
+            .select_from(ClusterMember)
+            .join(SourcePost, ClusterMember.source_post_id == SourcePost.id)
+            .where(*conditions)
+        )
+        rows = list((await db.execute(base.order_by(order).offset(offset).limit(pageSize))).all())
+        communities = [
+            value for (value,) in (await db.execute(
+                select(SourcePost.source_community_id)
+                .join(ClusterMember, ClusterMember.source_post_id == SourcePost.id)
+                .where(
+                    ClusterMember.cluster_id == cluster_id,
+                    ClusterMember.pipeline_version == PIPELINE_VERSION,
+                    SourcePost.is_deleted.isnot(True),
+                    SourcePost.is_removed.isnot(True),
+                    SourcePost.source_community_id.isnot(None),
+                )
+                .distinct()
+                .order_by(SourcePost.source_community_id)
+            )).all()
+            if value
+        ]
+        return {
+            "data": [_serialize_evidence_summary(member, post) for member, post in rows],
+            "total": total or 0,
+            "page": page,
+            "pageSize": pageSize,
+            "communities": communities,
+        }
+
+    conditions = [
+        Opportunity.id.in_(card.post_ids or []),
+        Opportunity.deleted_at == None,
+        Opportunity.pipeline_version == PIPELINE_VERSION,
+    ]
+    if q:
+        conditions.append(or_(Opportunity.title.ilike(f"%{q}%"), Opportunity.description.ilike(f"%{q}%")))
+    if community:
+        conditions.append(Opportunity.source == community)
+    order = {
+        "newest": Opportunity.created_at.desc().nullslast(),
+        "comments": Opportunity.num_comments.desc().nullslast(),
+    }.get(sort, Opportunity.source_score.desc().nullslast())
+    total = await db.scalar(select(func.count()).select_from(Opportunity).where(*conditions))
+    posts = list((await db.execute(
+        select(Opportunity).where(*conditions).order_by(order).offset(offset).limit(pageSize)
+    )).scalars().all())
+    communities = [
+        value for (value,) in (await db.execute(
+            select(Opportunity.source)
+            .where(
+                Opportunity.id.in_(card.post_ids or []),
+                Opportunity.deleted_at == None,
+                Opportunity.pipeline_version == PIPELINE_VERSION,
+                Opportunity.source.isnot(None),
+            )
+            .distinct()
+            .order_by(Opportunity.source)
+        )).all()
+        if value
+    ]
+    return {
+        "data": [_serialize_evidence_summary(None, post) for post in posts],
+        "total": total or 0,
+        "page": page,
+        "pageSize": pageSize,
+        "communities": communities,
+    }
+
+
+@router.get("/{pipeline_id}/signal/evidence/{post_id}")
+async def get_pipeline_signal_evidence_detail(
+    pipeline_id: str,
+    post_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Full evidence post after verifying it belongs to the pipeline workspace."""
+    card = await _get_active_pipeline_card(pipeline_id, db, uid)
+    cluster_id = _cluster_id_from_card(card)
+    if cluster_id is not None:
+        rows = (await db.execute(
+            select(ClusterMember, SourcePost)
+            .join(SourcePost, ClusterMember.source_post_id == SourcePost.id)
+            .where(
+                ClusterMember.cluster_id == cluster_id,
+                ClusterMember.pipeline_version == PIPELINE_VERSION,
+                SourcePost.id == post_id,
+                SourcePost.is_deleted.isnot(True),
+                SourcePost.is_removed.isnot(True),
+            )
+        )).all()
+        if rows:
+            return _serialize_evidence_detail(rows[0][0], rows[0][1])
+    elif post_id in (card.post_ids or []):
+        post = (await db.execute(
+            select(Opportunity).where(
+                Opportunity.id == post_id,
+                Opportunity.deleted_at == None,
+                Opportunity.pipeline_version == PIPELINE_VERSION,
+            )
+        )).scalar_one_or_none()
+        if post:
+            return _serialize_evidence_detail(None, post)
+    raise HTTPException(status_code=404, detail="Evidence post not found")
+
+
+@router.get("/{pipeline_id}/signal/brief")
+async def get_pipeline_signal_brief(
+    pipeline_id: str,
+    refresh: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Discovery brief scoped through an active user pipeline card."""
+    card = await _get_active_pipeline_card(pipeline_id, db, uid)
+    cluster_id = _cluster_id_from_card(card)
+    if cluster_id is None:
+        return {"available": False, "reason": "Cluster analytics are unavailable for this pipeline card."}
+    return await get_discovery_brief(cluster_id=cluster_id, refresh=refresh, db=db, uid=uid)
 
 
 @router.get("/{pipeline_id}/export")
