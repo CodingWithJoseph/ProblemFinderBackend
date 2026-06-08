@@ -22,6 +22,7 @@ from app.prompts.briefs import (
     build_discovery_user_prompt,
     is_fresh,
 )
+from app.signal_overview import serialize_signal_overview
 
 router = APIRouter(prefix="/clusters", tags=["clusters"])
 
@@ -168,6 +169,7 @@ def _serialize_cluster(c: Cluster, post_count: int | None, signals: dict) -> dic
         "briefGeneratedAt": _iso(c.brief_generated_at) or None,
         "briefModelVersion": c.brief_model_version,
         "hasOpportunityBrief": c.brief_build is not None,
+        **serialize_signal_overview(c),
     }
 
 

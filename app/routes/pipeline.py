@@ -16,6 +16,7 @@ from app.config import PIPELINE_VERSION
 from app.models import Pipeline, Opportunity, Cluster, ClusterMember, SourcePost
 from app.limits import get_plan, limit_for, LimitReached
 from app.routes.clusters import get_discovery_brief
+from app.signal_overview import serialize_signal_overview
 
 logger = logging.getLogger(__name__)
 
@@ -703,7 +704,12 @@ async def get_pipeline_signal(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
-    """Real-data Signal workspace anchored to an active user pipeline card."""
+    """Real-data Signal workspace anchored to an active user pipeline card.
+
+    The top-level signalOverview field passes through the AI-generated JSONB
+    document unchanged. Its overview* metadata fields describe generation
+    state and remain present when no overview is available.
+    """
     card = await _get_active_pipeline_card(pipeline_id, db, uid)
     cluster_id = _cluster_id_from_card(card)
 
@@ -751,6 +757,7 @@ async def get_pipeline_signal(
             "analytics": analytics,
             "availability": {"clusterAnalytics": True, "brief": True},
             "posts": posts,
+            **serialize_signal_overview(cluster),
         }
 
     opportunities = []
@@ -778,6 +785,7 @@ async def get_pipeline_signal(
         ),
         "analytics": None,
         "availability": {"clusterAnalytics": False, "brief": False},
+        **serialize_signal_overview(None),
     }
 
 
