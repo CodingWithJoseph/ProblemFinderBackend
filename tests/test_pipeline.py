@@ -7,6 +7,8 @@ aggregate metrics computed across those posts.
 
 import csv
 import io
+from datetime import datetime, timezone
+
 import pytest
 
 from conftest import (
@@ -17,6 +19,32 @@ from conftest import (
     make_opportunity,
     make_source_post,
 )
+
+
+SIGNAL_OVERVIEW = {
+    "schema_version": "signal_overview.v1",
+    "summary": "Freelancers struggle to get invoices paid on time.",
+    "signal_metrics": {
+        "posts": 2,
+        "comments": 15,
+        "authors": 2,
+        "communities": 1,
+        "agreement": 0.9,
+        "focus": 0.8,
+    },
+    "problem_breakdown": [
+        {
+            "id": "late-payment",
+            "title": "Late payments",
+            "supporting_post_ids": ["reddit-1"],
+        }
+    ],
+    "top_evidence": [{"source_post_id": "reddit-1", "title": "Invoice overdue"}],
+    "audience_context": {"primary_audience": "Freelancers"},
+    "questions_to_investigate": [{"question": "How long are invoices overdue?"}],
+    "source_breakdown": [],
+    "subclusters": [],
+}
 
 
 async def test_pipeline_signal_shape_with_cluster(client, fake_db, auth_headers):
@@ -73,6 +101,83 @@ async def test_pipeline_signal_shape_with_cluster(client, fake_db, auth_headers)
     assert post["sourceScore"] == 88
     for field in ["signalScore", "intensityScore", "wtpConfidence"]:
         assert field not in post
+
+
+async def test_pipeline_signal_returns_populated_signal_overview(client, fake_db, auth_headers):
+    generated_at = datetime(2026, 6, 8, 12, 30, tzinfo=timezone.utc)
+    card = make_pipeline(source_cluster_id="42")
+    cluster = make_cluster(
+        signal_overview=SIGNAL_OVERVIEW,
+        overview_status="ready",
+        overview_error=None,
+        overview_schema_version="signal_overview.v1",
+        overview_generated_at=generated_at,
+        overview_model_version="overview-model-v1",
+        overview_input_fingerprint="sha256:abc123",
+    )
+    fake_db.stub(
+        execute=[
+            FakeResult(rows=[card]),
+            FakeResult(rows=[cluster]),
+            FakeResult(rows=[]),
+        ]
+    )
+
+    resp = await client.get(f"/pipeline/{card.id}/signal", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+
+    assert body["signalOverview"] == SIGNAL_OVERVIEW
+    assert body["overviewStatus"] == "ready"
+    assert body["overviewError"] is None
+    assert body["overviewSchemaVersion"] == "signal_overview.v1"
+    assert body["overviewGeneratedAt"] == "2026-06-08T12:30:00+00:00"
+    assert body["overviewModelVersion"] == "overview-model-v1"
+    assert body["overviewInputFingerprint"] == "sha256:abc123"
+
+
+async def test_pipeline_signal_returns_null_signal_overview(client, fake_db, auth_headers):
+    card = make_pipeline(source_cluster_id="42")
+    cluster = make_cluster(signal_overview=None, overview_status=None, overview_error=None)
+    fake_db.stub(
+        execute=[
+            FakeResult(rows=[card]),
+            FakeResult(rows=[cluster]),
+            FakeResult(rows=[]),
+        ]
+    )
+
+    resp = await client.get(f"/pipeline/{card.id}/signal", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+
+    assert body["signalOverview"] is None
+    assert body["overviewStatus"] is None
+    assert body["overviewError"] is None
+
+
+async def test_pipeline_signal_returns_failed_overview_metadata(client, fake_db, auth_headers):
+    card = make_pipeline(source_cluster_id="42")
+    cluster = make_cluster(
+        signal_overview=None,
+        overview_status="failed",
+        overview_error="Overview generation timed out",
+    )
+    fake_db.stub(
+        execute=[
+            FakeResult(rows=[card]),
+            FakeResult(rows=[cluster]),
+            FakeResult(rows=[]),
+        ]
+    )
+
+    resp = await client.get(f"/pipeline/{card.id}/signal", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+
+    assert body["signalOverview"] is None
+    assert body["overviewStatus"] == "failed"
+    assert body["overviewError"] == "Overview generation timed out"
 
 
 async def test_pipeline_signal_falls_back_to_post_ids(client, fake_db, auth_headers):

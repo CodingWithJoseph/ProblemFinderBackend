@@ -91,6 +91,9 @@ async def test_get_cluster_returns_growth_and_signals(client, fake_db, auth_head
     assert "topDomain" not in signals
 
     assert body["postIds"] == [str(opp.id)]
+    assert body["signalOverview"] is None
+    assert body["overviewStatus"] is None
+    assert body["overviewError"] is None
     assert len(body["posts"]) == 1
     post = body["posts"][0]
     assert post["sourceScore"] == opp.source_score
