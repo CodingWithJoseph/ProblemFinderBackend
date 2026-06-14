@@ -4,17 +4,17 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
-from sqlalchemy import select, text
+from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
 from app.db import get_db, AsyncSessionLocal
 from app.auth import get_uid
 from app.config import PIPELINE_VERSION
-from app.models import Problem, Opportunity, Pipeline
+from app.models import Problem, Pipeline, ClusterItem
 from app.limits import get_plan, enforce_problems_limit
 from app.openai_client import openai_client, EMBEDDING_MODEL
-from app.routes.opportunities import _serialize as _serialize_opportunity, _row_to_opportunity
+from app.routes.clusters import serialize_evidence_item
 
 router = APIRouter(prefix="/problems", tags=["problems"])
 
@@ -172,7 +172,13 @@ async def similar_posts(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
-    """Top opportunities by embedding distance to this problem's embedding."""
+    """cluster_items related to this problem.
+
+    The pipeline's per-item embeddings are 3072-d (text-embedding-3-large) while
+    problem embeddings are 1536-d (text-embedding-3-small), so the two spaces are
+    not directly comparable. We surface related posts by keyword-matching the
+    problem's title against cluster_items, ranked by reddit score.
+    """
     result = await db.execute(
         select(Problem).where(Problem.id == problem_id, Problem.user_id == uid)
     )
@@ -180,34 +186,25 @@ async def similar_posts(
     if not problem:
         raise HTTPException(status_code=404, detail="Problem not found")
 
-    emb = _to_list(problem.embedding)
-    if not emb:
-        return {"data": [], "embeddingReady": False}
+    text_q = (problem.title or "").strip()
+    tokens = [t.strip() for t in text_q.split() if len(t.strip()) >= 4][:6]
+    search_terms = tokens or ([text_q] if text_q else [])
+    if not search_terms:
+        return {"data": []}
 
-    vector_str = "[" + ",".join(str(x) for x in emb) + "]"
+    ors = []
+    for term in search_terms:
+        ors.append(ClusterItem.title.ilike(f"%{term}%"))
+        ors.append(ClusterItem.body.ilike(f"%{term}%"))
+
     rows = await db.execute(
-        text("""
-            SELECT *, 1 - (embedding <=> CAST(:vec AS vector)) AS similarity
-            FROM opportunities
-            WHERE embedding IS NOT NULL AND deleted_at IS NULL
-              AND pipeline_version = :pipeline_version
-            ORDER BY embedding <=> CAST(:vec AS vector)
-            LIMIT :limit
-        """),
-        {"vec": vector_str, "limit": limit, "pipeline_version": PIPELINE_VERSION},
+        select(ClusterItem)
+        .where(ClusterItem.pipeline_version == PIPELINE_VERSION, or_(*ors))
+        .order_by(ClusterItem.score.desc().nullslast())
+        .limit(limit)
     )
-    mapped = rows.mappings().all()
-    data = []
-    for row in mapped:
-        d = dict(row)
-        sim = d.get("similarity")
-        opp = _row_to_opportunity(d)
-        data.append({
-            **_serialize_opportunity(opp),
-            "similarity": round(sim, 4) if sim is not None else None,
-        })
-
-    return {"data": data, "embeddingReady": True}
+    items = rows.scalars().all()
+    return {"data": [serialize_evidence_item(it) for it in items]}
 
 
 @router.post("")

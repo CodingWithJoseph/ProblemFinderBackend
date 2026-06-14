@@ -1,13 +1,8 @@
 """Public, unauthenticated read-only endpoints for the marketing site.
 
 Everything here is anonymous (no ``get_uid`` dependency) and filtered to the
-current pipeline version. The "posts" in a cluster are the v2 source_posts
-reached through cluster_members (the simplified pipeline writes source_posts +
-cluster_members, not the legacy opportunities table).
-
-NOTE ON FILE LOCATION: the job brief names this ``app/routers/public.py`` but
-this codebase keeps all routers under ``app/routes/`` (see main.py). The module
-is placed there for consistency; the route prefix is still ``/public``.
+current pipeline version. A cluster's posts are its ``cluster_items`` rows (the
+simplified pipeline writes one flat ``cluster_items`` row per post).
 """
 
 from datetime import datetime, timezone
@@ -18,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import PIPELINE_VERSION
 from app.db import get_db
-from app.models import Cluster, ClusterMember, Opportunity, SourcePost
+from app.models import Cluster, ClusterItem
 
 router = APIRouter(prefix="/public", tags=["public"])
 
@@ -29,7 +24,6 @@ SEARCH_LIMIT = 20
 
 
 def _add_cors(response: Response) -> None:
-    """Public endpoints are consumed by the marketing site from any origin."""
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = "*"
@@ -43,58 +37,50 @@ def _iso(value) -> str | None:
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
-def _serialize_post(sp: SourcePost) -> dict:
-    """A v2 source_post in public shape (reddit_score == source_posts.score,
-    subreddit == source_community_id)."""
+def _serialize_post(it: ClusterItem) -> dict:
     return {
-        "id": sp.id,
-        "title": sp.title,
-        "reddit_score": sp.score,
-        "subreddit": sp.source_community_id,
+        "id": it.id,
+        "title": it.title,
+        "reddit_score": it.score,
+        "subreddit": it.community,
     }
 
 
-def _serialize_post_full(sp: SourcePost) -> dict:
+def _serialize_post_full(it: ClusterItem) -> dict:
+    upvote_ratio = it.raw_json.get("upvote_ratio") if isinstance(it.raw_json, dict) else None
     return {
-        **_serialize_post(sp),
-        "body": sp.body,
-        "url": sp.url,
-        "author": sp.source_author_id,
-        "comment_count": sp.num_comments,
-        "upvote_ratio": sp.upvote_ratio,
-        "posted_at": _iso(sp.posted_at),
+        **_serialize_post(it),
+        "body": it.body,
+        "url": it.url or it.permalink,
+        "author": it.author,
+        "comment_count": it.num_comments,
+        "upvote_ratio": upvote_ratio,
+        "problem_statement": it.problem_statement,
+        "solution_angle": it.solution_angle,
+        "posted_at": _iso(it.posted_at),
     }
 
 
-def _trending_status(c: Cluster) -> str | None:
-    if c.status:
-        return c.status
-    return "trending" if c.trending else None
-
-
-async def _posts_by_cluster(cluster_ids: list[int], db: AsyncSession) -> dict[int, list[SourcePost]]:
-    """Map cluster_id -> its v2 source_posts (highest reddit_score first)."""
+async def _items_by_cluster(cluster_ids: list[int], db: AsyncSession) -> dict[int, list[ClusterItem]]:
     if not cluster_ids:
         return {}
     rows = (await db.execute(
-        select(ClusterMember.cluster_id, SourcePost)
-        .join(SourcePost, ClusterMember.source_post_id == SourcePost.id)
-        .where(
-            ClusterMember.cluster_id.in_(cluster_ids),
-            ClusterMember.pipeline_version == PIPELINE_VERSION,
+        select(ClusterItem).where(
+            ClusterItem.cluster_id.in_(cluster_ids),
+            ClusterItem.pipeline_version == PIPELINE_VERSION,
         )
-    )).all()
-    grouped: dict[int, list[SourcePost]] = {}
-    for cid, sp in rows:
-        grouped.setdefault(cid, []).append(sp)
-    for posts in grouped.values():
-        posts.sort(key=lambda p: (p.score is not None, p.score or 0), reverse=True)
+    )).scalars().all()
+    grouped: dict[int, list[ClusterItem]] = {}
+    for it in rows:
+        grouped.setdefault(it.cluster_id, []).append(it)
+    for items in grouped.values():
+        items.sort(key=lambda p: (p.score is not None, p.score or 0), reverse=True)
     return grouped
 
 
-def _summarize_posts(posts: list[SourcePost]) -> dict:
-    subreddits = sorted({p.source_community_id for p in posts if p.source_community_id})
-    dates = sorted(_iso(p.posted_at) for p in posts if p.posted_at)
+def _summarize_posts(items: list[ClusterItem]) -> dict:
+    subreddits = sorted({it.community for it in items if it.community})
+    dates = sorted(_iso(it.posted_at) for it in items if it.posted_at)
     return {
         "subreddits": subreddits,
         "date_range_start": dates[0] if dates else None,
@@ -102,60 +88,60 @@ def _summarize_posts(posts: list[SourcePost]) -> dict:
     }
 
 
-def _serialize_cluster(c: Cluster, posts: list[SourcePost], sample_count: int) -> dict:
-    summary = _summarize_posts(posts)
+def _serialize_cluster(c: Cluster, items: list[ClusterItem], sample_count: int) -> dict:
+    summary = _summarize_posts(items)
     return {
         "id": c.id,
         "name": c.name,
         "summary": c.summary,
-        "post_count": len(posts),
-        "trending_status": _trending_status(c),
-        "growth_rate": c.growth_rate_wow,
+        "signal_score": c.signal_score,
+        "post_count": len(items),
+        "trending_status": "trending" if c.trending else None,
         "date_range_start": summary["date_range_start"],
         "date_range_end": summary["date_range_end"],
         "subreddits": summary["subreddits"],
-        "is_singleton": bool(c.is_singleton),
-        "sample_posts": [_serialize_post(p) for p in posts[:sample_count]],
+        "sample_posts": [_serialize_post(it) for it in items[:sample_count]],
     }
 
 
 @router.get("/clusters")
 async def public_clusters(
     response: Response,
-    include_singletons: bool = Query(False),
     limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
-    """Top clusters ordered by post_count desc (v2 only)."""
+    """Top clusters by signal_score (v2 only)."""
     _add_cors(response)
 
-    # post_count is the number of v2 cluster_members; order/paginate on it.
-    member_counts = (
+    item_counts = (
         select(
-            ClusterMember.cluster_id.label("cluster_id"),
+            ClusterItem.cluster_id.label("cluster_id"),
             func.count().label("post_count"),
         )
-        .where(ClusterMember.pipeline_version == PIPELINE_VERSION)
-        .group_by(ClusterMember.cluster_id)
+        .where(
+            ClusterItem.pipeline_version == PIPELINE_VERSION,
+            ClusterItem.cluster_id.isnot(None),
+        )
+        .group_by(ClusterItem.cluster_id)
         .subquery()
     )
 
     query = (
         select(Cluster)
-        .join(member_counts, member_counts.c.cluster_id == Cluster.id)
+        .join(item_counts, item_counts.c.cluster_id == Cluster.id)
         .where(Cluster.pipeline_version == PIPELINE_VERSION)
+        .order_by(Cluster.signal_score.desc().nullslast(), item_counts.c.post_count.desc())
+        .offset(offset)
+        .limit(limit)
     )
-    if not include_singletons:
-        query = query.where(Cluster.is_singleton == False)
-    query = query.order_by(member_counts.c.post_count.desc()).offset(offset).limit(limit)
 
     clusters = list((await db.execute(query)).scalars().all())
-    posts_map = await _posts_by_cluster([c.id for c in clusters], db)
+    items_map = await _items_by_cluster([c.id for c in clusters], db)
 
     return {
         "data": [
-            _serialize_cluster(c, posts_map.get(c.id, []), SAMPLE_POST_COUNT)
+            _serialize_cluster(c, items_map.get(c.id, []), SAMPLE_POST_COUNT)
             for c in clusters
         ]
     }
@@ -179,12 +165,12 @@ async def public_cluster_detail(
     if not cluster:
         raise HTTPException(status_code=404, detail="Cluster not found")
 
-    posts = (await _posts_by_cluster([cluster_id], db)).get(cluster_id, [])
+    items = (await _items_by_cluster([cluster_id], db)).get(cluster_id, [])
 
     return {
         "data": {
-            **_serialize_cluster(cluster, posts, SAMPLE_POST_COUNT),
-            "posts": [_serialize_post_full(p) for p in posts],
+            **_serialize_cluster(cluster, items, SAMPLE_POST_COUNT),
+            "posts": [_serialize_post_full(it) for it in items],
         }
     }
 
@@ -195,12 +181,7 @@ async def public_search(
     q: str = Query(..., min_length=1),
     db: AsyncSession = Depends(get_db),
 ):
-    """Search clusters by name (v2 only). Returns clusters, not posts.
-
-    hybrid_search() returns SETOF opportunities (individual posts), so it is not
-    a fit for a clusters-only public search; we use an ILIKE match on the
-    cluster name as specified.
-    """
+    """Search clusters by name (v2 only). Returns clusters, not posts."""
     _add_cors(response)
 
     clusters = list((await db.execute(
@@ -212,47 +193,33 @@ async def public_search(
         .limit(SEARCH_LIMIT)
     )).scalars().all())
 
-    posts_map = await _posts_by_cluster([c.id for c in clusters], db)
+    items_map = await _items_by_cluster([c.id for c in clusters], db)
 
     return {
         "data": [
-            _serialize_cluster(c, posts_map.get(c.id, []), SAMPLE_POST_COUNT)
+            _serialize_cluster(c, items_map.get(c.id, []), SAMPLE_POST_COUNT)
             for c in clusters
         ]
     }
 
 
 async def compute_stats(db: AsyncSession) -> dict:
-    """Public aggregate counts for the marketing homepage (v2 only).
-
-    Shared by GET /public/stats and the backwards-compatible /homepage/stats.
-    """
-    source_post_count = await db.scalar(
+    """Public aggregate counts for the marketing homepage (v2 only)."""
+    item_count = await db.scalar(
         select(func.count())
-        .select_from(SourcePost)
-        .where(SourcePost.pipeline_version == PIPELINE_VERSION)
-    )
-    opportunity_count = await db.scalar(
-        select(func.count()).where(
-            Opportunity.deleted_at == None,
-            Opportunity.pipeline_version == PIPELINE_VERSION,
-        )
-    )
+        .select_from(ClusterItem)
+        .where(ClusterItem.pipeline_version == PIPELINE_VERSION)
+    ) or 0
     cluster_count = await db.scalar(
         select(func.count())
         .select_from(Cluster)
         .where(Cluster.pipeline_version == PIPELINE_VERSION)
-    )
+    ) or 0
 
-    opportunities_found = opportunity_count or 0
-
-    # highSignalOpportunities / wtpSignals were derived from the legacy
-    # signal_score / wtp_signal columns the simplified pipeline no longer
-    # writes (JOB 3), so they are no longer reported.
     return {
-        "conversationsAnalyzed": source_post_count or opportunities_found,
-        "clustersDetected": cluster_count or 0,
-        "opportunitiesFound": opportunities_found,
+        "conversationsAnalyzed": item_count,
+        "clustersDetected": cluster_count,
+        "opportunitiesFound": item_count,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
     }
 

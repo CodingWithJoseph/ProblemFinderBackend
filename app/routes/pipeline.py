@@ -1,22 +1,35 @@
+"""User pipeline cards (portfolio workspace) + their cluster-anchored Signal,
+Evidence and brief views.
+
+The pipeline *card* CRUD is owned by the API (the ``pipeline`` table). Every
+read of underlying market data goes through the flat ``cluster_items`` table:
+a card either points at a system cluster (``source_cluster_id``) or carries an
+explicit list of ``cluster_items`` ids (``post_ids``).
+"""
 import csv
 import io
 import logging
-from datetime import datetime, timezone
-from typing import Literal, Optional
 import math
 import random
+from datetime import datetime, timezone
+from typing import Literal, Optional
+
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query, Response
-from sqlalchemy import select, text, update, func, or_
+from sqlalchemy import select, text, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
 from app.db import get_db, AsyncSessionLocal
 from app.auth import get_uid
 from app.config import PIPELINE_VERSION
-from app.models import Pipeline, Opportunity, Cluster, ClusterMember, SourcePost
+from app.models import Pipeline, Cluster, ClusterItem
 from app.limits import get_plan, limit_for, LimitReached
-from app.routes.clusters import get_discovery_brief
-from app.signal_overview import serialize_signal_overview
+from app.routes.clusters import (
+    serialize_evidence_item,
+    load_cluster_items,
+    distinct_solution_angles,
+    representative_problem_statement,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,28 +41,13 @@ PATCHABLE_FIELDS = {
     "outcome", "mrr",
 }
 
-CAMEL_TO_SNAKE = {
-    "killCriteria": "kill_criteria",
-    "distributionChannels": "distribution_channels",
-    "conceptAngles": "concept_angles",
-    "exitChecklist": "exit_checklist",
-    "revenueModel": "revenue_model",
-    "stage": "stage",
-    "notes": "notes",
-    "url": "url",
-    "category": "category",
-    "status": "status",
-    "name": "name",
-}
-
-# Canonical pipeline stages, in progression order. "watching" is the backlog —
-# clusters the user is monitoring but not actively pursuing — and is the first
-# stage, before "discovery". Terminal states (launched / archived) are tracked
-# via launched_at / removed_at rather than as stage values.
+# Canonical pipeline stages, in progression order. "watching" is the backlog;
+# terminal states (launched / archived) are tracked via launched_at / removed_at.
 PIPELINE_STAGES = ("watching", "discovery", "exploring", "validating", "building")
 VALID_STAGES = frozenset(PIPELINE_STAGES)
 
 MAX_COHERENCE_POSTS = 50
+SIGNAL_BRIEF_SCAN = 500
 
 EXPORT_CSV_COLUMNS = (
     "pipeline_id",
@@ -60,13 +58,13 @@ EXPORT_CSV_COLUMNS = (
     "cluster_name",
     "post_id",
     "title",
-    "description",
-    "source",
-    "source_url",
+    "body",
+    "community",
+    "url",
     "author",
-    "source_score",
+    "score",
     "num_comments",
-    "created_at",
+    "posted_at",
 )
 
 
@@ -110,23 +108,38 @@ def _serialize(p: Pipeline, posts: list[dict] | None = None) -> dict:
     }
 
 
-def _serialize_signal_post(o: Opportunity) -> dict:
-    return {
-        "id": o.id,
-        "title": o.title,
-        "description": o.description,
-        "source": o.source,
-        "sourceUrl": o.source_url,
-        "author": o.author,
-        "sourceScore": o.source_score,
-        "numComments": o.num_comments,
-        "createdAt": o.created_at.isoformat() if o.created_at else None,
-    }
+def _iso_or_none(value) -> str | None:
+    return value.isoformat() if value else None
 
 
 def _avg(values: list) -> float | None:
     vals = [v for v in values if v is not None]
     return round(sum(vals) / len(vals), 4) if vals else None
+
+
+def _item_observed(it: ClusterItem):
+    return it.posted_at or it.scraped_at
+
+
+def _upvote_ratio(it: ClusterItem):
+    return it.raw_json.get("upvote_ratio") if isinstance(it.raw_json, dict) else None
+
+
+def _serialize_signal_post(it: ClusterItem) -> dict:
+    return {
+        "id": it.id,
+        "title": it.title or "Untitled post",
+        "description": it.body,
+        "source": it.community or it.platform,
+        "sourceUrl": it.url or it.permalink,
+        "author": it.author,
+        "sourceScore": it.score,
+        "numComments": it.num_comments,
+        "createdAt": _iso_or_none(_item_observed(it)),
+        "similarityScore": it.similarity_score,
+        "problemStatement": it.problem_statement,
+        "solutionAngle": it.solution_angle,
+    }
 
 
 def _serialize_signal_cluster(cluster: Cluster | None) -> dict | None:
@@ -135,23 +148,40 @@ def _serialize_signal_cluster(cluster: Cluster | None) -> dict | None:
     return {
         "id": cluster.id,
         "name": cluster.name,
+        "summary": cluster.summary,
         "trending": cluster.trending,
-        "growthRateWow": cluster.growth_rate_wow,
-        "growthRateMom": cluster.growth_rate_mom,
-        "postVelocity": cluster.post_velocity,
+        "signalScore": cluster.signal_score,
     }
 
 
-def _build_signal_metrics(posts: list[Opportunity]) -> dict:
-    count = len(posts)
+def _serialize_signal_cluster_workspace(cluster: Cluster, items: list[ClusterItem]) -> dict:
+    dates = sorted(d for it in items if (d := _iso_or_none(_item_observed(it))))
     return {
-        "postCount": count,
-        "avgSourceScore": _avg([p.source_score for p in posts]),
+        **_serialize_signal_cluster(cluster),
+        "opportunityType": _most_common(it.opportunity_type for it in items),
+        "opportunityDomain": _most_common(it.opportunity_domain for it in items),
+        "postCount": len(items),
+        "commentCount": sum(it.num_comments or 0 for it in items),
+        "averageUpvoteRatio": _avg([_upvote_ratio(it) for it in items]),
+        "authorCount": cluster.author_count,
+        "communityCount": cluster.community_count,
+        "dateRange": {"from": dates[0] if dates else None, "to": dates[-1] if dates else None},
     }
 
 
-def _iso_or_none(value) -> str | None:
-    return value.isoformat() if value else None
+def _most_common(values):
+    from collections import Counter
+    cleaned = [v for v in values if v]
+    return Counter(cleaned).most_common(1)[0][0] if cleaned else None
+
+
+def _workspace_metrics(items: list[ClusterItem]) -> dict:
+    return {
+        "postCount": len(items),
+        "avgSourceScore": _avg([it.score for it in items]),
+        "commentCount": sum(it.num_comments or 0 for it in items),
+        "averageUpvoteRatio": _avg([_upvote_ratio(it) for it in items]),
+    }
 
 
 def _cluster_id_from_card(card: Pipeline) -> int | None:
@@ -176,180 +206,68 @@ async def _get_active_pipeline_card(pipeline_id: str, db: AsyncSession, uid: str
     return card
 
 
-def _serialize_source_signal_post(member: ClusterMember, post: SourcePost) -> dict:
-    observed_at = post.posted_at or post.scraped_at
-    return {
-        "id": post.id,
-        "title": post.title or "Untitled post",
-        "description": post.body,
-        "source": post.source_community_id or post.source,
-        "sourceUrl": post.url or post.permalink,
-        "author": post.source_author_id,
-        "sourceScore": post.score,
-        "numComments": post.num_comments,
-        "createdAt": _iso_or_none(observed_at),
-        "similarityScore": member.similarity_score,
-    }
-
-
-def _serialize_signal_cluster_workspace(
-    cluster: Cluster,
-    rows: list[tuple[ClusterMember, SourcePost]],
-) -> dict:
-    posts = [post for _, post in rows]
-    dates = sorted(
-        observed
-        for post in posts
-        if (observed := _iso_or_none(post.posted_at or post.scraped_at))
-    )
-    return {
-        **_serialize_signal_cluster(cluster),
-        "summary": cluster.summary,
-        "opportunityType": cluster.opportunity_type,
-        "opportunityDomain": cluster.opportunity_domain,
-        "postCount": len(posts),
-        "commentCount": sum(post.num_comments or 0 for post in posts),
-        "averageUpvoteRatio": _avg([post.upvote_ratio for post in posts]),
-        "persistenceScore": cluster.persistence_score,
-        "intraClusterDensity": cluster.intra_cluster_density,
-        "silhouetteScore": cluster.silhouette_score,
-        "authorCount": cluster.author_count,
-        "communityCount": cluster.community_count,
-        "growthAcceleration": cluster.growth_acceleration,
-        "status": cluster.status,
-        "dateRange": {
-            "from": dates[0] if dates else None,
-            "to": dates[-1] if dates else None,
-        },
-    }
-
-
-def _serialize_workspace_metrics(rows: list[tuple[ClusterMember, SourcePost]]) -> dict:
-    posts = [post for _, post in rows]
-    return {
-        "postCount": len(posts),
-        "avgSourceScore": _avg([post.score for post in posts]),
-        "commentCount": sum(post.num_comments or 0 for post in posts),
-        "averageUpvoteRatio": _avg([post.upvote_ratio for post in posts]),
-    }
-
-
-def _serialize_evidence_summary(member: ClusterMember | None, post: SourcePost | Opportunity) -> dict:
-    if isinstance(post, SourcePost):
-        observed_at = post.posted_at or post.scraped_at
-        body = post.body
-        return {
-            "id": post.id,
-            "title": post.title or "Untitled post",
-            "excerpt": (body or "")[:300],
-            "community": post.source_community_id or post.source,
-            "source": post.source,
-            "engagement": post.score,
-            "numComments": post.num_comments,
-            "upvoteRatio": post.upvote_ratio,
-            "similarityScore": member.similarity_score if member else None,
-            "observedAt": _iso_or_none(observed_at),
-            "dateType": "posted" if post.posted_at else "observed",
-            "url": post.url or post.permalink,
-        }
-
-    return {
-        "id": post.id,
-        "title": post.title or "Untitled post",
-        "excerpt": (post.description or "")[:300],
-        "community": post.source,
-        "source": post.source,
-        "engagement": post.source_score,
-        "numComments": post.num_comments,
-        "upvoteRatio": post.upvote_ratio,
-        "similarityScore": None,
-        "observedAt": _iso_or_none(post.created_at),
-        "dateType": "observed",
-        "url": post.source_url,
-    }
-
-
-def _serialize_evidence_detail(member: ClusterMember | None, post: SourcePost | Opportunity) -> dict:
-    summary = _serialize_evidence_summary(member, post)
-    if isinstance(post, SourcePost):
-        return {
-            **summary,
-            "body": post.body,
-            "author": post.source_author_id,
-            "topComments": post.top_comments or [],
-        }
-    return {
-        **summary,
-        "body": post.description,
-        "author": post.author,
-        "topComments": post.top_comments or [],
-    }
-
-
-async def _load_pipeline_signal_data(
-    pipeline_id: str,
-    db: AsyncSession,
-    uid: str,
-) -> tuple[Pipeline, dict | None, dict, list[Opportunity]]:
-    result = await db.execute(
-        select(Pipeline).where(Pipeline.id == pipeline_id, Pipeline.user_id == uid)
-    )
-    card = result.scalar_one_or_none()
-    if not card:
-        raise HTTPException(status_code=404, detail="Pipeline card not found")
-
-    # source_cluster_id is stored as text; system cluster ids are integers.
+async def _items_for_card(card: Pipeline, db: AsyncSession) -> tuple[Cluster | None, list[ClusterItem]]:
+    """Resolve a card to (cluster, items): the system cluster's items when the
+    card points at one, otherwise the card's explicit post_ids."""
+    cluster_id = _cluster_id_from_card(card)
     cluster = None
-    cluster_int_id: int | None = None
-    if card.source_cluster_id:
-        try:
-            cluster_int_id = int(card.source_cluster_id)
-        except (TypeError, ValueError):
-            cluster_int_id = None
-
-    if cluster_int_id is not None:
-        cluster_result = await db.execute(
+    if cluster_id is not None:
+        cluster = (await db.execute(
             select(Cluster).where(
-                Cluster.id == cluster_int_id,
+                Cluster.id == cluster_id,
                 Cluster.pipeline_version == PIPELINE_VERSION,
             )
-        )
-        cluster = cluster_result.scalar_one_or_none()
+        )).scalar_one_or_none()
 
-    # Full cluster view: ALL posts in the cluster; fall back to the card's post_ids.
-    if cluster_int_id is not None:
-        posts_result = await db.execute(
-            select(Opportunity)
-            .where(
-                Opportunity.cluster_id == cluster_int_id,
-                Opportunity.deleted_at == None,
-                Opportunity.pipeline_version == PIPELINE_VERSION,
-            )
-            .order_by(Opportunity.source_score.desc().nullslast())
-        )
-        posts = list(posts_result.scalars().all())
+    if cluster is not None:
+        items = await load_cluster_items(db, cluster_id)
     elif card.post_ids:
-        posts_result = await db.execute(
-            select(Opportunity)
+        items = list((await db.execute(
+            select(ClusterItem)
             .where(
-                Opportunity.id.in_(card.post_ids),
-                Opportunity.deleted_at == None,
-                Opportunity.pipeline_version == PIPELINE_VERSION,
+                ClusterItem.id.in_(card.post_ids),
+                ClusterItem.pipeline_version == PIPELINE_VERSION,
             )
-            .order_by(Opportunity.source_score.desc().nullslast())
-        )
-        posts = list(posts_result.scalars().all())
+            .order_by(ClusterItem.score.desc().nullslast())
+        )).scalars().all())
     else:
-        posts = []
+        items = []
+    return cluster, items
 
-    return card, _serialize_signal_cluster(cluster), _build_signal_metrics(posts), posts
+
+def _csv_value(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
+def _build_signal_csv(card: Pipeline, cluster: Cluster | None, items: list[ClusterItem]) -> str:
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=EXPORT_CSV_COLUMNS)
+    writer.writeheader()
+    for it in items:
+        writer.writerow({
+            "pipeline_id": card.id,
+            "pipeline_name": card.name,
+            "pipeline_stage": card.stage,
+            "source_cluster_id": card.source_cluster_id,
+            "cluster_id": cluster.id if cluster else None,
+            "cluster_name": cluster.name if cluster else None,
+            "post_id": it.id,
+            "title": it.title,
+            "body": it.body,
+            "community": it.community,
+            "url": it.url or it.permalink,
+            "author": it.author,
+            "score": it.score,
+            "num_comments": it.num_comments,
+            "posted_at": _csv_value(it.posted_at),
+        })
+    return output.getvalue()
 
 
 def _serialize_pipeline_signal_payload(
-    card: Pipeline,
-    cluster_payload: dict | None,
-    metrics: dict,
-    posts: list[Opportunity],
+    card: Pipeline, cluster: Cluster | None, items: list[ClusterItem]
 ) -> dict:
     return {
         "pipeline": {
@@ -359,52 +277,10 @@ def _serialize_pipeline_signal_payload(
             "sourceClusterId": card.source_cluster_id,
             "stage": card.stage,
         },
-        "cluster": cluster_payload,
-        "metrics": metrics,
-        "posts": [_serialize_signal_post(p) for p in posts],
+        "cluster": _serialize_signal_cluster(cluster),
+        "metrics": _workspace_metrics(items),
+        "posts": [_serialize_signal_post(it) for it in items],
     }
-
-
-def _csv_value(value):
-    if isinstance(value, datetime):
-        return value.isoformat()
-    return value
-
-
-def _build_signal_csv(card: Pipeline, cluster_payload: dict | None, posts: list[Opportunity]) -> str:
-    output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=EXPORT_CSV_COLUMNS)
-    writer.writeheader()
-
-    for post in posts:
-        writer.writerow({
-            "pipeline_id": card.id,
-            "pipeline_name": card.name,
-            "pipeline_stage": card.stage,
-            "source_cluster_id": card.source_cluster_id,
-            "cluster_id": cluster_payload.get("id") if cluster_payload else None,
-            "cluster_name": cluster_payload.get("name") if cluster_payload else None,
-            "post_id": post.id,
-            "title": post.title,
-            "description": post.description,
-            "source": post.source,
-            "source_url": post.source_url,
-            "author": post.author,
-            "source_score": post.source_score,
-            "num_comments": post.num_comments,
-            "created_at": _csv_value(post.created_at),
-        })
-
-    return output.getvalue()
-
-
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    mag_a = math.sqrt(sum(x * x for x in a))
-    mag_b = math.sqrt(sum(x * x for x in b))
-    if mag_a == 0.0 or mag_b == 0.0:
-        return 0.0
-    return dot / (mag_a * mag_b)
 
 
 def _parse_embedding(raw) -> list[float] | None:
@@ -422,31 +298,27 @@ def _parse_embedding(raw) -> list[float] | None:
 
 
 async def _compute_and_write_metrics(pipeline_id: str, post_ids: list[str]) -> None:
-    """Background task: compute cluster metrics and write them back to the pipeline row."""
+    """Background task: compute cluster metrics (avg score + embedding coherence)
+    over the card's cluster_items and write them back to the pipeline row."""
     if not post_ids:
         return
 
     async with AsyncSessionLocal() as db:
         try:
             result = await db.execute(
-                select(
-                    Opportunity.id,
-                    Opportunity.source_score,
-                ).where(
-                    Opportunity.id.in_(post_ids),
-                    Opportunity.pipeline_version == PIPELINE_VERSION,
+                select(ClusterItem.id, ClusterItem.score).where(
+                    ClusterItem.id.in_(post_ids),
+                    ClusterItem.pipeline_version == PIPELINE_VERSION,
                 )
             )
             rows = result.all()
-
             if not rows:
                 return
 
             count = len(rows)
-            scores = [r.source_score for r in rows if r.source_score is not None]
+            scores = [r.score for r in rows if r.score is not None]
             avg_source_score = round(sum(scores) / len(scores), 2) if scores else None
 
-            # Coherence score: average pairwise cosine similarity using embeddings
             coherence_score: float | None = None
             if count == 1:
                 coherence_score = 1.0
@@ -455,16 +327,13 @@ async def _compute_and_write_metrics(pipeline_id: str, post_ids: list[str]) -> N
                 emb_result = await db.execute(
                     text(
                         "SELECT id::text, embedding::text AS emb "
-                        "FROM opportunities "
+                        "FROM cluster_items "
                         "WHERE id::text = ANY(:ids) AND embedding IS NOT NULL "
                         "AND pipeline_version = :pipeline_version"
                     ),
                     {"ids": sample, "pipeline_version": PIPELINE_VERSION},
                 )
-                emb_rows = emb_result.all()
-                parsed = [_parse_embedding(r[1]) for r in emb_rows]
-                vecs = [v for v in parsed if v is not None]
-
+                vecs = [v for v in (_parse_embedding(r[1]) for r in emb_result.all()) if v is not None]
                 if len(vecs) >= 2:
                     magnitudes = [math.sqrt(sum(x * x for x in v)) for v in vecs]
                     similarities: list[float] = []
@@ -487,71 +356,35 @@ async def _compute_and_write_metrics(pipeline_id: str, post_ids: list[str]) -> N
                 "computed_at": datetime.now(timezone.utc).isoformat(),
             }
 
-            pipeline_result = await db.execute(select(Pipeline).where(Pipeline.id == pipeline_id))
-            pipeline = pipeline_result.scalar_one_or_none()
+            pipeline = (await db.execute(select(Pipeline).where(Pipeline.id == pipeline_id))).scalar_one_or_none()
             if pipeline:
                 pipeline.cluster_metrics = metrics
                 await db.commit()
         except Exception:
-            # Background task — don't surface to the user, but don't go blind.
             logger.exception("cluster_metrics computation failed for pipeline %s", pipeline_id)
 
 
 async def _fetch_posts_for_cards(cards: list[Pipeline], db: AsyncSession) -> dict[str, list[dict]]:
-    """Batch-fetch {id, title, sourceScore} for all post_ids across the given pipeline cards."""
+    """Batch-fetch {id, title, sourceScore} for all post_ids across the cards."""
     all_ids = list({pid for c in cards for pid in (c.post_ids or [])})
     if not all_ids:
         return {str(c.id): [] for c in cards}
 
     result = await db.execute(
-        select(Opportunity.id, Opportunity.title, Opportunity.source_score)
+        select(ClusterItem.id, ClusterItem.title, ClusterItem.score)
         .where(
-            Opportunity.id.in_(all_ids),
-            Opportunity.pipeline_version == PIPELINE_VERSION,
+            ClusterItem.id.in_(all_ids),
+            ClusterItem.pipeline_version == PIPELINE_VERSION,
         )
     )
     post_map: dict[str, dict] = {
-        str(row.id): {"id": str(row.id), "title": row.title, "sourceScore": row.source_score}
+        str(row.id): {"id": str(row.id), "title": row.title, "sourceScore": row.score}
         for row in result
     }
-
     return {
         str(c.id): [post_map[pid] for pid in (c.post_ids or []) if pid in post_map]
         for c in cards
     }
-
-
-async def _update_opportunity_counts(opportunity_id: str, action: str, db: AsyncSession) -> None:
-    result = await db.execute(
-        select(Opportunity).where(
-            Opportunity.id == opportunity_id,
-            Opportunity.pipeline_version == PIPELINE_VERSION,
-        )
-    )
-    opp = result.scalar_one_or_none()
-    if not opp:
-        return
-    # Atomic counter updates so concurrent add/remove/launch can't lose writes.
-    pcount = func.coalesce(Opportunity.pipeline_count, 0)
-    if action == "add":
-        values = {"pipeline_count": pcount + 1}
-    elif action == "remove":
-        values = {"pipeline_count": func.greatest(0, pcount - 1)}
-    elif action == "launch":
-        values = {
-            "pipeline_count": func.greatest(0, pcount - 1),
-            "launch_count": func.coalesce(Opportunity.launch_count, 0) + 1,
-        }
-    else:
-        return
-    await db.execute(
-        update(Opportunity)
-        .where(
-            Opportunity.id == opportunity_id,
-            Opportunity.pipeline_version == PIPELINE_VERSION,
-        )
-        .values(**values)
-    )
 
 
 class CreatePipelineBody(BaseModel):
@@ -603,7 +436,6 @@ async def get_pipeline(
 
 
 async def _find_watch_card(uid: str, cluster_id: str, db: AsyncSession) -> Pipeline | None:
-    """The user's active (non-removed) pipeline card watching this cluster, if any."""
     return (await db.execute(
         select(Pipeline).where(
             Pipeline.user_id == uid,
@@ -619,13 +451,8 @@ async def watch_cluster(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
-    """Add a cluster to the user's pipeline at the Watching stage.
-
-    Watching a cluster is modeled as a pipeline card whose ``source_cluster_id``
-    points at the cluster and whose stage is ``watching`` (the backlog). The card
-    is seeded with the cluster's opportunity ids so the Signal workspace can load
-    its posts. Idempotent: re-watching returns the existing card.
-    """
+    """Add a cluster to the user's pipeline at the Watching stage. The card is
+    seeded with the cluster's cluster_items ids. Idempotent."""
     existing = await _find_watch_card(uid, body.cluster_id, db)
     if existing:
         return {"is_watched": True, "pipeline_id": str(existing.id)}
@@ -646,8 +473,6 @@ async def watch_cluster(
     if not cluster:
         raise HTTPException(status_code=404, detail="Cluster not found")
 
-    # Free plan caps active pipeline cards — watching consumes the same resource
-    # as creating a pipeline card, so enforce the same limit.
     active_cards = (await db.execute(
         select(Pipeline).where(
             Pipeline.user_id == uid,
@@ -661,10 +486,9 @@ async def watch_cluster(
         raise LimitReached("pipeline", plan, status_code=403)
 
     post_id_rows = (await db.execute(
-        select(Opportunity.id).where(
-            Opportunity.cluster_id == cluster_int_id,
-            Opportunity.deleted_at == None,
-            Opportunity.pipeline_version == PIPELINE_VERSION,
+        select(ClusterItem.id).where(
+            ClusterItem.cluster_id == cluster_int_id,
+            ClusterItem.pipeline_version == PIPELINE_VERSION,
         )
     )).all()
     post_ids = [str(r[0]) for r in post_id_rows]
@@ -688,7 +512,6 @@ async def unwatch_cluster(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
-    """Remove a cluster from the user's pipeline (soft-delete the watch card)."""
     card = await _find_watch_card(uid, cluster_id, db)
     if card:
         now = datetime.now(timezone.utc)
@@ -704,89 +527,48 @@ async def get_pipeline_signal(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
-    """Real-data Signal workspace anchored to an active user pipeline card.
-
-    The top-level signalOverview field passes through the AI-generated JSONB
-    document unchanged. Its overview* metadata fields describe generation
-    state and remain present when no overview is available.
-    """
+    """Signal workspace anchored to an active user pipeline card."""
     card = await _get_active_pipeline_card(pipeline_id, db, uid)
-    cluster_id = _cluster_id_from_card(card)
+    cluster, items = await _items_for_card(card, db)
 
-    cluster = None
-    member_rows: list[tuple[ClusterMember, SourcePost]] = []
-    if cluster_id is not None:
-        cluster = (await db.execute(
-            select(Cluster).where(
-                Cluster.id == cluster_id,
-                Cluster.pipeline_version == PIPELINE_VERSION,
-            )
-        )).scalar_one_or_none()
-        if cluster:
-            member_rows = list((await db.execute(
-                select(ClusterMember, SourcePost)
-                .join(SourcePost, ClusterMember.source_post_id == SourcePost.id)
-                .where(
-                    ClusterMember.cluster_id == cluster_id,
-                    ClusterMember.pipeline_version == PIPELINE_VERSION,
-                    SourcePost.is_deleted.isnot(True),
-                    SourcePost.is_removed.isnot(True),
-                )
-                .order_by(SourcePost.score.desc().nullslast())
-            )).all())
+    pipeline_payload = {
+        "id": card.id,
+        "name": card.name,
+        "notes": card.notes,
+        "sourceClusterId": card.source_cluster_id,
+        "stage": card.stage,
+    }
 
     if cluster:
-        cluster_payload = _serialize_signal_cluster_workspace(cluster, member_rows)
-        metrics = _serialize_workspace_metrics(member_rows)
-        posts = [_serialize_source_signal_post(member, post) for member, post in member_rows]
-        analytics = {
-            "sourceBreakdown": cluster.source_breakdown or [],
-            "topTerms": cluster.top_tfidf_terms or [],
-            "postVolumeByDate": cluster.post_volume_by_date or [],
-        }
         return {
-            "pipeline": {
-                "id": card.id,
-                "name": card.name,
-                "notes": card.notes,
-                "sourceClusterId": card.source_cluster_id,
-                "stage": card.stage,
+            "pipeline": pipeline_payload,
+            "cluster": _serialize_signal_cluster_workspace(cluster, items),
+            "metrics": _workspace_metrics(items),
+            "analytics": {
+                "sourceBreakdown": cluster.source_breakdown or [],
+                "postVolumeByDate": cluster.post_volume_by_date or [],
             },
-            "cluster": cluster_payload,
-            "metrics": metrics,
-            "analytics": analytics,
             "availability": {"clusterAnalytics": True, "brief": True},
-            "posts": posts,
-            **serialize_signal_overview(cluster),
+            "problemStatement": representative_problem_statement(items),
+            "posts": [_serialize_signal_post(it) for it in items],
         }
-
-    opportunities = []
-    if card.post_ids:
-        opportunities = list((await db.execute(
-            select(Opportunity)
-            .where(
-                Opportunity.id.in_(card.post_ids),
-                Opportunity.deleted_at == None,
-                Opportunity.pipeline_version == PIPELINE_VERSION,
-            )
-            .order_by(Opportunity.source_score.desc().nullslast())
-        )).scalars().all())
 
     return {
-        **_serialize_pipeline_signal_payload(
-            card,
-            None,
-            {
-                **_build_signal_metrics(opportunities),
-                "commentCount": sum(post.num_comments or 0 for post in opportunities),
-                "averageUpvoteRatio": _avg([post.upvote_ratio for post in opportunities]),
-            },
-            opportunities,
-        ),
+        "pipeline": pipeline_payload,
+        "cluster": None,
+        "metrics": _workspace_metrics(items),
         "analytics": None,
         "availability": {"clusterAnalytics": False, "brief": False},
-        **serialize_signal_overview(None),
+        "problemStatement": representative_problem_statement(items),
+        "posts": [_serialize_signal_post(it) for it in items],
     }
+
+
+def _evidence_scope(card: Pipeline, cluster_id: int | None):
+    """The where-condition that scopes cluster_items to this card."""
+    if cluster_id is not None:
+        return ClusterItem.cluster_id == cluster_id
+    return ClusterItem.id.in_(card.post_ids or [])
 
 
 @router.get("/{pipeline_id}/signal/evidence")
@@ -805,93 +587,39 @@ async def get_pipeline_signal_evidence(
     cluster_id = _cluster_id_from_card(card)
     offset = (page - 1) * pageSize
 
-    if cluster_id is not None:
-        conditions = [
-            ClusterMember.cluster_id == cluster_id,
-            ClusterMember.pipeline_version == PIPELINE_VERSION,
-            SourcePost.is_deleted.isnot(True),
-            SourcePost.is_removed.isnot(True),
-        ]
-        if q:
-            conditions.append(or_(SourcePost.title.ilike(f"%{q}%"), SourcePost.body.ilike(f"%{q}%")))
-        if community:
-            conditions.append(SourcePost.source_community_id == community)
-
-        order = {
-            "newest": func.coalesce(SourcePost.posted_at, SourcePost.scraped_at).desc().nullslast(),
-            "comments": SourcePost.num_comments.desc().nullslast(),
-            "similarity": ClusterMember.similarity_score.desc().nullslast(),
-        }.get(sort, SourcePost.score.desc().nullslast())
-
-        base = (
-            select(ClusterMember, SourcePost)
-            .join(SourcePost, ClusterMember.source_post_id == SourcePost.id)
-            .where(*conditions)
-        )
-        total = await db.scalar(
-            select(func.count())
-            .select_from(ClusterMember)
-            .join(SourcePost, ClusterMember.source_post_id == SourcePost.id)
-            .where(*conditions)
-        )
-        rows = list((await db.execute(base.order_by(order).offset(offset).limit(pageSize))).all())
-        communities = [
-            value for (value,) in (await db.execute(
-                select(SourcePost.source_community_id)
-                .join(ClusterMember, ClusterMember.source_post_id == SourcePost.id)
-                .where(
-                    ClusterMember.cluster_id == cluster_id,
-                    ClusterMember.pipeline_version == PIPELINE_VERSION,
-                    SourcePost.is_deleted.isnot(True),
-                    SourcePost.is_removed.isnot(True),
-                    SourcePost.source_community_id.isnot(None),
-                )
-                .distinct()
-                .order_by(SourcePost.source_community_id)
-            )).all()
-            if value
-        ]
-        return {
-            "data": [_serialize_evidence_summary(member, post) for member, post in rows],
-            "total": total or 0,
-            "page": page,
-            "pageSize": pageSize,
-            "communities": communities,
-        }
-
-    conditions = [
-        Opportunity.id.in_(card.post_ids or []),
-        Opportunity.deleted_at == None,
-        Opportunity.pipeline_version == PIPELINE_VERSION,
-    ]
+    conditions = [ClusterItem.pipeline_version == PIPELINE_VERSION, _evidence_scope(card, cluster_id)]
     if q:
-        conditions.append(or_(Opportunity.title.ilike(f"%{q}%"), Opportunity.description.ilike(f"%{q}%")))
+        conditions.append(or_(ClusterItem.title.ilike(f"%{q}%"), ClusterItem.body.ilike(f"%{q}%")))
     if community:
-        conditions.append(Opportunity.source == community)
+        conditions.append(ClusterItem.community == community)
+
     order = {
-        "newest": Opportunity.created_at.desc().nullslast(),
-        "comments": Opportunity.num_comments.desc().nullslast(),
-    }.get(sort, Opportunity.source_score.desc().nullslast())
-    total = await db.scalar(select(func.count()).select_from(Opportunity).where(*conditions))
-    posts = list((await db.execute(
-        select(Opportunity).where(*conditions).order_by(order).offset(offset).limit(pageSize)
+        "newest": func.coalesce(ClusterItem.posted_at, ClusterItem.scraped_at).desc().nullslast(),
+        "comments": ClusterItem.num_comments.desc().nullslast(),
+        "similarity": ClusterItem.similarity_score.desc().nullslast(),
+    }.get(sort, ClusterItem.score.desc().nullslast())
+
+    total = await db.scalar(select(func.count()).select_from(ClusterItem).where(*conditions))
+    rows = list((await db.execute(
+        select(ClusterItem).where(*conditions).order_by(order).offset(offset).limit(pageSize)
     )).scalars().all())
+
     communities = [
         value for (value,) in (await db.execute(
-            select(Opportunity.source)
+            select(ClusterItem.community)
             .where(
-                Opportunity.id.in_(card.post_ids or []),
-                Opportunity.deleted_at == None,
-                Opportunity.pipeline_version == PIPELINE_VERSION,
-                Opportunity.source.isnot(None),
+                ClusterItem.pipeline_version == PIPELINE_VERSION,
+                _evidence_scope(card, cluster_id),
+                ClusterItem.community.isnot(None),
             )
             .distinct()
-            .order_by(Opportunity.source)
+            .order_by(ClusterItem.community)
         )).all()
         if value
     ]
+
     return {
-        "data": [_serialize_evidence_summary(None, post) for post in posts],
+        "data": [serialize_evidence_item(it) for it in rows],
         "total": total or 0,
         "page": page,
         "pageSize": pageSize,
@@ -909,46 +637,50 @@ async def get_pipeline_signal_evidence_detail(
     """Full evidence post after verifying it belongs to the pipeline workspace."""
     card = await _get_active_pipeline_card(pipeline_id, db, uid)
     cluster_id = _cluster_id_from_card(card)
+
+    item = None
     if cluster_id is not None:
-        rows = (await db.execute(
-            select(ClusterMember, SourcePost)
-            .join(SourcePost, ClusterMember.source_post_id == SourcePost.id)
-            .where(
-                ClusterMember.cluster_id == cluster_id,
-                ClusterMember.pipeline_version == PIPELINE_VERSION,
-                SourcePost.id == post_id,
-                SourcePost.is_deleted.isnot(True),
-                SourcePost.is_removed.isnot(True),
-            )
-        )).all()
-        if rows:
-            return _serialize_evidence_detail(rows[0][0], rows[0][1])
-    elif post_id in (card.post_ids or []):
-        post = (await db.execute(
-            select(Opportunity).where(
-                Opportunity.id == post_id,
-                Opportunity.deleted_at == None,
-                Opportunity.pipeline_version == PIPELINE_VERSION,
+        item = (await db.execute(
+            select(ClusterItem).where(
+                ClusterItem.id == post_id,
+                ClusterItem.cluster_id == cluster_id,
+                ClusterItem.pipeline_version == PIPELINE_VERSION,
             )
         )).scalar_one_or_none()
-        if post:
-            return _serialize_evidence_detail(None, post)
-    raise HTTPException(status_code=404, detail="Evidence post not found")
+    elif post_id in (card.post_ids or []):
+        item = (await db.execute(
+            select(ClusterItem).where(
+                ClusterItem.id == post_id,
+                ClusterItem.pipeline_version == PIPELINE_VERSION,
+            )
+        )).scalar_one_or_none()
+
+    if not item:
+        raise HTTPException(status_code=404, detail="Evidence post not found")
+    return serialize_evidence_item(item)
 
 
 @router.get("/{pipeline_id}/signal/brief")
 async def get_pipeline_signal_brief(
     pipeline_id: str,
-    refresh: bool = Query(False),
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
-    """Discovery brief scoped through an active user pipeline card."""
+    """Problem/solution brief for the card's cluster, derived from the
+    pre-computed per-item problem_statement / solution_angle."""
     card = await _get_active_pipeline_card(pipeline_id, db, uid)
     cluster_id = _cluster_id_from_card(card)
     if cluster_id is None:
         return {"available": False, "reason": "Cluster analytics are unavailable for this pipeline card."}
-    return await get_discovery_brief(cluster_id=cluster_id, refresh=refresh, db=db, uid=uid)
+
+    items = await load_cluster_items(db, cluster_id, limit=SIGNAL_BRIEF_SCAN)
+    return {
+        "available": True,
+        "clusterId": cluster_id,
+        "problemStatement": representative_problem_statement(items),
+        "solutionAngles": distinct_solution_angles(items),
+        "postCount": len(items),
+    }
 
 
 @router.get("/{pipeline_id}/export")
@@ -959,12 +691,18 @@ async def export_pipeline_signal(
     uid: str = Depends(get_uid),
 ):
     """Export the signal dataset backing the Signal workspace."""
-    card, cluster_payload, metrics, posts = await _load_pipeline_signal_data(pipeline_id, db, uid)
+    card = (await db.execute(
+        select(Pipeline).where(Pipeline.id == pipeline_id, Pipeline.user_id == uid)
+    )).scalar_one_or_none()
+    if not card:
+        raise HTTPException(status_code=404, detail="Pipeline card not found")
+
+    cluster, items = await _items_for_card(card, db)
 
     if export_format == "json":
-        return _serialize_pipeline_signal_payload(card, cluster_payload, metrics, posts)
+        return _serialize_pipeline_signal_payload(card, cluster, items)
 
-    csv_body = _build_signal_csv(card, cluster_payload, posts)
+    csv_body = _build_signal_csv(card, cluster, items)
     return Response(
         content=csv_body,
         media_type="text/csv",
@@ -984,7 +722,6 @@ async def create_pipeline(
     if not body.post_ids:
         raise HTTPException(status_code=400, detail="post_ids must not be empty")
 
-    # Duplicate check: any active card already contains one of these post_ids
     existing_result = await db.execute(
         select(Pipeline).where(
             Pipeline.user_id == uid,
@@ -994,7 +731,6 @@ async def create_pipeline(
     )
     active_cards = existing_result.scalars().all()
 
-    # Free plan: cap active pipeline cards (403 with limit_reached on overflow).
     plan = await get_plan(uid, db)
     cap = limit_for(plan, "max_pipeline_cards")
     if cap is not None and len(active_cards) >= cap:
@@ -1015,11 +751,6 @@ async def create_pipeline(
         source_cluster_id=body.source_cluster_id,
     )
     db.add(card)
-    await db.flush()
-
-    for post_id in body.post_ids:
-        await _update_opportunity_counts(post_id, "add", db)
-
     await db.commit()
     await db.refresh(card)
 
@@ -1090,9 +821,6 @@ async def launch_pipeline(
     card.name = body.product_name
     card.updated_at = datetime.now(timezone.utc)
 
-    for post_id in card.post_ids or []:
-        await _update_opportunity_counts(post_id, "launch", db)
-
     await db.commit()
     await db.refresh(card)
     return {"data": _serialize(card)}
@@ -1113,9 +841,6 @@ async def delete_pipeline(
 
     card.removed_at = datetime.now(timezone.utc)
     card.updated_at = datetime.now(timezone.utc)
-
-    for post_id in card.post_ids or []:
-        await _update_opportunity_counts(post_id, "remove", db)
 
     await db.commit()
     return {"success": True}
