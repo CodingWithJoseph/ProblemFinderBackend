@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.auth import get_uid
-from app.models import Pipeline, Problem, Task
+from app.config import PIPELINE_VERSION
+from app.models import Pipeline, Problem, Task, Cluster, ClusterItem
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -85,5 +86,68 @@ async def dashboard_summary(
                 "updatedAt": p.updated_at.isoformat() if p.updated_at else None,
             }
             for p in recent
+        ],
+    }
+
+
+@router.get("/signals")
+async def dashboard_signals(
+    limit: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Intelligence dashboard: top clusters by signal_score plus a domain
+    breakdown computed live from cluster_items.opportunity_domain."""
+    clusters = list((await db.execute(
+        select(Cluster)
+        .where(Cluster.pipeline_version == PIPELINE_VERSION)
+        .order_by(Cluster.signal_score.desc().nullslast())
+        .limit(limit)
+    )).scalars().all())
+
+    cluster_ids = [c.id for c in clusters]
+    post_counts: dict[int, int] = {}
+    if cluster_ids:
+        rows = await db.execute(
+            select(ClusterItem.cluster_id, func.count())
+            .where(
+                ClusterItem.cluster_id.in_(cluster_ids),
+                ClusterItem.pipeline_version == PIPELINE_VERSION,
+            )
+            .group_by(ClusterItem.cluster_id)
+        )
+        post_counts = {cid: count for cid, count in rows.all()}
+
+    # Domain breakdown across the current pipeline version.
+    domain_rows = await db.execute(
+        select(
+            ClusterItem.opportunity_domain,
+            func.count().label("post_count"),
+            func.count(func.distinct(ClusterItem.cluster_id)).label("cluster_count"),
+        )
+        .where(
+            ClusterItem.pipeline_version == PIPELINE_VERSION,
+            ClusterItem.opportunity_domain.isnot(None),
+            func.trim(ClusterItem.opportunity_domain) != "",
+        )
+        .group_by(ClusterItem.opportunity_domain)
+        .order_by(func.count().desc())
+    )
+
+    return {
+        "clusters": [
+            {
+                "id": c.id,
+                "name": c.name,
+                "summary": c.summary,
+                "signalScore": c.signal_score,
+                "trending": c.trending,
+                "postCount": post_counts.get(c.id, 0),
+            }
+            for c in clusters
+        ],
+        "domainBreakdown": [
+            {"domain": domain, "postCount": post_count, "clusterCount": cluster_count}
+            for domain, post_count, cluster_count in domain_rows.all()
         ],
     }
