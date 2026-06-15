@@ -53,11 +53,16 @@ async def test_browse_clusters_default_sort(client, fake_db, auth_headers):
     assert resp.json()["data"][0]["signalScore"] == 0.82
 
 
-async def test_trending_requires_pro(client, fake_db, auth_headers):
-    fake_db.stub(execute=[FakeResult(rows=[make_subscription(plan=PlanEnum.free)])])
+async def test_trending_accessible_to_free(client, fake_db, auth_headers):
+    # Tier gating is temporarily disabled: free users now get trending too.
+    cluster = make_cluster()
+    fake_db.stub(execute=[
+        FakeResult(rows=[make_subscription(plan=PlanEnum.free)]),
+        FakeResult(rows=[(cluster, 50)]),
+    ])
     resp = await client.get("/clusters/trending", headers=auth_headers)
-    assert resp.status_code == 403
-    assert resp.json()["limit"] == "clusters"
+    assert resp.status_code == 200
+    assert resp.json()["data"][0]["signalScore"] == 0.82
 
 
 async def test_trending_orders_by_signal_score(client, fake_db, auth_headers):

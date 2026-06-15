@@ -16,8 +16,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import PlanEnum, Subscription, Problem, Task, SearchUsage
 
 # None means unlimited.
+#
+# NOTE: tier gating is temporarily disabled — every plan (including free) is
+# granted the same unlimited access (no search/pipeline/problem/task caps and
+# AI clusters on). This is the single source of truth for gating, so flipping
+# the free row back to the previous values below re-enables enforcement
+# everywhere (trending Pro-gate, pipeline-card cap, problem/task caps) without
+# touching any route. Previous free limits, for reference:
+#   {"searches_per_24h": 3, "max_pipeline_cards": 3, "max_problems_per_pipeline": 10, "max_tasks_per_pipeline": 10, "ai_clusters": False}
 TIER_LIMITS: dict[PlanEnum, dict] = {
-    PlanEnum.free:  {"searches_per_24h": 3,    "max_pipeline_cards": 3,    "max_problems_per_pipeline": 10,   "max_tasks_per_pipeline": 10,   "ai_clusters": False},
+    PlanEnum.free:  {"searches_per_24h": None, "max_pipeline_cards": None, "max_problems_per_pipeline": None, "max_tasks_per_pipeline": None, "ai_clusters": True},
     PlanEnum.pro:   {"searches_per_24h": None, "max_pipeline_cards": None, "max_problems_per_pipeline": None, "max_tasks_per_pipeline": None, "ai_clusters": True},
     PlanEnum.elite: {"searches_per_24h": None, "max_pipeline_cards": None, "max_problems_per_pipeline": None, "max_tasks_per_pipeline": None, "ai_clusters": True},
     PlanEnum.admin: {"searches_per_24h": None, "max_pipeline_cards": None, "max_problems_per_pipeline": None, "max_tasks_per_pipeline": None, "ai_clusters": True},
