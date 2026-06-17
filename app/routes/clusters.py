@@ -52,6 +52,20 @@ def _most_common(values) -> str | None:
     return Counter(cleaned).most_common(1)[0][0]
 
 
+def _source_names(c: Cluster, items: list[ClusterItem]) -> list[str]:
+    sources: list[str] = []
+    cluster_source = getattr(c, "source", None)
+    if cluster_source:
+        sources.append(cluster_source)
+    for row in c.source_breakdown or []:
+        if isinstance(row, dict):
+            source = row.get("source") or row.get("platform")
+            if source:
+                sources.append(str(source))
+    sources.extend(it.platform for it in items if it.platform)
+    return sorted({source.strip() for source in sources if source and source.strip()})
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # cluster_items helpers (shared with pipeline.py / problems.py / dashboard.py)
 # ──────────────────────────────────────────────────────────────────────────
@@ -188,12 +202,12 @@ async def _items_by_cluster(cluster_ids: list[int], db: AsyncSession) -> dict[in
 
 
 def _item_stats_subquery():
-    """Per-cluster post_count + most-recent post date over cluster_items."""
+    """Per-cluster post_count + most-recent observed date over cluster_items."""
     return (
         select(
             ClusterItem.cluster_id.label("cluster_id"),
             func.count().label("post_count"),
-            func.max(ClusterItem.posted_at).label("last_posted"),
+            func.max(func.coalesce(ClusterItem.posted_at, ClusterItem.scraped_at)).label("last_observed"),
         )
         .where(
             ClusterItem.pipeline_version == PIPELINE_VERSION,
@@ -264,6 +278,7 @@ def _serialize_discovery_cluster(c: Cluster, items: list[ClusterItem], watched_i
         "trending_status": "trending" if c.trending else None,
         "date_range_start": dates[0] if dates else None,
         "date_range_end": dates[-1] if dates else None,
+        "sources": _source_names(c, items),
         "subreddits": subreddits,
         "sample_posts": [serialize_sample_item(it) for it in items[:SEARCH_SAMPLE_POSTS]],
         "is_watched": c.id in watched_ids,
@@ -287,6 +302,21 @@ def _apply_domain_filter(base, opportunity_domain: str | None):
         func.lower(func.trim(ClusterItem.opportunity_domain)) == opportunity_domain.strip().lower(),
     )
     return base.where(exists_q.exists())
+
+
+def _item_text_match(pattern: str):
+    exists_q = select(ClusterItem.id).where(
+        ClusterItem.cluster_id == Cluster.id,
+        ClusterItem.pipeline_version == PIPELINE_VERSION,
+        or_(
+            ClusterItem.title.ilike(pattern),
+            ClusterItem.problem_statement.ilike(pattern),
+            ClusterItem.solution_angle.ilike(pattern),
+            ClusterItem.opportunity_domain.ilike(pattern),
+            ClusterItem.community.ilike(pattern),
+        ),
+    )
+    return exists_q.exists()
 
 
 async def _materialize_discovery(base, order_clauses, limit, offset, uid, db) -> dict:
@@ -317,10 +347,20 @@ async def search_clusters(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
-    """Cluster-first search by name, ordered by post_count desc (recency tiebreak)."""
-    conditions = [Cluster.name.ilike(f"%{q}%")]
+    """Cluster-first search across cluster and item text."""
+    full_pattern = f"%{q}%"
+    conditions = [
+        Cluster.name.ilike(full_pattern),
+        Cluster.summary.ilike(full_pattern),
+        _item_text_match(full_pattern),
+    ]
     for token in (t for t in q.split() if len(t) >= 2):
-        conditions.append(Cluster.name.ilike(f"%{token}%"))
+        pattern = f"%{token}%"
+        conditions.extend([
+            Cluster.name.ilike(pattern),
+            Cluster.summary.ilike(pattern),
+            _item_text_match(pattern),
+        ])
 
     stats = _item_stats_subquery()
     base = (
@@ -333,7 +373,7 @@ async def search_clusters(
         )
     )
     base = _apply_domain_filter(base, opportunity_domain)
-    order_clauses = [stats.c.post_count.desc(), stats.c.last_posted.desc().nullslast()]
+    order_clauses = [stats.c.post_count.desc(), stats.c.last_observed.desc().nullslast()]
     return await _materialize_discovery(base, order_clauses, limit, offset, uid, db)
 
 
@@ -341,7 +381,7 @@ async def search_clusters(
 async def browse_clusters(
     limit: int = Query(SEARCH_DEFAULT_LIMIT, ge=1, le=SEARCH_MAX_LIMIT),
     offset: int = Query(0, ge=0),
-    sort: str = Query("signal"),
+    sort: str = Query("newest"),
     subreddit: str | None = Query(None),
     min_posts: int = Query(1, ge=1),
     opportunity_domain: str | None = Query(None),
@@ -368,12 +408,17 @@ async def browse_clusters(
         )
         base = base.where(item_exists.exists())
 
-    if sort == "newest":
-        order_clauses = [stats.c.last_posted.desc().nullslast()]
-    elif sort == "largest":
-        order_clauses = [stats.c.post_count.desc()]
-    else:  # "signal" (default)
-        order_clauses = [Cluster.signal_score.desc().nullslast(), stats.c.post_count.desc()]
+    newest_order = [
+        Cluster.last_seen_date.desc().nullslast(),
+        stats.c.last_observed.desc().nullslast(),
+    ]
+    if sort == "largest":
+        order_clauses = [stats.c.post_count.desc(), *newest_order]
+    elif sort == "trending":
+        base = base.where(Cluster.trending == True)
+        order_clauses = [*newest_order, stats.c.post_count.desc()]
+    else:  # "newest" (default)
+        order_clauses = [*newest_order, stats.c.post_count.desc()]
 
     return await _materialize_discovery(base, order_clauses, limit, offset, uid, db)
 

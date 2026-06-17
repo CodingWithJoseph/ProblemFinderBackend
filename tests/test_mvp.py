@@ -36,13 +36,36 @@ async def test_search_clusters(client, fake_db, auth_headers):
     assert row["id"] == 42
     assert row["signalScore"] == 0.82
     assert row["opportunity_domain"] == "fintech"
+    assert row["sources"] == ["reddit"]
     assert row["problemStatement"]
     assert row["post_count"] == 1
     assert row["is_watched"] is False
 
 
+async def test_search_clusters_can_match_item_fields(client, fake_db, auth_headers):
+    cluster = make_cluster(name="Generic operations pain")
+    item = make_cluster_item(
+        cluster_id=cluster.id,
+        opportunity_domain="real estate",
+        problem_statement="Property managers cannot track tenant repairs cleanly.",
+    )
+    fake_db.stub(
+        scalar=[1],
+        execute=[
+            FakeResult(rows=[cluster]),
+            FakeResult(rows=[item]),
+            FakeResult(rows=[]),
+        ],
+    )
+    resp = await client.get("/clusters/search?q=tenant%20repairs", headers=auth_headers)
+    assert resp.status_code == 200
+    row = resp.json()["data"][0]
+    assert row["opportunity_domain"] == "real estate"
+    assert row["problemStatement"] == "Property managers cannot track tenant repairs cleanly."
+
+
 async def test_browse_clusters_default_sort(client, fake_db, auth_headers):
-    cluster = make_cluster()
+    cluster = make_cluster(trending=False)
     item = make_cluster_item()
     fake_db.stub(
         scalar=[1],
@@ -50,7 +73,22 @@ async def test_browse_clusters_default_sort(client, fake_db, auth_headers):
     )
     resp = await client.get("/clusters/browse", headers=auth_headers)
     assert resp.status_code == 200
-    assert resp.json()["data"][0]["signalScore"] == 0.82
+    row = resp.json()["data"][0]
+    assert row["signalScore"] == 0.82
+    assert row["trending_status"] is None
+
+
+async def test_browse_clusters_trending_sort(client, fake_db, auth_headers):
+    cluster = make_cluster(trending=True)
+    item = make_cluster_item()
+    fake_db.stub(
+        scalar=[1],
+        execute=[FakeResult(rows=[cluster]), FakeResult(rows=[item]), FakeResult(rows=[])],
+    )
+    resp = await client.get("/clusters/browse?sort=trending", headers=auth_headers)
+    assert resp.status_code == 200
+    row = resp.json()["data"][0]
+    assert row["trending_status"] == "trending"
 
 
 async def test_trending_accessible_to_free(client, fake_db, auth_headers):
