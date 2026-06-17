@@ -19,7 +19,21 @@ async def test_create_issue(client, fake_db, auth_headers):
     body = resp.json()["data"]
     assert body["title"] == "Analyze signals"
     assert body["status"] == "open"
+    assert body["issueType"] == "issue"
     assert any(isinstance(obj, Issue) and obj.title == "Analyze signals" for obj in fake_db.added)
+
+
+async def test_create_kill_criteria_issue(client, fake_db, auth_headers):
+    resp = await client.post(
+        "/issues",
+        json={"title": "No willingness to pay", "issue_type": "kill_criteria"},
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["issueType"] == "kill_criteria"
+    assert any(isinstance(obj, Issue) and obj.issue_type == "kill_criteria" for obj in fake_db.added)
 
 
 async def test_list_issues(client, fake_db, auth_headers):
