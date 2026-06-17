@@ -10,6 +10,7 @@ from app.routes.portfolio import router as portfolio_router
 from app.routes.problems import router as problems_router
 from app.routes.tasks import router as tasks_router
 from app.routes.teams import router as teams_router
+from app.routes.issues import router as issues_router
 from app.routes.dashboard import router as dashboard_router
 from app.routes.homepage import router as homepage_router
 from app.routes.public import router as public_router
@@ -40,6 +41,7 @@ app.include_router(portfolio_router)
 app.include_router(problems_router)
 app.include_router(tasks_router)
 app.include_router(teams_router)
+app.include_router(issues_router)
 app.include_router(dashboard_router)
 app.include_router(homepage_router)
 app.include_router(public_router)

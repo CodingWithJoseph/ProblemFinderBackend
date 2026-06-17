@@ -58,6 +58,8 @@ from app.models import (  # noqa: E402
     Problem,
     Team,
     TeamMember,
+    Issue,
+    IssueComment,
 )
 from app.routes.clusters import router as clusters_router  # noqa: E402
 from app.routes.problems import router as problems_router  # noqa: E402
@@ -65,6 +67,7 @@ from app.routes.pipeline import router as pipeline_router  # noqa: E402
 from app.routes.portfolio import router as portfolio_router  # noqa: E402
 from app.routes.tasks import router as tasks_router  # noqa: E402
 from app.routes.teams import router as teams_router  # noqa: E402
+from app.routes.issues import router as issues_router  # noqa: E402
 from app.routes.dashboard import router as dashboard_router  # noqa: E402
 from app.routes.homepage import router as homepage_router  # noqa: E402
 from app.routes.public import router as public_router  # noqa: E402
@@ -327,6 +330,39 @@ def make_team_member(**kw):
     return TeamMember(**defaults)
 
 
+def make_issue(**kw):
+    defaults = dict(
+        id=str(uuid.uuid4()),
+        user_id=TEST_UID,
+        team_id=None,
+        pipeline_id=None,
+        parent_issue_id=None,
+        title="Analyze signals",
+        summary="Review the signal page.",
+        status="open",
+        position=0,
+        source="analyze_signals",
+        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 2, tzinfo=timezone.utc),
+        closed_at=None,
+    )
+    defaults.update(kw)
+    return Issue(**defaults)
+
+
+def make_issue_comment(**kw):
+    defaults = dict(
+        id=str(uuid.uuid4()),
+        issue_id=str(uuid.uuid4()),
+        user_id=TEST_UID,
+        body="This needs deeper validation.",
+        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+    )
+    defaults.update(kw)
+    return IssueComment(**defaults)
+
+
 def make_problem(**kw):
     defaults = dict(
         id=str(uuid.uuid4()),
@@ -366,6 +402,7 @@ def app(fake_db):
     application.include_router(portfolio_router)
     application.include_router(tasks_router)
     application.include_router(teams_router)
+    application.include_router(issues_router)
     application.include_router(dashboard_router)
     application.include_router(homepage_router)
     application.include_router(public_router)
