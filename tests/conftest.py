@@ -56,12 +56,15 @@ from app.models import (  # noqa: E402
     ClusterSnapshot,
     Pipeline,
     Problem,
+    Team,
+    TeamMember,
 )
 from app.routes.clusters import router as clusters_router  # noqa: E402
 from app.routes.problems import router as problems_router  # noqa: E402
 from app.routes.pipeline import router as pipeline_router  # noqa: E402
 from app.routes.portfolio import router as portfolio_router  # noqa: E402
 from app.routes.tasks import router as tasks_router  # noqa: E402
+from app.routes.teams import router as teams_router  # noqa: E402
 from app.routes.dashboard import router as dashboard_router  # noqa: E402
 from app.routes.homepage import router as homepage_router  # noqa: E402
 from app.routes.public import router as public_router  # noqa: E402
@@ -295,6 +298,35 @@ def make_pipeline(**kw):
     return Pipeline(**defaults)
 
 
+def make_team(**kw):
+    defaults = dict(
+        id=str(uuid.uuid4()),
+        owner_user_id=TEST_UID,
+        name="Immensity Research",
+        description="Customer discovery workspace",
+        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 2, tzinfo=timezone.utc),
+    )
+    defaults.update(kw)
+    return Team(**defaults)
+
+
+def make_team_member(**kw):
+    defaults = dict(
+        id=str(uuid.uuid4()),
+        team_id=str(uuid.uuid4()),
+        user_id="member-uid",
+        email="member@example.com",
+        display_name="Member User",
+        role="member",
+        status="active",
+        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 2, tzinfo=timezone.utc),
+    )
+    defaults.update(kw)
+    return TeamMember(**defaults)
+
+
 def make_problem(**kw):
     defaults = dict(
         id=str(uuid.uuid4()),
@@ -333,6 +365,7 @@ def app(fake_db):
     application.include_router(pipeline_router)
     application.include_router(portfolio_router)
     application.include_router(tasks_router)
+    application.include_router(teams_router)
     application.include_router(dashboard_router)
     application.include_router(homepage_router)
     application.include_router(public_router)
