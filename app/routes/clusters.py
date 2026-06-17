@@ -52,6 +52,20 @@ def _most_common(values) -> str | None:
     return Counter(cleaned).most_common(1)[0][0]
 
 
+def _source_names(c: Cluster, items: list[ClusterItem]) -> list[str]:
+    sources: list[str] = []
+    cluster_source = getattr(c, "source", None)
+    if cluster_source:
+        sources.append(cluster_source)
+    for row in c.source_breakdown or []:
+        if isinstance(row, dict):
+            source = row.get("source") or row.get("platform")
+            if source:
+                sources.append(str(source))
+    sources.extend(it.platform for it in items if it.platform)
+    return sorted({source.strip() for source in sources if source and source.strip()})
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # cluster_items helpers (shared with pipeline.py / problems.py / dashboard.py)
 # ──────────────────────────────────────────────────────────────────────────
@@ -264,6 +278,7 @@ def _serialize_discovery_cluster(c: Cluster, items: list[ClusterItem], watched_i
         "trending_status": "trending" if c.trending else None,
         "date_range_start": dates[0] if dates else None,
         "date_range_end": dates[-1] if dates else None,
+        "sources": _source_names(c, items),
         "subreddits": subreddits,
         "sample_posts": [serialize_sample_item(it) for it in items[:SEARCH_SAMPLE_POSTS]],
         "is_watched": c.id in watched_ids,

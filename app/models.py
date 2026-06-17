@@ -65,6 +65,7 @@ class Cluster(Base):
     # Lightweight cluster-level analytics the API surfaces directly.
     trending: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     first_seen: Mapped[date | None] = mapped_column(Date, nullable=True)
+    source: Mapped[str | None] = mapped_column(String, nullable=True)
     last_seen_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     author_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     community_count: Mapped[int | None] = mapped_column(Integer, nullable=True)

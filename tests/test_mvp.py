@@ -36,6 +36,7 @@ async def test_search_clusters(client, fake_db, auth_headers):
     assert row["id"] == 42
     assert row["signalScore"] == 0.82
     assert row["opportunity_domain"] == "fintech"
+    assert row["sources"] == ["reddit"]
     assert row["problemStatement"]
     assert row["post_count"] == 1
     assert row["is_watched"] is False
