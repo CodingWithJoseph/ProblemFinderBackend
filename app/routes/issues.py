@@ -14,6 +14,7 @@ from app.models import Issue, IssueComment, Pipeline, Team, TeamMember
 router = APIRouter(prefix="/issues", tags=["issues"])
 
 IssueStatus = Literal["open", "done", "archived"]
+IssueType = Literal["issue", "kill_criteria"]
 
 DEFAULT_PIPELINE_ISSUES = [
     ("analyze_signals", "Analyze signals", "Review the signal page and decide what evidence matters."),
@@ -29,6 +30,7 @@ class CreateIssueBody(BaseModel):
     pipeline_id: str | None = None
     parent_issue_id: str | None = None
     status: IssueStatus = "open"
+    issue_type: IssueType = "issue"
     position: int = 0
     source: str | None = None
 
@@ -37,6 +39,7 @@ class PatchIssueBody(BaseModel):
     title: str | None = None
     summary: str | None = None
     status: IssueStatus | None = None
+    issue_type: IssueType | None = None
     position: int | None = None
 
 
@@ -84,6 +87,7 @@ def _serialize_issue(issue: Issue, comment_count: int = 0, sub_issue_count: int 
         "title": issue.title,
         "summary": issue.summary,
         "status": issue.status,
+        "issueType": issue.issue_type,
         "position": issue.position,
         "source": issue.source,
         "commentCount": comment_count,
@@ -188,6 +192,7 @@ async def _ensure_default_issues_for_pipeline(pipeline_id: str, db: AsyncSession
         select(Issue.source).where(
             Issue.pipeline_id == pipeline_id,
             Issue.parent_issue_id == None,
+            Issue.issue_type == "issue",
             Issue.source.in_(keys),
         )
     )).all()
@@ -205,6 +210,7 @@ async def _ensure_default_issues_for_pipeline(pipeline_id: str, db: AsyncSession
             title=title,
             summary=summary,
             status="open",
+            issue_type="issue",
             position=position,
             source=key,
             created_at=now,
@@ -238,6 +244,7 @@ async def _create_issue(body: CreateIssueBody, db: AsyncSession, uid: str, paren
         title=title,
         summary=_clean(body.summary),
         status=body.status,
+        issue_type=body.issue_type,
         position=body.position,
         source=_clean(body.source),
         created_at=now,
@@ -255,6 +262,7 @@ async def list_issues(
     pipeline_id: str | None = Query(None),
     team_id: str | None = Query(None),
     status: IssueStatus | None = Query(None),
+    issue_type: IssueType | None = Query(None),
     parent_issue_id: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
@@ -269,6 +277,8 @@ async def list_issues(
         conditions.append(Issue.team_id == team_id)
     if status:
         conditions.append(Issue.status == status)
+    if issue_type:
+        conditions.append(Issue.issue_type == issue_type)
     if parent_issue_id:
         conditions.append(Issue.parent_issue_id == parent_issue_id)
     else:
@@ -344,6 +354,8 @@ async def patch_issue(
     if "status" in updates and body.status:
         issue.status = body.status
         issue.closed_at = _now() if body.status in {"done", "archived"} else None
+    if "issue_type" in updates and body.issue_type:
+        issue.issue_type = body.issue_type
     issue.updated_at = _now()
     await db.commit()
     await db.refresh(issue)

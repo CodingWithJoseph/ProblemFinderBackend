@@ -340,6 +340,7 @@ def make_issue(**kw):
         title="Analyze signals",
         summary="Review the signal page.",
         status="open",
+        issue_type="issue",
         position=0,
         source="analyze_signals",
         created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),

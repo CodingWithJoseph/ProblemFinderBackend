@@ -243,6 +243,7 @@ class Issue(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
+    issue_type: Mapped[str] = mapped_column(String(50), nullable=False, default="issue")
     position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     source: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
