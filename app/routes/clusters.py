@@ -188,12 +188,12 @@ async def _items_by_cluster(cluster_ids: list[int], db: AsyncSession) -> dict[in
 
 
 def _item_stats_subquery():
-    """Per-cluster post_count + most-recent post date over cluster_items."""
+    """Per-cluster post_count + most-recent observed date over cluster_items."""
     return (
         select(
             ClusterItem.cluster_id.label("cluster_id"),
             func.count().label("post_count"),
-            func.max(ClusterItem.posted_at).label("last_posted"),
+            func.max(func.coalesce(ClusterItem.posted_at, ClusterItem.scraped_at)).label("last_observed"),
         )
         .where(
             ClusterItem.pipeline_version == PIPELINE_VERSION,
@@ -289,6 +289,21 @@ def _apply_domain_filter(base, opportunity_domain: str | None):
     return base.where(exists_q.exists())
 
 
+def _item_text_match(pattern: str):
+    exists_q = select(ClusterItem.id).where(
+        ClusterItem.cluster_id == Cluster.id,
+        ClusterItem.pipeline_version == PIPELINE_VERSION,
+        or_(
+            ClusterItem.title.ilike(pattern),
+            ClusterItem.problem_statement.ilike(pattern),
+            ClusterItem.solution_angle.ilike(pattern),
+            ClusterItem.opportunity_domain.ilike(pattern),
+            ClusterItem.community.ilike(pattern),
+        ),
+    )
+    return exists_q.exists()
+
+
 async def _materialize_discovery(base, order_clauses, limit, offset, uid, db) -> dict:
     total = await db.scalar(select(func.count()).select_from(base.subquery()))
     query = base.order_by(*order_clauses).offset(offset).limit(limit)
@@ -317,10 +332,20 @@ async def search_clusters(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
-    """Cluster-first search by name, ordered by post_count desc (recency tiebreak)."""
-    conditions = [Cluster.name.ilike(f"%{q}%")]
+    """Cluster-first search across cluster and item text."""
+    full_pattern = f"%{q}%"
+    conditions = [
+        Cluster.name.ilike(full_pattern),
+        Cluster.summary.ilike(full_pattern),
+        _item_text_match(full_pattern),
+    ]
     for token in (t for t in q.split() if len(t) >= 2):
-        conditions.append(Cluster.name.ilike(f"%{token}%"))
+        pattern = f"%{token}%"
+        conditions.extend([
+            Cluster.name.ilike(pattern),
+            Cluster.summary.ilike(pattern),
+            _item_text_match(pattern),
+        ])
 
     stats = _item_stats_subquery()
     base = (
@@ -333,7 +358,7 @@ async def search_clusters(
         )
     )
     base = _apply_domain_filter(base, opportunity_domain)
-    order_clauses = [stats.c.post_count.desc(), stats.c.last_posted.desc().nullslast()]
+    order_clauses = [stats.c.post_count.desc(), stats.c.last_observed.desc().nullslast()]
     return await _materialize_discovery(base, order_clauses, limit, offset, uid, db)
 
 
@@ -341,7 +366,7 @@ async def search_clusters(
 async def browse_clusters(
     limit: int = Query(SEARCH_DEFAULT_LIMIT, ge=1, le=SEARCH_MAX_LIMIT),
     offset: int = Query(0, ge=0),
-    sort: str = Query("signal"),
+    sort: str = Query("newest"),
     subreddit: str | None = Query(None),
     min_posts: int = Query(1, ge=1),
     opportunity_domain: str | None = Query(None),
@@ -368,12 +393,17 @@ async def browse_clusters(
         )
         base = base.where(item_exists.exists())
 
-    if sort == "newest":
-        order_clauses = [stats.c.last_posted.desc().nullslast()]
-    elif sort == "largest":
-        order_clauses = [stats.c.post_count.desc()]
-    else:  # "signal" (default)
-        order_clauses = [Cluster.signal_score.desc().nullslast(), stats.c.post_count.desc()]
+    newest_order = [
+        Cluster.last_seen_date.desc().nullslast(),
+        stats.c.last_observed.desc().nullslast(),
+    ]
+    if sort == "largest":
+        order_clauses = [stats.c.post_count.desc(), *newest_order]
+    elif sort == "trending":
+        base = base.where(Cluster.trending == True)
+        order_clauses = [*newest_order, stats.c.post_count.desc()]
+    else:  # "newest" (default)
+        order_clauses = [*newest_order, stats.c.post_count.desc()]
 
     return await _materialize_discovery(base, order_clauses, limit, offset, uid, db)
 
