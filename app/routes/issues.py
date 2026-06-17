@@ -137,11 +137,13 @@ async def _require_issue(issue_id: str, db: AsyncSession, uid: str) -> Issue:
     return issue
 
 
-async def _require_pipeline(pipeline_id: str | None, db: AsyncSession, uid: str) -> None:
+async def _require_pipeline(pipeline_id: str | None, db: AsyncSession, uid: str) -> Pipeline | None:
     if not pipeline_id:
-        return
-    if not await _pipeline_owned(pipeline_id, db, uid):
+        return None
+    pipeline = await _pipeline_owned(pipeline_id, db, uid)
+    if not pipeline:
         raise HTTPException(status_code=404, detail="Pipeline card not found")
+    return pipeline
 
 
 async def _require_team(team_id: str | None, db: AsyncSession, uid: str) -> None:
@@ -206,6 +208,7 @@ async def _ensure_default_issues_for_pipeline(pipeline_id: str, db: AsyncSession
         db.add(Issue(
             id=str(uuid.uuid4()),
             user_id=uid,
+            team_id=pipeline.team_id,
             pipeline_id=pipeline_id,
             title=title,
             summary=summary,
@@ -231,7 +234,9 @@ async def _create_issue(body: CreateIssueBody, db: AsyncSession, uid: str, paren
 
     pipeline_id = body.pipeline_id or (parent.pipeline_id if parent else None)
     team_id = body.team_id or (parent.team_id if parent else None)
-    await _require_pipeline(pipeline_id, db, uid)
+    pipeline = await _require_pipeline(pipeline_id, db, uid)
+    if team_id is None and pipeline is not None:
+        team_id = pipeline.team_id
     await _require_team(team_id, db, uid)
 
     now = _now()

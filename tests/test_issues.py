@@ -4,6 +4,7 @@ from conftest import (
     make_issue,
     make_issue_comment,
     make_pipeline,
+    make_team,
 )
 from app.models import Issue, IssueComment
 
@@ -34,6 +35,24 @@ async def test_create_kill_criteria_issue(client, fake_db, auth_headers):
     body = resp.json()["data"]
     assert body["issueType"] == "kill_criteria"
     assert any(isinstance(obj, Issue) and obj.issue_type == "kill_criteria" for obj in fake_db.added)
+
+
+async def test_create_pipeline_issue_inherits_project_team(client, fake_db, auth_headers):
+    team = make_team()
+    pipeline = make_pipeline(team_id=team.id)
+    fake_db.stub(execute=[FakeResult(rows=[pipeline]), FakeResult(rows=[team])])
+
+    resp = await client.post(
+        "/issues",
+        json={"title": "Validate pricing", "pipeline_id": pipeline.id},
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["pipelineId"] == pipeline.id
+    assert body["teamId"] == team.id
+    assert any(isinstance(obj, Issue) and obj.team_id == team.id for obj in fake_db.added)
 
 
 async def test_list_issues(client, fake_db, auth_headers):

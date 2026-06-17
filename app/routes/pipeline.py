@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from app.db import get_db, AsyncSessionLocal
 from app.auth import get_uid
 from app.config import PIPELINE_VERSION
-from app.models import Pipeline, Cluster, ClusterItem
+from app.models import Pipeline, Cluster, ClusterItem, Issue, Team, TeamMember
 from app.limits import get_plan, limit_for, LimitReached
 from app.routes.clusters import (
     serialize_evidence_item,
@@ -38,7 +38,7 @@ router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 PATCHABLE_FIELDS = {
     "stage", "kill_criteria", "distribution_channels", "concept_angles",
     "exit_checklist", "notes", "url", "category", "revenue_model", "status", "name",
-    "outcome", "mrr",
+    "outcome", "mrr", "team_id",
 }
 
 # Canonical pipeline stages, in progression order. "watching" is the backlog;
@@ -79,10 +79,18 @@ def _format_cluster_metrics(raw: dict | None) -> dict | None:
     }
 
 
-def _serialize(p: Pipeline, posts: list[dict] | None = None) -> dict:
+def _serialize(
+    p: Pipeline,
+    posts: list[dict] | None = None,
+    team: dict | None = None,
+    open_issue_count: int = 0,
+    open_kill_criteria_count: int = 0,
+) -> dict:
     return {
         "id": p.id,
         "userId": p.user_id,
+        "teamId": p.team_id,
+        "team": team,
         "name": p.name,
         "postIds": p.post_ids or [],
         "sourceClusterId": p.source_cluster_id,
@@ -104,6 +112,8 @@ def _serialize(p: Pipeline, posts: list[dict] | None = None) -> dict:
         "removedAt": p.removed_at.isoformat() if p.removed_at else None,
         "createdAt": p.created_at.isoformat() if p.created_at else None,
         "updatedAt": p.updated_at.isoformat() if p.updated_at else None,
+        "openIssueCount": open_issue_count,
+        "openKillCriteriaCount": open_kill_criteria_count,
         "posts": posts or [],
     }
 
@@ -204,6 +214,22 @@ async def _get_active_pipeline_card(pipeline_id: str, db: AsyncSession, uid: str
     if not card:
         raise HTTPException(status_code=404, detail="Active pipeline card not found")
     return card
+
+
+async def _team_visible(team_id: str, db: AsyncSession, uid: str) -> Team | None:
+    team = (await db.execute(select(Team).where(Team.id == team_id))).scalar_one_or_none()
+    if not team:
+        return None
+    if team.owner_user_id == uid:
+        return team
+    member = (await db.execute(
+        select(TeamMember).where(
+            TeamMember.team_id == team_id,
+            TeamMember.user_id == uid,
+            TeamMember.status != "removed",
+        )
+    )).scalar_one_or_none()
+    return team if member else None
 
 
 async def _items_for_card(card: Pipeline, db: AsyncSession) -> tuple[Cluster | None, list[ClusterItem]]:
@@ -387,10 +413,64 @@ async def _fetch_posts_for_cards(cards: list[Pipeline], db: AsyncSession) -> dic
     }
 
 
+async def _fetch_teams_for_cards(cards: list[Pipeline], db: AsyncSession) -> dict[str, dict]:
+    team_ids = list({str(c.team_id) for c in cards if c.team_id})
+    if not team_ids:
+        return {}
+    teams = list((await db.execute(select(Team).where(Team.id.in_(team_ids)))).scalars().all())
+    return {
+        str(team.id): {
+            "id": team.id,
+            "name": team.name,
+            "description": team.description,
+        }
+        for team in teams
+    }
+
+
+async def _fetch_issue_counts_for_cards(cards: list[Pipeline], db: AsyncSession) -> dict[str, dict[str, int]]:
+    pipeline_ids = [str(c.id) for c in cards]
+    if not pipeline_ids:
+        return {}
+    rows = (await db.execute(
+        select(Issue.pipeline_id, Issue.issue_type, func.count())
+        .where(
+            Issue.pipeline_id.in_(pipeline_ids),
+            Issue.status == "open",
+            Issue.parent_issue_id == None,
+        )
+        .group_by(Issue.pipeline_id, Issue.issue_type)
+    )).all()
+    counts = {pid: {"issue": 0, "kill_criteria": 0} for pid in pipeline_ids}
+    for pipeline_id, issue_type, count in rows:
+        if str(pipeline_id) in counts and issue_type in counts[str(pipeline_id)]:
+            counts[str(pipeline_id)][issue_type] = int(count)
+    return counts
+
+
+def _serialize_cards(
+    cards: list[Pipeline],
+    posts_map: dict[str, list[dict]],
+    teams_map: dict[str, dict],
+    counts_map: dict[str, dict[str, int]],
+) -> list[dict]:
+    return [
+        _serialize(
+            c,
+            posts=posts_map.get(str(c.id), []),
+            team=teams_map.get(str(c.team_id)) if c.team_id else None,
+            open_issue_count=counts_map.get(str(c.id), {}).get("issue", 0),
+            open_kill_criteria_count=counts_map.get(str(c.id), {}).get("kill_criteria", 0),
+        )
+        for c in cards
+    ]
+
+
 class CreatePipelineBody(BaseModel):
     name: str
     post_ids: list[str]
     source_cluster_id: Optional[str] = None
+    team_id: Optional[str] = None
 
 
 class PatchPipelineBody(BaseModel):
@@ -408,6 +488,7 @@ class PatchPipelineBody(BaseModel):
     outcome: Optional[str] = None
     mrr: Optional[float] = None
     post_ids: Optional[list[str]] = None
+    team_id: Optional[str] = None
 
 
 class LaunchBody(BaseModel):
@@ -432,7 +513,9 @@ async def get_pipeline(
     )
     cards = result.scalars().all()
     posts_map = await _fetch_posts_for_cards(list(cards), db)
-    return {"data": [_serialize(c, posts=posts_map.get(str(c.id), [])) for c in cards]}
+    teams_map = await _fetch_teams_for_cards(list(cards), db)
+    counts_map = await _fetch_issue_counts_for_cards(list(cards), db)
+    return {"data": _serialize_cards(list(cards), posts_map, teams_map, counts_map)}
 
 
 async def _find_watch_card(uid: str, cluster_id: str, db: AsyncSession) -> Pipeline | None:
@@ -769,6 +852,8 @@ async def create_pipeline(
 ):
     if not body.post_ids:
         raise HTTPException(status_code=400, detail="post_ids must not be empty")
+    if body.team_id and not await _team_visible(body.team_id, db, uid):
+        raise HTTPException(status_code=404, detail="Team not found")
 
     existing_result = await db.execute(
         select(Pipeline).where(
@@ -794,6 +879,7 @@ async def create_pipeline(
 
     card = Pipeline(
         user_id=uid,
+        team_id=body.team_id,
         name=body.name,
         post_ids=body.post_ids,
         source_cluster_id=body.source_cluster_id,
@@ -805,7 +891,9 @@ async def create_pipeline(
     background_tasks.add_task(_compute_and_write_metrics, str(card.id), list(body.post_ids))
 
     posts_map = await _fetch_posts_for_cards([card], db)
-    return {"data": _serialize(card, posts=posts_map.get(str(card.id), []))}
+    teams_map = await _fetch_teams_for_cards([card], db)
+    counts_map = await _fetch_issue_counts_for_cards([card], db)
+    return {"data": _serialize_cards([card], posts_map, teams_map, counts_map)[0]}
 
 
 @router.patch("/{pipeline_id}")
@@ -824,12 +912,16 @@ async def patch_pipeline(
         raise HTTPException(status_code=404, detail="Pipeline card not found")
 
     updates = body.model_dump(exclude_none=True)
+    if "team_id" in body.model_fields_set:
+        updates["team_id"] = body.team_id
 
     if "stage" in updates and updates["stage"] not in VALID_STAGES:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid stage '{updates['stage']}'. Must be one of: {', '.join(PIPELINE_STAGES)}",
         )
+    if "team_id" in updates and updates["team_id"] and not await _team_visible(updates["team_id"], db, uid):
+        raise HTTPException(status_code=404, detail="Team not found")
 
     post_ids_changed = "post_ids" in updates
 
@@ -846,7 +938,9 @@ async def patch_pipeline(
         background_tasks.add_task(_compute_and_write_metrics, str(card.id), list(card.post_ids or []))
 
     posts_map = await _fetch_posts_for_cards([card], db)
-    return {"data": _serialize(card, posts=posts_map.get(str(card.id), []))}
+    teams_map = await _fetch_teams_for_cards([card], db)
+    counts_map = await _fetch_issue_counts_for_cards([card], db)
+    return {"data": _serialize_cards([card], posts_map, teams_map, counts_map)[0]}
 
 
 @router.post("/{pipeline_id}/launch")
