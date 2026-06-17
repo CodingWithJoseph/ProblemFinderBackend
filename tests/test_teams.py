@@ -37,16 +37,16 @@ async def test_add_member(client, fake_db, auth_headers):
 
     resp = await client.post(
         f"/teams/{team.id}/members",
-        json={"email": "new@example.com", "display_name": "New Person", "role": "member"},
+        json={"email": "new.person@example.com", "role": "member"},
         headers=auth_headers,
     )
 
     assert resp.status_code == 200
     member = resp.json()["data"]
-    assert member["email"] == "new@example.com"
+    assert member["email"] == "new.person@example.com"
     assert member["displayName"] == "New Person"
     assert member["status"] == "invited"
-    assert any(isinstance(obj, TeamMember) and obj.email == "new@example.com" for obj in fake_db.added)
+    assert any(isinstance(obj, TeamMember) and obj.email == "new.person@example.com" for obj in fake_db.added)
 
 
 async def test_update_member_role(client, fake_db, auth_headers):

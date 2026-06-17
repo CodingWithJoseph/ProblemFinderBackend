@@ -30,7 +30,6 @@ class PatchTeamBody(BaseModel):
 class AddMemberBody(BaseModel):
     user_id: str | None = None
     email: str | None = None
-    display_name: str | None = None
     role: Literal["admin", "member"] = "member"
     status: MemberStatus | None = None
 
@@ -56,6 +55,14 @@ def _clean_text(value: str | None) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+def _display_name_from_email(email: str | None) -> str | None:
+    if not email:
+        return None
+    local = email.split("@", 1)[0].replace(".", " ").replace("_", " ").replace("-", " ")
+    name = " ".join(part.capitalize() for part in local.split() if part)
+    return name or None
 
 
 def _serialize_member(member: TeamMember) -> dict:
@@ -273,7 +280,7 @@ async def add_member(
         team_id=team.id,
         user_id=user_id,
         email=email,
-        display_name=_clean_text(body.display_name),
+        display_name=_display_name_from_email(email),
         role=body.role,
         status=body.status or ("active" if user_id else "invited"),
         created_at=now,
