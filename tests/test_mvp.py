@@ -285,6 +285,25 @@ async def test_pipeline_signal_evidence(client, fake_db, auth_headers):
     assert body["data"][0]["problemStatement"]
 
 
+async def test_pipeline_posts_alias(client, fake_db, auth_headers):
+    card = make_pipeline(source_cluster_id="42")
+    item = make_cluster_item()
+    fake_db.stub(
+        scalar=[1],
+        execute=[
+            FakeResult(rows=[card]),                # active card
+            FakeResult(rows=[item]),                # posts page
+            FakeResult(rows=[("r/freelance",)]),    # communities
+        ],
+    )
+    resp = await client.get(f"/pipeline/{card.id}/posts", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["communities"] == ["r/freelance"]
+    assert body["data"][0]["title"] == item.title
+
+
 async def test_pipeline_signal_brief(client, fake_db, auth_headers):
     card = make_pipeline(source_cluster_id="42")
     item = make_cluster_item()

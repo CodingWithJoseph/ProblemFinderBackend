@@ -1,5 +1,5 @@
 """User pipeline cards (portfolio workspace) + their cluster-anchored Signal,
-Evidence and brief views.
+source post reader and brief views.
 
 The pipeline *card* CRUD is owned by the API (the ``pipeline`` table). Every
 read of underlying market data goes through the flat ``cluster_items`` table:
@@ -571,18 +571,17 @@ def _evidence_scope(card: Pipeline, cluster_id: int | None):
     return ClusterItem.id.in_(card.post_ids or [])
 
 
-@router.get("/{pipeline_id}/signal/evidence")
-async def get_pipeline_signal_evidence(
+async def _list_pipeline_posts(
     pipeline_id: str,
-    q: str | None = Query(None),
-    community: str | None = Query(None),
-    sort: Literal["engagement", "newest", "comments", "similarity"] = Query("engagement"),
-    page: int = Query(1, ge=1),
-    pageSize: int = Query(50, ge=1, le=200),
-    db: AsyncSession = Depends(get_db),
-    uid: str = Depends(get_uid),
+    q: str | None,
+    community: str | None,
+    sort: Literal["engagement", "newest", "comments", "similarity"],
+    page: int,
+    pageSize: int,
+    db: AsyncSession,
+    uid: str,
 ):
-    """Paginated, searchable evidence for a pipeline Signal workspace."""
+    """Paginated, searchable source posts for a pipeline workspace."""
     card = await _get_active_pipeline_card(pipeline_id, db, uid)
     cluster_id = _cluster_id_from_card(card)
     offset = (page - 1) * pageSize
@@ -627,14 +626,13 @@ async def get_pipeline_signal_evidence(
     }
 
 
-@router.get("/{pipeline_id}/signal/evidence/{post_id}")
-async def get_pipeline_signal_evidence_detail(
+async def _get_pipeline_post(
     pipeline_id: str,
     post_id: str,
-    db: AsyncSession = Depends(get_db),
-    uid: str = Depends(get_uid),
+    db: AsyncSession,
+    uid: str,
 ):
-    """Full evidence post after verifying it belongs to the pipeline workspace."""
+    """Full source post after verifying it belongs to the pipeline workspace."""
     card = await _get_active_pipeline_card(pipeline_id, db, uid)
     cluster_id = _cluster_id_from_card(card)
 
@@ -656,8 +654,58 @@ async def get_pipeline_signal_evidence_detail(
         )).scalar_one_or_none()
 
     if not item:
-        raise HTTPException(status_code=404, detail="Evidence post not found")
+        raise HTTPException(status_code=404, detail="Source post not found")
     return serialize_evidence_item(item)
+
+
+@router.get("/{pipeline_id}/posts")
+async def get_pipeline_posts(
+    pipeline_id: str,
+    q: str | None = Query(None),
+    community: str | None = Query(None),
+    sort: Literal["engagement", "newest", "comments", "similarity"] = Query("engagement"),
+    page: int = Query(1, ge=1),
+    pageSize: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    return await _list_pipeline_posts(pipeline_id, q, community, sort, page, pageSize, db, uid)
+
+
+@router.get("/{pipeline_id}/posts/{post_id}")
+async def get_pipeline_post_detail(
+    pipeline_id: str,
+    post_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    return await _get_pipeline_post(pipeline_id, post_id, db, uid)
+
+
+@router.get("/{pipeline_id}/signal/evidence")
+async def get_pipeline_signal_evidence(
+    pipeline_id: str,
+    q: str | None = Query(None),
+    community: str | None = Query(None),
+    sort: Literal["engagement", "newest", "comments", "similarity"] = Query("engagement"),
+    page: int = Query(1, ge=1),
+    pageSize: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Compatibility alias for the old Signal Evidence tab."""
+    return await _list_pipeline_posts(pipeline_id, q, community, sort, page, pageSize, db, uid)
+
+
+@router.get("/{pipeline_id}/signal/evidence/{post_id}")
+async def get_pipeline_signal_evidence_detail(
+    pipeline_id: str,
+    post_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Compatibility alias for the old Signal Evidence detail endpoint."""
+    return await _get_pipeline_post(pipeline_id, post_id, db, uid)
 
 
 @router.get("/{pipeline_id}/signal/brief")
