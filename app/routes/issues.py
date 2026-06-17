@@ -66,23 +66,61 @@ def _clean(value: str | None) -> str | None:
     return value or None
 
 
-def _serialize_comment(comment: IssueComment) -> dict:
+def _serialize_pipeline(pipeline: Pipeline | None) -> dict | None:
+    if not pipeline:
+        return None
+    return {
+        "id": pipeline.id,
+        "name": pipeline.name,
+        "stage": pipeline.stage,
+    }
+
+
+def _serialize_team(team: Team | None) -> dict | None:
+    if not team:
+        return None
+    return {
+        "id": team.id,
+        "name": team.name,
+        "description": team.description,
+    }
+
+
+def _serialize_parent_issue(issue: Issue | None) -> dict | None:
+    if not issue:
+        return None
+    return {
+        "id": issue.id,
+        "title": issue.title,
+    }
+
+
+def _serialize_comment(comment: IssueComment, uid: str) -> dict:
     return {
         "id": comment.id,
         "issueId": comment.issue_id,
         "userId": comment.user_id,
+        "authorDisplayName": "You" if comment.user_id == uid else "Team member",
         "body": comment.body,
         "createdAt": _iso(comment.created_at),
         "updatedAt": _iso(comment.updated_at),
     }
 
 
-def _serialize_issue(issue: Issue, comment_count: int = 0, sub_issue_count: int = 0) -> dict:
+def _serialize_issue(
+    issue: Issue,
+    comment_count: int = 0,
+    sub_issue_count: int = 0,
+    pipeline: Pipeline | None = None,
+    team: Team | None = None,
+) -> dict:
     return {
         "id": issue.id,
         "userId": issue.user_id,
         "teamId": issue.team_id,
         "pipelineId": issue.pipeline_id,
+        "project": _serialize_pipeline(pipeline),
+        "team": _serialize_team(team),
         "parentIssueId": issue.parent_issue_id,
         "title": issue.title,
         "summary": issue.summary,
@@ -104,6 +142,17 @@ async def _pipeline_owned(pipeline_id: str, db: AsyncSession, uid: str) -> Pipel
     )).scalar_one_or_none()
 
 
+async def _pipeline_visible(pipeline_id: str, db: AsyncSession, uid: str) -> Pipeline | None:
+    pipeline = (await db.execute(select(Pipeline).where(Pipeline.id == pipeline_id))).scalar_one_or_none()
+    if not pipeline:
+        return None
+    if pipeline.user_id == uid:
+        return pipeline
+    if pipeline.team_id and await _team_visible(pipeline.team_id, db, uid):
+        return pipeline
+    return None
+
+
 async def _team_visible(team_id: str, db: AsyncSession, uid: str) -> bool:
     team = (await db.execute(select(Team).where(Team.id == team_id))).scalar_one_or_none()
     if not team:
@@ -123,9 +172,7 @@ async def _team_visible(team_id: str, db: AsyncSession, uid: str) -> bool:
 async def _issue_visible(issue: Issue, db: AsyncSession, uid: str) -> bool:
     if issue.user_id == uid:
         return True
-    if issue.pipeline_id and await _pipeline_owned(issue.pipeline_id, db, uid):
-        return True
-    if issue.team_id and await _team_visible(issue.team_id, db, uid):
+    if issue.pipeline_id and await _pipeline_visible(issue.pipeline_id, db, uid):
         return True
     return False
 
@@ -140,7 +187,7 @@ async def _require_issue(issue_id: str, db: AsyncSession, uid: str) -> Issue:
 async def _require_pipeline(pipeline_id: str | None, db: AsyncSession, uid: str) -> Pipeline | None:
     if not pipeline_id:
         return None
-    pipeline = await _pipeline_owned(pipeline_id, db, uid)
+    pipeline = await _pipeline_visible(pipeline_id, db, uid)
     if not pipeline:
         raise HTTPException(status_code=404, detail="Pipeline card not found")
     return pipeline
@@ -154,15 +201,34 @@ async def _require_team(team_id: str | None, db: AsyncSession, uid: str) -> None
 
 
 def _visible_conditions(uid: str):
-    pipeline_ids = select(Pipeline.id).where(Pipeline.user_id == uid)
     team_ids = select(TeamMember.team_id).where(TeamMember.user_id == uid, TeamMember.status != "removed")
     owned_team_ids = select(Team.id).where(Team.owner_user_id == uid)
+    pipeline_ids = select(Pipeline.id).where(
+        or_(
+            Pipeline.user_id == uid,
+            Pipeline.team_id.in_(team_ids),
+            Pipeline.team_id.in_(owned_team_ids),
+        )
+    )
     return or_(
         Issue.user_id == uid,
         Issue.pipeline_id.in_(pipeline_ids),
-        Issue.team_id.in_(team_ids),
-        Issue.team_id.in_(owned_team_ids),
     )
+
+
+async def _issue_contexts(issues: list[Issue], db: AsyncSession) -> tuple[dict[str, Pipeline], dict[str, Team]]:
+    pipeline_ids = sorted({issue.pipeline_id for issue in issues if issue.pipeline_id})
+    team_ids = sorted({issue.team_id for issue in issues if issue.team_id})
+
+    pipelines: dict[str, Pipeline] = {}
+    teams: dict[str, Team] = {}
+    if pipeline_ids:
+        rows = (await db.execute(select(Pipeline).where(Pipeline.id.in_(pipeline_ids)))).scalars().all()
+        pipelines = {pipeline.id: pipeline for pipeline in rows}
+    if team_ids:
+        rows = (await db.execute(select(Team).where(Team.id.in_(team_ids)))).scalars().all()
+        teams = {team.id: team for team in rows}
+    return pipelines, teams
 
 
 async def _counts(issue_ids: list[str], db: AsyncSession) -> tuple[dict[str, int], dict[str, int]]:
@@ -185,7 +251,7 @@ async def _counts(issue_ids: list[str], db: AsyncSession) -> tuple[dict[str, int
 
 
 async def _ensure_default_issues_for_pipeline(pipeline_id: str, db: AsyncSession, uid: str) -> None:
-    pipeline = await _pipeline_owned(pipeline_id, db, uid)
+    pipeline = await _require_pipeline(pipeline_id, db, uid)
     if not pipeline:
         raise HTTPException(status_code=404, detail="Pipeline card not found")
 
@@ -207,7 +273,7 @@ async def _ensure_default_issues_for_pipeline(pipeline_id: str, db: AsyncSession
     for position, (key, title, summary) in enumerate(missing, start=len(existing)):
         db.add(Issue(
             id=str(uuid.uuid4()),
-            user_id=uid,
+            user_id=pipeline.user_id,
             team_id=pipeline.team_id,
             pipeline_id=pipeline_id,
             title=title,
@@ -233,9 +299,13 @@ async def _create_issue(body: CreateIssueBody, db: AsyncSession, uid: str, paren
         parent = await _require_issue(effective_parent_id, db, uid)
 
     pipeline_id = body.pipeline_id or (parent.pipeline_id if parent else None)
+    if not pipeline_id:
+        raise HTTPException(status_code=400, detail="Issue project is required")
     team_id = body.team_id or (parent.team_id if parent else None)
     pipeline = await _require_pipeline(pipeline_id, db, uid)
-    if team_id is None and pipeline is not None:
+    if pipeline is not None:
+        if team_id and team_id != pipeline.team_id:
+            raise HTTPException(status_code=400, detail="Issue team must match project team")
         team_id = pipeline.team_id
     await _require_team(team_id, db, uid)
 
@@ -295,9 +365,16 @@ async def list_issues(
         .order_by(Issue.position.asc(), Issue.created_at.desc())
     )).scalars().all())
     comment_counts, sub_counts = await _counts([issue.id for issue in issues], db)
+    pipelines, teams = await _issue_contexts(issues, db)
     return {
         "data": [
-            _serialize_issue(issue, comment_counts.get(issue.id, 0), sub_counts.get(issue.id, 0))
+            _serialize_issue(
+                issue,
+                comment_counts.get(issue.id, 0),
+                sub_counts.get(issue.id, 0),
+                pipelines.get(issue.pipeline_id or ""),
+                teams.get(issue.team_id or ""),
+            )
             for issue in issues
         ]
     }
@@ -310,7 +387,8 @@ async def create_issue(
     uid: str = Depends(get_uid),
 ):
     issue = await _create_issue(body, db, uid)
-    return {"data": _serialize_issue(issue)}
+    pipelines, teams = await _issue_contexts([issue], db)
+    return {"data": _serialize_issue(issue, pipeline=pipelines.get(issue.pipeline_id or ""), team=teams.get(issue.team_id or ""))}
 
 
 @router.get("/{issue_id}")
@@ -320,6 +398,9 @@ async def get_issue(
     uid: str = Depends(get_uid),
 ):
     issue = await _require_issue(issue_id, db, uid)
+    parent_issue = None
+    if issue.parent_issue_id:
+        parent_issue = (await db.execute(select(Issue).where(Issue.id == issue.parent_issue_id))).scalar_one_or_none()
     comments = list((await db.execute(
         select(IssueComment).where(IssueComment.issue_id == issue.id).order_by(IssueComment.created_at.asc())
     )).scalars().all())
@@ -329,11 +410,26 @@ async def get_issue(
         .order_by(Issue.position.asc(), Issue.created_at.asc())
     )).scalars().all())
     comment_counts, sub_counts = await _counts([issue.id], db)
+    pipelines, teams = await _issue_contexts([issue, *sub_issues], db)
     return {
         "data": {
-            **_serialize_issue(issue, comment_counts.get(issue.id, 0), sub_counts.get(issue.id, 0)),
-            "comments": [_serialize_comment(comment) for comment in comments],
-            "subIssues": [_serialize_issue(child) for child in sub_issues],
+            **_serialize_issue(
+                issue,
+                comment_counts.get(issue.id, 0),
+                sub_counts.get(issue.id, 0),
+                pipelines.get(issue.pipeline_id or ""),
+                teams.get(issue.team_id or ""),
+            ),
+            "parentIssue": _serialize_parent_issue(parent_issue),
+            "comments": [_serialize_comment(comment, uid) for comment in comments],
+            "subIssues": [
+                _serialize_issue(
+                    child,
+                    pipeline=pipelines.get(child.pipeline_id or ""),
+                    team=teams.get(child.team_id or ""),
+                )
+                for child in sub_issues
+            ],
         }
     }
 
@@ -364,7 +460,8 @@ async def patch_issue(
     issue.updated_at = _now()
     await db.commit()
     await db.refresh(issue)
-    return {"data": _serialize_issue(issue)}
+    pipelines, teams = await _issue_contexts([issue], db)
+    return {"data": _serialize_issue(issue, pipeline=pipelines.get(issue.pipeline_id or ""), team=teams.get(issue.team_id or ""))}
 
 
 @router.delete("/{issue_id}")
@@ -392,7 +489,7 @@ async def list_comments(
     comments = list((await db.execute(
         select(IssueComment).where(IssueComment.issue_id == issue.id).order_by(IssueComment.created_at.asc())
     )).scalars().all())
-    return {"data": [_serialize_comment(comment) for comment in comments]}
+    return {"data": [_serialize_comment(comment, uid) for comment in comments]}
 
 
 @router.post("/{issue_id}/comments")
@@ -419,7 +516,7 @@ async def create_comment(
     issue.updated_at = now
     await db.commit()
     await db.refresh(comment)
-    return {"data": _serialize_comment(comment)}
+    return {"data": _serialize_comment(comment, uid)}
 
 
 async def _require_comment(issue: Issue, comment_id: str, db: AsyncSession, uid: str) -> IssueComment:
@@ -450,7 +547,7 @@ async def patch_comment(
     comment.updated_at = _now()
     await db.commit()
     await db.refresh(comment)
-    return {"data": _serialize_comment(comment)}
+    return {"data": _serialize_comment(comment, uid)}
 
 
 @router.delete("/{issue_id}/comments/{comment_id}")
@@ -475,4 +572,5 @@ async def create_sub_issue(
     uid: str = Depends(get_uid),
 ):
     child = await _create_issue(body, db, uid, parent_issue_id=issue_id)
-    return {"data": _serialize_issue(child)}
+    pipelines, teams = await _issue_contexts([child], db)
+    return {"data": _serialize_issue(child, pipeline=pipelines.get(child.pipeline_id or ""), team=teams.get(child.team_id or ""))}
