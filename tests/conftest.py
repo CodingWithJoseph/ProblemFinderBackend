@@ -61,10 +61,13 @@ from app.models import (  # noqa: E402
     TeamMember,
     Issue,
     IssueComment,
+    PortfolioUsageSource,
+    PortfolioUsageEvent,
 )
 from app.routes.clusters import router as clusters_router  # noqa: E402
 from app.routes.problems import router as problems_router  # noqa: E402
 from app.routes.pipeline import router as pipeline_router  # noqa: E402
+from app.routes.portfolio import public_router as portfolio_public_router  # noqa: E402
 from app.routes.portfolio import router as portfolio_router  # noqa: E402
 from app.routes.tasks import router as tasks_router  # noqa: E402
 from app.routes.teams import router as teams_router  # noqa: E402
@@ -398,6 +401,41 @@ def make_issue_comment(**kw):
     return IssueComment(**defaults)
 
 
+def make_usage_source(**kw):
+    defaults = dict(
+        id=str(uuid.uuid4()),
+        pipeline_id=str(uuid.uuid4()),
+        user_id=TEST_UID,
+        public_key="usage_public_key",
+        name="Website usage snippet",
+        status="connected",
+        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        last_seen_at=None,
+    )
+    defaults.update(kw)
+    return PortfolioUsageSource(**defaults)
+
+
+def make_usage_event(**kw):
+    defaults = dict(
+        id=str(uuid.uuid4()),
+        pipeline_id=str(uuid.uuid4()),
+        source_id=None,
+        event_type="pageview",
+        visitor_id="visitor-1",
+        session_id="session-1",
+        user_ref=None,
+        url="https://example.com/",
+        referrer=None,
+        event_metadata={},
+        occurred_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        received_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+    )
+    defaults.update(kw)
+    return PortfolioUsageEvent(**defaults)
+
+
 def make_problem(**kw):
     defaults = dict(
         id=str(uuid.uuid4()),
@@ -435,6 +473,7 @@ def app(fake_db):
     application.include_router(problems_router)
     application.include_router(pipeline_router)
     application.include_router(portfolio_router)
+    application.include_router(portfolio_public_router)
     application.include_router(tasks_router)
     application.include_router(teams_router)
     application.include_router(issues_router)
