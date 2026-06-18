@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from urllib.parse import parse_qs, urlparse
 
 from conftest import (
     FakeResult,
@@ -7,6 +8,7 @@ from conftest import (
     make_usage_event,
     make_usage_source,
 )
+from app.routes import portfolio as portfolio_routes
 from app.models import PortfolioRevenueSource, PortfolioUsageEvent, PortfolioUsageSource
 
 
@@ -116,6 +118,62 @@ async def test_create_revenue_source_for_launched_product(client, fake_db, auth_
     assert body["provider"] == "stripe"
     assert body["status"] == "not_connected"
     assert any(isinstance(obj, PortfolioRevenueSource) and obj.pipeline_id == product.id for obj in fake_db.added)
+
+
+async def test_create_revenue_connect_url_stores_oauth_state(client, fake_db, auth_headers, monkeypatch):
+    monkeypatch.setattr(portfolio_routes.settings, "stripe_connect_client_id", "ca_test_123")
+    monkeypatch.setattr(portfolio_routes.settings, "app_url", "https://console.example")
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    source = make_revenue_source(pipeline_id=product.id)
+    fake_db.stub(execute=[
+        FakeResult(rows=[product]),  # launched product lookup
+        FakeResult(rows=[source]),   # existing revenue source
+    ])
+
+    resp = await client.post(
+        f"/portfolio/{product.id}/revenue-source/connect",
+        headers=auth_headers,
+        json={"provider": "stripe"},
+    )
+
+    assert resp.status_code == 200
+    url = resp.json()["data"]["url"]
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query)
+    assert parsed.netloc == "connect.stripe.com"
+    assert params["client_id"] == ["ca_test_123"]
+    assert params["redirect_uri"] == ["https://console.example/api/portfolio/stripe/callback"]
+    assert params["state"] == [source.oauth_state]
+    assert source.oauth_state
+    assert source.oauth_state_expires_at is not None
+    assert fake_db.commit_count == 1
+
+
+async def test_complete_revenue_connect_marks_source_connected(client, fake_db, monkeypatch):
+    monkeypatch.setattr(portfolio_routes.settings, "app_url", "https://console.example")
+    monkeypatch.setattr(
+        portfolio_routes.stripe.OAuth,
+        "token",
+        lambda **kwargs: {"stripe_user_id": "acct_123"},
+    )
+    source = make_revenue_source(
+        pipeline_id="pipe-1",
+        oauth_state="state-123",
+        oauth_state_expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+    )
+    fake_db.stub(execute=[FakeResult(rows=[source])])
+
+    resp = await client.get("/portfolio/revenue-source/stripe/callback?code=code-123&state=state-123")
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["redirectUrl"] == "https://console.example/dashboard/portfolio?pipelineId=pipe-1&stripe=connected"
+    assert source.status == "connected"
+    assert source.provider_account_id == "acct_123"
+    assert source.provider_account_label == "acct_123"
+    assert source.oauth_state is None
+    assert source.oauth_state_expires_at is None
+    assert source.connected_at is not None
 
 
 async def test_get_revenue_metrics_placeholder(client, fake_db, auth_headers):
