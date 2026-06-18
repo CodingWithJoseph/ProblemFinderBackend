@@ -259,8 +259,8 @@ def _derive_signal_status(mode: str, signal: ClusterSignal | None, completeness:
     raw = (signal.status or "").lower()
     if raw == "failed":
         return "failed"
-    if raw == "pending":
-        return "pending"
+    if raw in {"pending", "processing", "stale"}:
+        return raw
     if not (completeness["score"] and completeness["itemCount"]):
         return "partial"
     if raw in {"ready", "generated"}:

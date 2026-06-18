@@ -388,6 +388,23 @@ async def test_pipeline_signal_partial_failed_signal_surfaces_health(client, fak
     assert body["signal"]["completeness"]["score"] is False
 
 
+async def test_pipeline_signal_preserves_processing_and_stale_statuses(client, fake_db, auth_headers):
+    for status in ["processing", "stale"]:
+        card = make_pipeline(id=f"pipe-{status}", source_cluster_id="42")
+        cluster = make_cluster()
+        signal = make_cluster_signal(status=status)
+        item = make_cluster_item()
+        fake_db.stub(execute=[
+            FakeResult(rows=[card]),
+            FakeResult(rows=[cluster]),
+            FakeResult(rows=[item]),
+            FakeResult(rows=[signal]),
+        ])
+        resp = await client.get(f"/pipeline/{card.id}/signal", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json()["signal"]["status"] == status
+
+
 async def test_pipeline_signal_evidence(client, fake_db, auth_headers):
     card = make_pipeline(source_cluster_id="42")
     item = make_cluster_item()
