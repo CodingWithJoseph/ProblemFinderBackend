@@ -24,6 +24,8 @@ async def test_portfolio_product_includes_usage_source(client, fake_db, auth_hea
     body = resp.json()["data"]
     assert body["id"] == product.id
     assert body["usageSource"]["publicKey"] == source.public_key
+    assert "productUrl" in body["usageSource"]
+    assert "allowedDomain" in body["usageSource"]
 
 
 async def test_create_usage_source_for_launched_product(client, fake_db, auth_headers):
@@ -40,6 +42,29 @@ async def test_create_usage_source_for_launched_product(client, fake_db, auth_he
     assert body["pipelineId"] == product.id
     assert body["publicKey"]
     assert any(isinstance(obj, PortfolioUsageSource) and obj.pipeline_id == product.id for obj in fake_db.added)
+
+
+async def test_update_usage_source_setup_metadata(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    source = make_usage_source(pipeline_id=product.id)
+    fake_db.stub(execute=[
+        FakeResult(rows=[product]),  # launched product lookup
+        FakeResult(rows=[source]),   # usage source
+    ])
+
+    resp = await client.patch(
+        f"/portfolio/{product.id}/usage-source",
+        headers=auth_headers,
+        json={"product_url": "https://www.example.com/launch", "allowed_domain": "example.com"},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["productUrl"] == "https://www.example.com/launch"
+    assert body["allowedDomain"] == "example.com"
+    assert source.product_url == "https://www.example.com/launch"
+    assert source.allowed_domain == "example.com"
+    assert fake_db.commit_count == 1
 
 
 async def test_get_usage_metrics(client, fake_db, auth_headers):
@@ -93,3 +118,21 @@ async def test_public_usage_event_ingestion(client, fake_db):
     assert event.event_type == "signup"
     assert event.event_metadata == {"plan": "pro"}
     assert source.last_seen_at is not None
+
+
+async def test_public_usage_event_rejects_unapproved_domain(client, fake_db):
+    source = make_usage_source(allowed_domain="example.com")
+    fake_db.stub(execute=[FakeResult(rows=[source])])
+
+    resp = await client.post(
+        "/public/portfolio/events",
+        json={
+            "product_id": source.pipeline_id,
+            "key": source.public_key,
+            "event_type": "pageview",
+            "visitor_id": "visitor-1",
+            "url": "https://not-example.test/",
+        },
+    )
+
+    assert resp.status_code == 403

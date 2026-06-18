@@ -2,8 +2,9 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Literal
+from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,6 +38,11 @@ class UsageEventBody(BaseModel):
     occurred_at: datetime | None = None
 
 
+class UsageSourceUpdateBody(BaseModel):
+    product_url: str | None = Field(default=None, max_length=2048)
+    allowed_domain: str | None = Field(default=None, max_length=255)
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -54,6 +60,8 @@ def _serialize_usage_source(source: PortfolioUsageSource | None) -> dict | None:
         "publicKey": source.public_key,
         "name": source.name,
         "status": source.status,
+        "productUrl": source.product_url,
+        "allowedDomain": source.allowed_domain,
         "createdAt": _iso(source.created_at),
         "updatedAt": _iso(source.updated_at),
         "lastSeenAt": _iso(source.last_seen_at),
@@ -75,6 +83,41 @@ def _serialize_usage_event(event: PortfolioUsageEvent) -> dict:
         "occurredAt": _iso(event.occurred_at),
         "receivedAt": _iso(event.received_at),
     }
+
+
+def _clean_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _domain_from_url(value: str | None) -> str | None:
+    cleaned = _clean_text(value)
+    if not cleaned:
+        return None
+    parsed = urlparse(cleaned if "://" in cleaned else f"https://{cleaned}")
+    host = parsed.hostname or cleaned
+    return host.lower().removeprefix("www.")
+
+
+def _host_matches_allowed(host: str | None, allowed_domain: str | None) -> bool:
+    host = _domain_from_url(host)
+    allowed = _domain_from_url(allowed_domain)
+    if not host or not allowed:
+        return False
+    return host == allowed or host.endswith(f".{allowed}")
+
+
+def _usage_event_domain_allowed(source: PortfolioUsageSource, request: Request, body: UsageEventBody) -> bool:
+    if not source.allowed_domain:
+        return True
+    candidates = [
+        request.headers.get("origin"),
+        request.headers.get("referer"),
+        body.url,
+    ]
+    return any(_host_matches_allowed(candidate, source.allowed_domain) for candidate in candidates)
 
 
 async def _require_launched_product(pipeline_id: str, db: AsyncSession, uid: str) -> Pipeline:
@@ -168,10 +211,32 @@ async def create_usage_source(
         user_id=uid,
         public_key=secrets.token_urlsafe(24),
         status="connected",
+        product_url=_clean_text(product.url),
+        allowed_domain=_domain_from_url(product.url),
         created_at=now,
         updated_at=now,
     )
     db.add(source)
+    await db.commit()
+    await db.refresh(source)
+    return {"data": _serialize_usage_source(source)}
+
+
+@router.patch("/{pipeline_id}/usage-source")
+async def update_usage_source(
+    pipeline_id: str,
+    body: UsageSourceUpdateBody,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    product = await _require_launched_product(pipeline_id, db, uid)
+    source = await _usage_source(product.id, db)
+    if not source:
+        raise HTTPException(status_code=404, detail="Usage source not found")
+
+    source.product_url = _clean_text(body.product_url)
+    source.allowed_domain = _domain_from_url(body.allowed_domain or body.product_url)
+    source.updated_at = _now()
     await db.commit()
     await db.refresh(source)
     return {"data": _serialize_usage_source(source)}
@@ -273,6 +338,7 @@ async def get_usage_metrics(
 
 @public_router.post("/events")
 async def ingest_usage_event(
+    request: Request,
     body: UsageEventBody,
     db: AsyncSession = Depends(get_db),
 ):
@@ -285,6 +351,8 @@ async def ingest_usage_event(
     )).scalar_one_or_none()
     if not source:
         raise HTTPException(status_code=404, detail="Usage source not found")
+    if not _usage_event_domain_allowed(source, request, body):
+        raise HTTPException(status_code=403, detail="Usage event origin is not allowed")
 
     now = _now()
     event = PortfolioUsageEvent(

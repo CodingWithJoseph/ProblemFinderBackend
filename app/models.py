@@ -297,6 +297,8 @@ class PortfolioUsageSource(Base):
     public_key: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     name: Mapped[str] = mapped_column(Text, nullable=False, default="Website usage snippet")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="connected")
+    product_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    allowed_domain: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     last_seen_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
