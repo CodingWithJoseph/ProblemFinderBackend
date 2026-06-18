@@ -11,9 +11,11 @@ MVP Problem-breakdown (cluster detail), Evidence (items) and Task-list
 """
 from collections import Counter
 from datetime import datetime, timezone
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, func, or_
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
@@ -23,6 +25,7 @@ from app.models import Cluster, ClusterItem, ClusterSnapshot, ClusterSignal, Pip
 from app.limits import get_plan, ai_clusters_allowed, LimitReached
 
 router = APIRouter(prefix="/clusters", tags=["clusters"])
+logger = logging.getLogger(__name__)
 
 SUFFICIENT_HISTORY_DAYS = 7
 TASKS_SCAN_LIMIT = 500
@@ -79,10 +82,26 @@ def _signal_score_order():
 async def _signals_by_cluster(cluster_ids: list[int], db: AsyncSession) -> dict[int, ClusterSignal]:
     if not cluster_ids:
         return {}
-    rows = (await db.execute(
-        select(ClusterSignal).where(ClusterSignal.cluster_id.in_(cluster_ids))
-    )).scalars().all()
+    try:
+        rows = (await db.execute(
+            select(ClusterSignal).where(ClusterSignal.cluster_id.in_(cluster_ids))
+        )).scalars().all()
+    except SQLAlchemyError as exc:
+        await db.rollback()
+        logger.warning("cluster_signals unavailable; falling back to clusters.signal_score", exc_info=True)
+        return {}
     return {row.cluster_id: row for row in rows}
+
+
+async def _signal_for_cluster(cluster_id: int, db: AsyncSession) -> ClusterSignal | None:
+    try:
+        return (await db.execute(
+            select(ClusterSignal).where(ClusterSignal.cluster_id == cluster_id)
+        )).scalar_one_or_none()
+    except SQLAlchemyError as exc:
+        await db.rollback()
+        logger.warning("cluster_signals unavailable for cluster %s", cluster_id, exc_info=True)
+        return None
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -385,7 +404,6 @@ async def search_clusters(
     stats = _item_stats_subquery()
     base = (
         select(Cluster)
-        .outerjoin(ClusterSignal, ClusterSignal.cluster_id == Cluster.id)
         .join(stats, stats.c.cluster_id == Cluster.id)
         .where(
             Cluster.pipeline_version == PIPELINE_VERSION,
@@ -413,7 +431,6 @@ async def browse_clusters(
     stats = _item_stats_subquery()
     base = (
         select(Cluster)
-        .outerjoin(ClusterSignal, ClusterSignal.cluster_id == Cluster.id)
         .join(stats, stats.c.cluster_id == Cluster.id)
         .where(
             Cluster.pipeline_version == PIPELINE_VERSION,
@@ -457,18 +474,33 @@ async def get_trending_clusters(
         raise LimitReached("clusters", plan, status_code=403)
 
     stats = _item_stats_subquery()
-    result = await db.execute(
-        select(Cluster, stats.c.post_count, ClusterSignal)
-        .join(stats, stats.c.cluster_id == Cluster.id)
-        .outerjoin(ClusterSignal, ClusterSignal.cluster_id == Cluster.id)
-        .where(
-            Cluster.trending == True,
-            Cluster.pipeline_version == PIPELINE_VERSION,
+    try:
+        result = await db.execute(
+            select(Cluster, stats.c.post_count, ClusterSignal)
+            .join(stats, stats.c.cluster_id == Cluster.id)
+            .outerjoin(ClusterSignal, ClusterSignal.cluster_id == Cluster.id)
+            .where(
+                Cluster.trending == True,
+                Cluster.pipeline_version == PIPELINE_VERSION,
+            )
+            .order_by(_signal_score_order().desc().nullslast())
+            .limit(limit)
         )
-        .order_by(_signal_score_order().desc().nullslast())
-        .limit(limit)
-    )
-    rows = result.all()
+        rows = result.all()
+    except SQLAlchemyError:
+        await db.rollback()
+        logger.warning("cluster_signals unavailable for trending clusters; using legacy score order", exc_info=True)
+        result = await db.execute(
+            select(Cluster, stats.c.post_count)
+            .join(stats, stats.c.cluster_id == Cluster.id)
+            .where(
+                Cluster.trending == True,
+                Cluster.pipeline_version == PIPELINE_VERSION,
+            )
+            .order_by(Cluster.signal_score.desc().nullslast())
+            .limit(limit)
+        )
+        rows = [(cluster, post_count, None) for cluster, post_count in result.all()]
     return {
         "data": [
             {
@@ -534,9 +566,7 @@ async def get_cluster(
     total_posts = await count_cluster_items(db, cluster_id)
     top_items = await load_cluster_items(db, cluster_id, limit=TOP_EVIDENCE_COUNT)
     page_items = await load_cluster_items(db, cluster_id, limit=pageSize, offset=(page - 1) * pageSize)
-    signal = (await db.execute(
-        select(ClusterSignal).where(ClusterSignal.cluster_id == cluster_id)
-    )).scalar_one_or_none()
+    signal = await _signal_for_cluster(cluster_id, db)
     all_ids = [row[0] for row in (await db.execute(
         select(ClusterItem.id).where(
             ClusterItem.cluster_id == cluster_id,
@@ -612,9 +642,7 @@ async def get_cluster_snapshots(
         .order_by(ClusterSnapshot.date.asc())
     )
     snapshots = result.scalars().all()
-    signal = (await db.execute(
-        select(ClusterSignal).where(ClusterSignal.cluster_id == cluster_id)
-    )).scalar_one_or_none()
+    signal = await _signal_for_cluster(cluster_id, db)
 
     return {
         "clusterId": cluster_id,

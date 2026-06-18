@@ -16,6 +16,7 @@ from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query, Response
 from sqlalchemy import select, text, func, or_
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
@@ -397,9 +398,14 @@ async def _items_for_card(card: Pipeline, db: AsyncSession) -> tuple[Cluster | N
 async def _cluster_signal(cluster_id: int | None, db: AsyncSession) -> ClusterSignal | None:
     if cluster_id is None:
         return None
-    return (await db.execute(
-        select(ClusterSignal).where(ClusterSignal.cluster_id == cluster_id)
-    )).scalar_one_or_none()
+    try:
+        return (await db.execute(
+            select(ClusterSignal).where(ClusterSignal.cluster_id == cluster_id)
+        )).scalar_one_or_none()
+    except SQLAlchemyError:
+        await db.rollback()
+        logger.warning("cluster_signals unavailable for pipeline signal cluster %s", cluster_id, exc_info=True)
+        return None
 
 
 def _csv_value(value):

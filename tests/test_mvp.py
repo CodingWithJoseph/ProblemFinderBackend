@@ -14,6 +14,7 @@ from conftest import (
     make_subscription,
     PlanEnum,
 )
+from sqlalchemy.exc import SQLAlchemyError
 
 
 # ── Cluster discovery ───────────────────────────────────────────────────────
@@ -79,6 +80,25 @@ async def test_browse_clusters_default_sort(client, fake_db, auth_headers):
     assert resp.status_code == 200
     row = resp.json()["data"][0]
     assert row["signalScore"] == 0.82
+    assert row["trending_status"] is None
+
+
+async def test_browse_clusters_survives_unavailable_cluster_signals(client, fake_db, auth_headers):
+    cluster = make_cluster(signal_score=0.72, trending=False)
+    item = make_cluster_item()
+    fake_db.stub(
+        scalar=[1],
+        execute=[
+            FakeResult(rows=[cluster]),
+            FakeResult(rows=[item]),
+            FakeResult(rows=[]),
+            SQLAlchemyError("cluster_signals missing"),
+        ],
+    )
+    resp = await client.get("/clusters/browse?limit=20&offset=0&sort=newest", headers=auth_headers)
+    assert resp.status_code == 200
+    row = resp.json()["data"][0]
+    assert row["signalScore"] == 0.72
     assert row["trending_status"] is None
 
 
@@ -311,6 +331,24 @@ async def test_pipeline_signal_forming_when_cluster_signal_missing(client, fake_
     assert body["signal"]["status"] == "missing"
     assert body["signal"]["score"] == 0.82
     assert body["signal"]["completeness"]["volume"] is False
+
+
+async def test_pipeline_signal_forms_when_cluster_signals_unavailable(client, fake_db, auth_headers):
+    card = make_pipeline(source_cluster_id="42")
+    cluster = make_cluster(signal_score=0.64)
+    item = make_cluster_item()
+    fake_db.stub(execute=[
+        FakeResult(rows=[card]),
+        FakeResult(rows=[cluster]),
+        FakeResult(rows=[item]),
+        SQLAlchemyError("cluster_signals missing"),
+    ])
+    resp = await client.get(f"/pipeline/{card.id}/signal", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "forming"
+    assert body["cluster"]["signalScore"] == 0.64
+    assert body["signal"]["status"] == "missing"
 
 
 async def test_pipeline_signal_singleton_card(client, fake_db, auth_headers):

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, func
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
@@ -98,13 +99,25 @@ async def dashboard_signals(
 ):
     """Intelligence dashboard: top clusters by signal_score plus a domain
     breakdown computed live from cluster_items.opportunity_domain."""
-    cluster_rows = list((await db.execute(
-        select(Cluster, ClusterSignal)
-        .outerjoin(ClusterSignal, ClusterSignal.cluster_id == Cluster.id)
-        .where(Cluster.pipeline_version == PIPELINE_VERSION)
-        .order_by(func.coalesce(ClusterSignal.signal_score, Cluster.signal_score).desc().nullslast())
-        .limit(limit)
-    )).all())
+    try:
+        cluster_rows = list((await db.execute(
+            select(Cluster, ClusterSignal)
+            .outerjoin(ClusterSignal, ClusterSignal.cluster_id == Cluster.id)
+            .where(Cluster.pipeline_version == PIPELINE_VERSION)
+            .order_by(func.coalesce(ClusterSignal.signal_score, Cluster.signal_score).desc().nullslast())
+            .limit(limit)
+        )).all())
+    except SQLAlchemyError:
+        await db.rollback()
+        cluster_rows = [
+            (cluster, None)
+            for cluster in (await db.execute(
+                select(Cluster)
+                .where(Cluster.pipeline_version == PIPELINE_VERSION)
+                .order_by(Cluster.signal_score.desc().nullslast())
+                .limit(limit)
+            )).scalars().all()
+        ]
     clusters = [cluster for cluster, _signal in cluster_rows]
 
     cluster_ids = [c.id for c in clusters]
