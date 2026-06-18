@@ -77,6 +77,15 @@ class Cluster(Base):
 
 
 class ClusterSignal(Base):
+    """Read model for the founder-facing ``cluster_signals`` payload.
+
+    Mirrors the live Supabase schema column-for-column (verified via
+    ``information_schema``): all 21 columns are mapped, including
+    ``input_fingerprint`` / ``last_error`` and the ``created_at`` / ``updated_at``
+    bookkeeping timestamps (NOT NULL, ``now()`` defaults). ``status`` is a
+    ``cluster_signal_status`` enum in Postgres; mapping it as text is read-safe.
+    """
+
     __tablename__ = "cluster_signals"
 
     cluster_id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -98,6 +107,8 @@ class ClusterSignal(Base):
     avg_comments: Mapped[float | None] = mapped_column(Float, nullable=True)
     avg_votes: Mapped[float | None] = mapped_column(Float, nullable=True)
     top_problem_statements: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
 
 
 class ClusterItem(Base):
