@@ -409,6 +409,8 @@ def make_usage_source(**kw):
         public_key="usage_public_key",
         name="Website usage snippet",
         status="connected",
+        product_url=None,
+        allowed_domain=None,
         created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
         updated_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
         last_seen_at=None,
