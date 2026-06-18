@@ -313,7 +313,7 @@ async def test_pipeline_signal_returns_real_cluster_signal(client, fake_db, auth
         {"week": "2026-W20", "count": 4},
         {"week": "2026-W21", "count": 7},
     ]
-    assert body["status"] == "generated"
+    assert body["status"] == "ready"  # surfaced verbatim from the DB enum
     assert body["generatedAt"] == "2026-05-21T00:00:00+00:00"
     # signal_score 0.91 >= 0.6 and momentum_7d 0.2 > 0 -> active.
     assert body["mode"] == "active"
@@ -345,23 +345,24 @@ async def test_pipeline_signal_mode_forming(client, fake_db, auth_headers):
     assert resp.json()["mode"] == "forming"
 
 
-async def test_pipeline_signal_maps_failed_status_to_error(client, fake_db, auth_headers):
-    card = make_pipeline(source_cluster_id="42")
-    signal = make_cluster_signal(status="failed")
-    fake_db.stub(execute=[FakeResult(rows=[card]), FakeResult(rows=[signal])])
-    resp = await client.get(f"/pipeline/{card.id}/signal", headers=auth_headers)
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "error"
-
-
-async def test_pipeline_signal_preserves_processing_and_stale_statuses(client, fake_db, auth_headers):
-    for status in ["processing", "stale"]:
+async def test_pipeline_signal_surfaces_every_enum_status_verbatim(client, fake_db, auth_headers):
+    # API status set == Supabase cluster_signal_status enum, passed through as-is.
+    for status in ["pending", "processing", "ready", "stale", "failed"]:
         card = make_pipeline(id=f"pipe-{status}", source_cluster_id="42")
         signal = make_cluster_signal(status=status)
         fake_db.stub(execute=[FakeResult(rows=[card]), FakeResult(rows=[signal])])
         resp = await client.get(f"/pipeline/{card.id}/signal", headers=auth_headers)
         assert resp.status_code == 200
         assert resp.json()["status"] == status
+
+
+async def test_pipeline_signal_unknown_status_falls_back_to_failed(client, fake_db, auth_headers):
+    card = make_pipeline(source_cluster_id="42")
+    signal = make_cluster_signal(status="bogus")
+    fake_db.stub(execute=[FakeResult(rows=[card]), FakeResult(rows=[signal])])
+    resp = await client.get(f"/pipeline/{card.id}/signal", headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "failed"
 
 
 async def test_pipeline_signal_404_when_card_missing(client, fake_db, auth_headers):

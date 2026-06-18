@@ -192,20 +192,15 @@ _SIGNAL_COMPLETENESS_FIELDS = (
     "total_posts", "avg_comments", "avg_votes",
 )
 
-# cluster_signal_status (DB enum) -> the four states the API exposes. Transient
-# states collapse to the nearest exposed value; anything unknown is surfaced as
-# "error" rather than silently passed through.
-_SIGNAL_STATUS_MAP = {
-    "generated": "generated",
-    "processing": "processing",
-    "stale": "stale",
-    "pending": "processing",
-    "failed": "error",
-}
+# The Supabase cluster_signal_status enum, surfaced verbatim. The API status set
+# matches the DB enum exactly (no lossy collapse) so a healthy "ready" signal is
+# never misreported. Kept here to validate values and guard a malformed read.
+SIGNAL_STATUSES = frozenset({"pending", "processing", "ready", "stale", "failed"})
 
 
 def _signal_status(raw: str | None) -> str:
-    return _SIGNAL_STATUS_MAP.get((raw or "").strip().lower(), "error")
+    value = (raw or "").strip().lower()
+    return value if value in SIGNAL_STATUSES else "failed"
 
 
 def _signal_mode(signal: ClusterSignal) -> str:
