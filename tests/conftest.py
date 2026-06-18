@@ -63,6 +63,7 @@ from app.models import (  # noqa: E402
     IssueComment,
     PortfolioUsageSource,
     PortfolioUsageEvent,
+    PortfolioRevenueSource,
 )
 from app.routes.clusters import router as clusters_router  # noqa: E402
 from app.routes.problems import router as problems_router  # noqa: E402
@@ -436,6 +437,28 @@ def make_usage_event(**kw):
     )
     defaults.update(kw)
     return PortfolioUsageEvent(**defaults)
+
+
+def make_revenue_source(**kw):
+    defaults = dict(
+        id=str(uuid.uuid4()),
+        pipeline_id=str(uuid.uuid4()),
+        user_id=TEST_UID,
+        provider="stripe",
+        status="not_connected",
+        provider_account_label=None,
+        current_mrr_cents=None,
+        new_customers_30d=None,
+        churned_customers_30d=None,
+        churn_rate_30d=None,
+        revenue_snapshot={},
+        connected_at=None,
+        last_synced_at=None,
+        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+    )
+    defaults.update(kw)
+    return PortfolioRevenueSource(**defaults)
 
 
 def make_problem(**kw):

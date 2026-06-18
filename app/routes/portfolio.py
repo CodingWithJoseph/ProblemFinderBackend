@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.auth import get_uid
-from app.models import Pipeline, PortfolioUsageEvent, PortfolioUsageSource
+from app.models import Pipeline, PortfolioRevenueSource, PortfolioUsageEvent, PortfolioUsageSource
 from app.routes.pipeline import (
     _fetch_issue_counts_for_cards,
     _fetch_posts_for_cards,
@@ -23,6 +23,7 @@ router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 public_router = APIRouter(prefix="/public/portfolio", tags=["public-portfolio"])
 
 UsageEventType = Literal["pageview", "signup", "login", "activation", "custom"]
+RevenueProvider = Literal["stripe"]
 
 
 class UsageEventBody(BaseModel):
@@ -41,6 +42,10 @@ class UsageEventBody(BaseModel):
 class UsageSourceUpdateBody(BaseModel):
     product_url: str | None = Field(default=None, max_length=2048)
     allowed_domain: str | None = Field(default=None, max_length=255)
+
+
+class RevenueSourceBody(BaseModel):
+    provider: RevenueProvider = "stripe"
 
 
 def _now() -> datetime:
@@ -83,6 +88,38 @@ def _serialize_usage_event(event: PortfolioUsageEvent) -> dict:
         "occurredAt": _iso(event.occurred_at),
         "receivedAt": _iso(event.received_at),
     }
+
+
+def _serialize_revenue_source(source: PortfolioRevenueSource | None) -> dict | None:
+    if not source:
+        return None
+    return {
+        "id": source.id,
+        "pipelineId": source.pipeline_id,
+        "provider": source.provider,
+        "status": source.status,
+        "providerAccountLabel": source.provider_account_label,
+        "currentMrrCents": source.current_mrr_cents,
+        "newCustomers30d": source.new_customers_30d,
+        "churnedCustomers30d": source.churned_customers_30d,
+        "churnRate30d": source.churn_rate_30d,
+        "revenueSnapshot": source.revenue_snapshot or {},
+        "connectedAt": _iso(source.connected_at),
+        "lastSyncedAt": _iso(source.last_synced_at),
+        "createdAt": _iso(source.created_at),
+        "updatedAt": _iso(source.updated_at),
+    }
+
+
+async def _revenue_source(pipeline_id: str, db: AsyncSession, provider: str = "stripe") -> PortfolioRevenueSource | None:
+    return (await db.execute(
+        select(PortfolioRevenueSource)
+        .where(
+            PortfolioRevenueSource.pipeline_id == pipeline_id,
+            PortfolioRevenueSource.provider == provider,
+        )
+        .order_by(PortfolioRevenueSource.created_at.asc())
+    )).scalar_one_or_none()
 
 
 def _clean_text(value: str | None) -> str | None:
@@ -189,6 +226,7 @@ async def get_portfolio_product(
         "data": {
             **_serialize_cards([product], posts_map, teams_map, counts_map)[0],
             "usageSource": _serialize_usage_source(await _usage_source(pipeline_id, db)),
+            "revenueSource": _serialize_revenue_source(await _revenue_source(pipeline_id, db)),
         }
     }
 
@@ -240,6 +278,56 @@ async def update_usage_source(
     await db.commit()
     await db.refresh(source)
     return {"data": _serialize_usage_source(source)}
+
+
+@router.post("/{pipeline_id}/revenue-source")
+async def create_revenue_source(
+    pipeline_id: str,
+    body: RevenueSourceBody,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    product = await _require_launched_product(pipeline_id, db, uid)
+    existing = await _revenue_source(product.id, db, body.provider)
+    if existing:
+        return {"data": _serialize_revenue_source(existing)}
+
+    now = _now()
+    source = PortfolioRevenueSource(
+        id=str(uuid.uuid4()),
+        pipeline_id=product.id,
+        user_id=uid,
+        provider=body.provider,
+        status="not_connected",
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(source)
+    await db.commit()
+    await db.refresh(source)
+    return {"data": _serialize_revenue_source(source)}
+
+
+@router.get("/{pipeline_id}/revenue")
+async def get_revenue_metrics(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    await _require_launched_product(pipeline_id, db, uid)
+    source = await _revenue_source(pipeline_id, db)
+    return {
+        "data": {
+            "source": _serialize_revenue_source(source),
+            "connected": bool(source and source.status == "connected"),
+            "summary": {
+                "mrrCents": source.current_mrr_cents if source else None,
+                "newCustomers30d": source.new_customers_30d if source else None,
+                "churnedCustomers30d": source.churned_customers_30d if source else None,
+                "churnRate30d": source.churn_rate_30d if source else None,
+            },
+        }
+    }
 
 
 @router.get("/{pipeline_id}/usage")

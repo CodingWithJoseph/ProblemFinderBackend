@@ -3,10 +3,11 @@ from datetime import datetime, timezone
 from conftest import (
     FakeResult,
     make_pipeline,
+    make_revenue_source,
     make_usage_event,
     make_usage_source,
 )
-from app.models import PortfolioUsageEvent, PortfolioUsageSource
+from app.models import PortfolioRevenueSource, PortfolioUsageEvent, PortfolioUsageSource
 
 
 async def test_portfolio_product_includes_usage_source(client, fake_db, auth_headers):
@@ -16,6 +17,7 @@ async def test_portfolio_product_includes_usage_source(client, fake_db, auth_hea
         FakeResult(rows=[product]),  # launched product lookup
         FakeResult(rows=[]),         # issue counts
         FakeResult(rows=[source]),   # usage source
+        FakeResult(rows=[]),         # revenue source
     ])
 
     resp = await client.get(f"/portfolio/{product.id}", headers=auth_headers)
@@ -26,6 +28,7 @@ async def test_portfolio_product_includes_usage_source(client, fake_db, auth_hea
     assert body["usageSource"]["publicKey"] == source.public_key
     assert "productUrl" in body["usageSource"]
     assert "allowedDomain" in body["usageSource"]
+    assert body["revenueSource"] is None
 
 
 async def test_create_usage_source_for_launched_product(client, fake_db, auth_headers):
@@ -92,6 +95,54 @@ async def test_get_usage_metrics(client, fake_db, auth_headers):
     assert body["summary14d"]["signups"] == 1
     assert body["summary14d"]["visitors"] == 2
     assert body["recentEvents"][0]["eventType"] == "pageview"
+
+
+async def test_create_revenue_source_for_launched_product(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    fake_db.stub(execute=[
+        FakeResult(rows=[product]),  # launched product lookup
+        FakeResult(rows=[]),         # no existing revenue source
+    ])
+
+    resp = await client.post(
+        f"/portfolio/{product.id}/revenue-source",
+        headers=auth_headers,
+        json={"provider": "stripe"},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["pipelineId"] == product.id
+    assert body["provider"] == "stripe"
+    assert body["status"] == "not_connected"
+    assert any(isinstance(obj, PortfolioRevenueSource) and obj.pipeline_id == product.id for obj in fake_db.added)
+
+
+async def test_get_revenue_metrics_placeholder(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    source = make_revenue_source(
+        pipeline_id=product.id,
+        status="connected",
+        current_mrr_cents=12000,
+        new_customers_30d=3,
+        churned_customers_30d=1,
+        churn_rate_30d=0.05,
+    )
+    fake_db.stub(execute=[
+        FakeResult(rows=[product]),  # launched product lookup
+        FakeResult(rows=[source]),   # revenue source
+    ])
+
+    resp = await client.get(f"/portfolio/{product.id}/revenue", headers=auth_headers)
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["connected"] is True
+    assert body["source"]["provider"] == "stripe"
+    assert body["summary"]["mrrCents"] == 12000
+    assert body["summary"]["newCustomers30d"] == 3
+    assert body["summary"]["churnedCustomers30d"] == 1
+    assert body["summary"]["churnRate30d"] == 0.05
 
 
 async def test_public_usage_event_ingestion(client, fake_db):
