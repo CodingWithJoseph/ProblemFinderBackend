@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
 from app.auth import get_uid
 from app.config import PIPELINE_VERSION
-from app.models import Pipeline, Problem, Task, Cluster, ClusterItem
+from app.models import Pipeline, Problem, Task, Cluster, ClusterItem, ClusterSignal
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -98,12 +98,14 @@ async def dashboard_signals(
 ):
     """Intelligence dashboard: top clusters by signal_score plus a domain
     breakdown computed live from cluster_items.opportunity_domain."""
-    clusters = list((await db.execute(
-        select(Cluster)
+    cluster_rows = list((await db.execute(
+        select(Cluster, ClusterSignal)
+        .outerjoin(ClusterSignal, ClusterSignal.cluster_id == Cluster.id)
         .where(Cluster.pipeline_version == PIPELINE_VERSION)
-        .order_by(Cluster.signal_score.desc().nullslast())
+        .order_by(func.coalesce(ClusterSignal.signal_score, Cluster.signal_score).desc().nullslast())
         .limit(limit)
-    )).scalars().all())
+    )).all())
+    clusters = [cluster for cluster, _signal in cluster_rows]
 
     cluster_ids = [c.id for c in clusters]
     post_counts: dict[int, int] = {}
@@ -140,11 +142,11 @@ async def dashboard_signals(
                 "id": c.id,
                 "name": c.name,
                 "summary": c.summary,
-                "signalScore": c.signal_score,
+                "signalScore": signal.signal_score if signal and signal.signal_score is not None else c.signal_score,
                 "trending": c.trending,
                 "postCount": post_counts.get(c.id, 0),
             }
-            for c in clusters
+            for c, signal in cluster_rows
         ],
         "domainBreakdown": [
             {"domain": domain, "postCount": post_count, "clusterCount": cluster_count}

@@ -44,9 +44,9 @@ class PlanEnum(str, enum.Enum):
 # Pipeline-produced tables (simplified 6-table Supabase schema)
 #
 # The AI pipeline (ProblemFinderAI) writes these; the API only reads them. The
-# six tables are: pipeline_runs, clusters, cluster_items, cluster_snapshots,
-# cluster_neighbors, cluster_signals. Only the three the MVP reads are modelled
-# here (clusters, cluster_items, cluster_snapshots).
+# product tables include pipeline_runs, clusters, cluster_items,
+# cluster_neighbors and cluster_signals. The API models the read surfaces it
+# needs for discovery and the Signal workspace.
 # ============================================================
 
 
@@ -74,6 +74,30 @@ class Cluster(Base):
     # pgvector centroid used by the pipeline for assignment; deferred so it is
     # never loaded unless explicitly requested.
     centroid: Mapped[list | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True, deferred=True)
+
+
+class ClusterSignal(Base):
+    __tablename__ = "cluster_signals"
+
+    cluster_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    input_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    generated_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    signal_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    recency: Mapped[float | None] = mapped_column(Float, nullable=True)
+    momentum_7d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    momentum_30d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    momentum_90d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    post_volume_by_week: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    total_posts: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    author_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    community_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    platform_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_communities: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    avg_comments: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_votes: Mapped[float | None] = mapped_column(Float, nullable=True)
+    top_problem_statements: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
 
 class ClusterItem(Base):
