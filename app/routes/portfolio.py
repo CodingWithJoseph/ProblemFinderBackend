@@ -1,7 +1,7 @@
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlencode, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -178,7 +178,51 @@ def _stripe_connect_redirect_url() -> str:
 
 def _stripe_connect_return_url(source: PortfolioRevenueSource, status: str) -> str:
     params = urlencode({"pipelineId": source.pipeline_id, "stripe": status})
-    return f"{settings.app_url.rstrip('/')}/dashboard/portfolio?{params}"
+    return f"{settings.app_url.rstrip('/')}/dashboard/portfolio/setup?{params}"
+
+
+def _stripe_value(obj: Any, key: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _stripe_items(response: Any) -> list[Any]:
+    if hasattr(response, "auto_paging_iter"):
+        return list(response.auto_paging_iter())
+    return list(_stripe_value(response, "data", []) or [])
+
+
+def _subscription_item_mrr_cents(item: Any) -> int:
+    price = _stripe_value(item, "price", {}) or {}
+    quantity = _stripe_value(item, "quantity", 1) or 1
+    unit_amount = _stripe_value(price, "unit_amount", 0) or 0
+    recurring = _stripe_value(price, "recurring", {}) or {}
+    interval = _stripe_value(recurring, "interval", "month")
+    interval_count = _stripe_value(recurring, "interval_count", 1) or 1
+
+    amount = int(unit_amount) * int(quantity)
+    if interval == "year":
+        return round(amount / (12 * interval_count))
+    if interval == "week":
+        return round(amount * 52 / (12 * interval_count))
+    if interval == "day":
+        return round(amount * 365 / (12 * interval_count))
+    return round(amount / interval_count)
+
+
+def _subscription_mrr_cents(subscription: Any) -> int:
+    items = _stripe_value(_stripe_value(subscription, "items", {}) or {}, "data", []) or []
+    return sum(_subscription_item_mrr_cents(item) for item in items)
+
+
+def _stripe_timestamp(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 async def _require_launched_product(pipeline_id: str, db: AsyncSession, uid: str) -> Pipeline:
@@ -420,6 +464,75 @@ async def get_revenue_metrics(
                 "newCustomers30d": source.new_customers_30d if source else None,
                 "churnedCustomers30d": source.churned_customers_30d if source else None,
                 "churnRate30d": source.churn_rate_30d if source else None,
+            },
+        }
+    }
+
+
+@router.post("/{pipeline_id}/revenue/sync")
+async def sync_revenue_metrics(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    await _require_launched_product(pipeline_id, db, uid)
+    source = await _revenue_source(pipeline_id, db)
+    if not source or source.status != "connected" or not source.provider_account_id:
+        raise HTTPException(status_code=400, detail="Stripe is not connected for this product")
+
+    since = int((_now() - timedelta(days=30)).timestamp())
+    try:
+        active_subscriptions = _stripe_items(stripe.Subscription.list(
+            status="active",
+            limit=100,
+            stripe_account=source.provider_account_id,
+        ))
+        customers = _stripe_items(stripe.Customer.list(
+            created={"gte": since},
+            limit=100,
+            stripe_account=source.provider_account_id,
+        ))
+        canceled_subscriptions = _stripe_items(stripe.Subscription.list(
+            status="canceled",
+            limit=100,
+            stripe_account=source.provider_account_id,
+        ))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Could not sync Stripe revenue") from exc
+
+    churned = [
+        subscription for subscription in canceled_subscriptions
+        if (_stripe_timestamp(_stripe_value(subscription, "canceled_at")) or _stripe_timestamp(_stripe_value(subscription, "ended_at")) or 0) >= since
+    ]
+    active_count = len(active_subscriptions)
+    churned_count = len(churned)
+    now = _now()
+
+    source.current_mrr_cents = sum(_subscription_mrr_cents(subscription) for subscription in active_subscriptions)
+    source.new_customers_30d = len(customers)
+    source.churned_customers_30d = churned_count
+    source.churn_rate_30d = churned_count / (active_count + churned_count) if active_count + churned_count else 0
+    source.revenue_snapshot = {
+        "provider": "stripe",
+        "activeSubscriptions": active_count,
+        "newCustomers30d": len(customers),
+        "churnedSubscriptions30d": churned_count,
+        "syncedAt": now.isoformat(),
+    }
+    source.last_synced_at = now
+    source.updated_at = now
+    await db.commit()
+    await db.refresh(source)
+
+    return {
+        "data": {
+            "source": _serialize_revenue_source(source),
+            "connected": True,
+            "summary": {
+                "mrrCents": source.current_mrr_cents,
+                "newCustomers30d": source.new_customers_30d,
+                "churnedCustomers30d": source.churned_customers_30d,
+                "churnRate30d": source.churn_rate_30d,
             },
         }
     }
