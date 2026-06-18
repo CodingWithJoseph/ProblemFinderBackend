@@ -3,6 +3,8 @@
 Every route reads the flat ``cluster_items`` table; these tests drive the
 FakeSession result queues that each endpoint pops in order.
 """
+from datetime import datetime, timezone
+
 from conftest import (
     FakeResult,
     make_cluster,
@@ -365,9 +367,20 @@ async def test_pipeline_signal_unknown_status_falls_back_to_failed(client, fake_
     assert resp.json()["status"] == "failed"
 
 
+async def test_pipeline_signal_serves_launched_card(client, fake_db, auth_headers):
+    # A launched (but not removed) card keeps its published signal.
+    card = make_pipeline(source_cluster_id="42", launched_at=datetime(2026, 6, 17, tzinfo=timezone.utc))
+    signal = make_cluster_signal()
+    fake_db.stub(execute=[FakeResult(rows=[card]), FakeResult(rows=[signal])])
+    resp = await client.get(f"/pipeline/{card.id}/signal", headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json()["clusterId"] == 42
+    assert resp.json()["status"] == "ready"
+
+
 async def test_pipeline_signal_404_when_card_missing(client, fake_db, auth_headers):
     card = make_pipeline(source_cluster_id="42")
-    fake_db.stub(execute=[FakeResult(rows=[])])  # no active card
+    fake_db.stub(execute=[FakeResult(rows=[])])  # no card (or removed)
     resp = await client.get(f"/pipeline/{card.id}/signal", headers=auth_headers)
     assert resp.status_code == 404
 
