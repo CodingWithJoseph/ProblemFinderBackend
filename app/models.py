@@ -77,6 +77,15 @@ class Cluster(Base):
 
 
 class ClusterSignal(Base):
+    """Read model for the founder-facing ``cluster_signals`` payload.
+
+    Verified column-for-column against the live Supabase schema: every mapped
+    column exists there (``input_fingerprint`` and ``last_error`` included).
+    The bookkeeping columns ``created_at`` / ``updated_at`` exist in the table
+    but are intentionally not mapped — the API never reads them. ``status`` is a
+    ``cluster_signal_status`` enum in Postgres; mapping it as text is read-safe.
+    """
+
     __tablename__ = "cluster_signals"
 
     cluster_id: Mapped[int] = mapped_column(Integer, primary_key=True)

@@ -290,119 +290,109 @@ async def test_homepage_stats_alias(client, fake_db):
 
 # ── Pipeline-anchored Signal / Evidence / brief (MVP view 2) ────────────────
 
-async def test_pipeline_signal_workspace(client, fake_db, auth_headers):
+async def test_pipeline_signal_returns_real_cluster_signal(client, fake_db, auth_headers):
     card = make_pipeline(source_cluster_id="42")
-    cluster = make_cluster()
     signal = make_cluster_signal()
-    item = make_cluster_item()
     fake_db.stub(execute=[
         FakeResult(rows=[card]),      # active card
-        FakeResult(rows=[cluster]),   # cluster lookup
-        FakeResult(rows=[item]),      # items
-        FakeResult(rows=[signal]),    # signal lookup
+        FakeResult(rows=[signal]),    # cluster_signals lookup
     ])
     resp = await client.get(f"/pipeline/{card.id}/signal", headers=auth_headers)
     assert resp.status_code == 200
     body = resp.json()
-    assert body["mode"] == "cluster"
-    assert body["cluster"]["signalScore"] == 0.91
-    assert body["signal"]["score"] == 0.91
-    assert body["signal"]["status"] == "ready"
-    assert body["signal"]["completeness"]["volume"] is True
-    assert body["availability"]["clusterAnalytics"] is True
-    assert body["problemStatement"]
-    assert len(body["posts"]) == 1
+    # Real cluster_signals fields are surfaced flat (no nested envelope/fallback).
+    assert body["clusterId"] == 42
+    assert body["signalScore"] == 0.91
+    assert body["recency"] == 0.88
+    assert body["momentum7d"] == 0.2
+    assert body["totalPosts"] == 12
+    assert body["authorCount"] == 8
+    assert body["platformCount"] == 1
+    assert body["sourceCommunities"] == ["r/freelance", "r/bookkeeping"]
+    assert body["postVolumeByWeek"] == [
+        {"week": "2026-W20", "count": 4},
+        {"week": "2026-W21", "count": 7},
+    ]
+    assert body["status"] == "generated"
+    assert body["generatedAt"] == "2026-05-21T00:00:00+00:00"
+    # signal_score 0.91 >= 0.6 and momentum_7d 0.2 > 0 -> active.
+    assert body["mode"] == "active"
+    # 7 of 8 completeness fields are non-null (momentum_90d is None).
+    assert body["completeness"] == 0.875
+    # Only the problem_statement text is exposed; post_id is stripped.
+    assert body["topProblemStatements"] == [
+        {"problem_statement": "Freelancers waste hours chasing invoices."}
+    ]
+    assert "lastError" not in body
+    assert "inputFingerprint" not in body
 
 
-async def test_pipeline_signal_forming_when_cluster_signal_missing(client, fake_db, auth_headers):
+async def test_pipeline_signal_mode_dormant(client, fake_db, auth_headers):
     card = make_pipeline(source_cluster_id="42")
-    cluster = make_cluster()
-    item = make_cluster_item()
-    fake_db.stub(execute=[
-        FakeResult(rows=[card]),
-        FakeResult(rows=[cluster]),
-        FakeResult(rows=[item]),
-        FakeResult(rows=[]),
-    ])
+    signal = make_cluster_signal(signal_score=0.2)
+    fake_db.stub(execute=[FakeResult(rows=[card]), FakeResult(rows=[signal])])
     resp = await client.get(f"/pipeline/{card.id}/signal", headers=auth_headers)
     assert resp.status_code == 200
-    body = resp.json()
-    assert body["mode"] == "forming"
-    assert body["signal"]["status"] == "missing"
-    assert body["signal"]["score"] == 0.82
-    assert body["signal"]["completeness"]["volume"] is False
+    assert resp.json()["mode"] == "dormant"
 
 
-async def test_pipeline_signal_forms_when_cluster_signals_unavailable(client, fake_db, auth_headers):
+async def test_pipeline_signal_mode_forming(client, fake_db, auth_headers):
     card = make_pipeline(source_cluster_id="42")
-    cluster = make_cluster(signal_score=0.64)
-    item = make_cluster_item()
-    fake_db.stub(execute=[
-        FakeResult(rows=[card]),
-        FakeResult(rows=[cluster]),
-        FakeResult(rows=[item]),
-        SQLAlchemyError("cluster_signals missing"),
-    ])
+    signal = make_cluster_signal(signal_score=0.45, momentum_7d=None)
+    fake_db.stub(execute=[FakeResult(rows=[card]), FakeResult(rows=[signal])])
     resp = await client.get(f"/pipeline/{card.id}/signal", headers=auth_headers)
     assert resp.status_code == 200
-    body = resp.json()
-    assert body["mode"] == "forming"
-    assert body["cluster"]["signalScore"] == 0.64
-    assert body["signal"]["status"] == "missing"
+    assert resp.json()["mode"] == "forming"
 
 
-async def test_pipeline_signal_singleton_card(client, fake_db, auth_headers):
-    item = make_cluster_item(cluster_id=None)
-    card = make_pipeline(source_cluster_id=None, post_ids=[item.id])
-    fake_db.stub(execute=[
-        FakeResult(rows=[card]),
-        FakeResult(rows=[item]),
-    ])
-    resp = await client.get(f"/pipeline/{card.id}/signal", headers=auth_headers)
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["mode"] == "singleton"
-    assert body["cluster"] is None
-    assert body["signal"]["status"] == "singleton"
-    assert body["signal"]["totalPosts"] == 1
-    assert body["signal"]["completeness"]["itemCount"] is False
-
-
-async def test_pipeline_signal_partial_failed_signal_surfaces_health(client, fake_db, auth_headers):
+async def test_pipeline_signal_maps_failed_status_to_error(client, fake_db, auth_headers):
     card = make_pipeline(source_cluster_id="42")
-    cluster = make_cluster(signal_score=None)
-    signal = make_cluster_signal(status="failed", signal_score=None, last_error="publish failed", total_posts=1, post_volume_by_week=[])
-    item = make_cluster_item()
-    fake_db.stub(execute=[
-        FakeResult(rows=[card]),
-        FakeResult(rows=[cluster]),
-        FakeResult(rows=[item]),
-        FakeResult(rows=[signal]),
-    ])
+    signal = make_cluster_signal(status="failed")
+    fake_db.stub(execute=[FakeResult(rows=[card]), FakeResult(rows=[signal])])
     resp = await client.get(f"/pipeline/{card.id}/signal", headers=auth_headers)
     assert resp.status_code == 200
-    body = resp.json()
-    assert body["mode"] == "cluster"
-    assert body["signal"]["status"] == "failed"
-    assert body["signal"]["lastError"] == "publish failed"
-    assert body["signal"]["completeness"]["score"] is False
+    assert resp.json()["status"] == "error"
 
 
 async def test_pipeline_signal_preserves_processing_and_stale_statuses(client, fake_db, auth_headers):
     for status in ["processing", "stale"]:
         card = make_pipeline(id=f"pipe-{status}", source_cluster_id="42")
-        cluster = make_cluster()
         signal = make_cluster_signal(status=status)
-        item = make_cluster_item()
-        fake_db.stub(execute=[
-            FakeResult(rows=[card]),
-            FakeResult(rows=[cluster]),
-            FakeResult(rows=[item]),
-            FakeResult(rows=[signal]),
-        ])
+        fake_db.stub(execute=[FakeResult(rows=[card]), FakeResult(rows=[signal])])
         resp = await client.get(f"/pipeline/{card.id}/signal", headers=auth_headers)
         assert resp.status_code == 200
-        assert resp.json()["signal"]["status"] == status
+        assert resp.json()["status"] == status
+
+
+async def test_pipeline_signal_404_when_card_missing(client, fake_db, auth_headers):
+    card = make_pipeline(source_cluster_id="42")
+    fake_db.stub(execute=[FakeResult(rows=[])])  # no active card
+    resp = await client.get(f"/pipeline/{card.id}/signal", headers=auth_headers)
+    assert resp.status_code == 404
+
+
+async def test_pipeline_signal_404_when_card_has_no_cluster(client, fake_db, auth_headers):
+    card = make_pipeline(source_cluster_id=None)
+    fake_db.stub(execute=[FakeResult(rows=[card])])  # card found, but no source cluster
+    resp = await client.get(f"/pipeline/{card.id}/signal", headers=auth_headers)
+    assert resp.status_code == 404
+
+
+async def test_pipeline_signal_404_when_no_signal_row(client, fake_db, auth_headers):
+    card = make_pipeline(source_cluster_id="42")
+    fake_db.stub(execute=[FakeResult(rows=[card]), FakeResult(rows=[])])  # no cluster_signals row
+    resp = await client.get(f"/pipeline/{card.id}/signal", headers=auth_headers)
+    assert resp.status_code == 404
+
+
+async def test_pipeline_signal_503_when_cluster_signals_unavailable(client, fake_db, auth_headers):
+    card = make_pipeline(source_cluster_id="42")
+    fake_db.stub(execute=[
+        FakeResult(rows=[card]),
+        SQLAlchemyError("cluster_signals read failed"),  # DB failure -> fail loudly
+    ])
+    resp = await client.get(f"/pipeline/{card.id}/signal", headers=auth_headers)
+    assert resp.status_code == 503
 
 
 async def test_pipeline_signal_evidence(client, fake_db, auth_headers):

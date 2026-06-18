@@ -238,7 +238,7 @@ def make_cluster_signal(**kw):
         cluster_id=42,
         input_fingerprint="fp-42",
         generated_at=datetime(2026, 5, 21, tzinfo=timezone.utc),
-        status="ready",
+        status="generated",
         last_error=None,
         signal_score=0.91,
         recency=0.88,
