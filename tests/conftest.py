@@ -52,6 +52,7 @@ from app.models import (  # noqa: E402
     Subscription,
     PlanEnum,
     Cluster,
+    ClusterSignal,
     ClusterItem,
     ClusterSnapshot,
     Pipeline,
@@ -227,6 +228,35 @@ def make_cluster(**kw):
     )
     defaults.update(kw)
     return Cluster(**defaults)
+
+
+def make_cluster_signal(**kw):
+    defaults = dict(
+        cluster_id=42,
+        input_fingerprint="fp-42",
+        generated_at=datetime(2026, 5, 21, tzinfo=timezone.utc),
+        status="ready",
+        last_error=None,
+        signal_score=0.91,
+        recency=0.88,
+        momentum_7d=0.2,
+        momentum_30d=0.4,
+        momentum_90d=None,
+        post_volume_by_week=[{"week": "2026-W20", "count": 4}, {"week": "2026-W21", "count": 7}],
+        total_posts=12,
+        author_count=8,
+        community_count=3,
+        platform_count=1,
+        source_communities=["r/freelance", "r/bookkeeping"],
+        avg_comments=6.5,
+        avg_votes=42.0,
+        top_problem_statements=[{
+            "post_id": "post-1",
+            "problem_statement": "Freelancers waste hours chasing invoices.",
+        }],
+    )
+    defaults.update(kw)
+    return ClusterSignal(**defaults)
 
 
 def make_cluster_item(**kw):

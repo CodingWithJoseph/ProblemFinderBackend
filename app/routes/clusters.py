@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
 from app.auth import get_uid
 from app.config import PIPELINE_VERSION
-from app.models import Cluster, ClusterItem, ClusterSnapshot, Pipeline
+from app.models import Cluster, ClusterItem, ClusterSnapshot, ClusterSignal, Pipeline
 from app.limits import get_plan, ai_clusters_allowed, LimitReached
 
 router = APIRouter(prefix="/clusters", tags=["clusters"])
@@ -64,6 +64,25 @@ def _source_names(c: Cluster, items: list[ClusterItem]) -> list[str]:
                 sources.append(str(source))
     sources.extend(it.platform for it in items if it.platform)
     return sorted({source.strip() for source in sources if source and source.strip()})
+
+
+def _signal_score(c: Cluster, signal: ClusterSignal | None = None) -> float | None:
+    if signal and signal.signal_score is not None:
+        return signal.signal_score
+    return c.signal_score
+
+
+def _signal_score_order():
+    return func.coalesce(ClusterSignal.signal_score, Cluster.signal_score)
+
+
+async def _signals_by_cluster(cluster_ids: list[int], db: AsyncSession) -> dict[int, ClusterSignal]:
+    if not cluster_ids:
+        return {}
+    rows = (await db.execute(
+        select(ClusterSignal).where(ClusterSignal.cluster_id.in_(cluster_ids))
+    )).scalars().all()
+    return {row.cluster_id: row for row in rows}
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -246,12 +265,12 @@ async def _watched_cluster_ids(uid: str, cluster_ids: list[int], db: AsyncSessio
 # Serializers
 # ──────────────────────────────────────────────────────────────────────────
 
-def _serialize_cluster(c: Cluster, *, post_count: int | None = None) -> dict:
+def _serialize_cluster(c: Cluster, *, post_count: int | None = None, signal: ClusterSignal | None = None) -> dict:
     return {
         "id": c.id,
         "name": c.name,
         "summary": c.summary,
-        "signalScore": c.signal_score,
+        "signalScore": _signal_score(c, signal),
         "trending": c.trending,
         "firstSeen": c.first_seen.isoformat() if c.first_seen else None,
         "lastSeenDate": c.last_seen_date.isoformat() if c.last_seen_date else None,
@@ -263,14 +282,14 @@ def _serialize_cluster(c: Cluster, *, post_count: int | None = None) -> dict:
     }
 
 
-def _serialize_discovery_cluster(c: Cluster, items: list[ClusterItem], watched_ids: set[int]) -> dict:
+def _serialize_discovery_cluster(c: Cluster, items: list[ClusterItem], watched_ids: set[int], signal: ClusterSignal | None = None) -> dict:
     subreddits = sorted({it.community for it in items if it.community})
     dates = sorted(_iso(_item_observed_at(it)) for it in items if _item_observed_at(it))
     return {
         "id": c.id,
         "name": c.name,
         "summary": c.summary,
-        "signalScore": c.signal_score,
+        "signalScore": _signal_score(c, signal),
         "opportunity_type": _most_common(it.opportunity_type for it in items),
         "opportunity_domain": _most_common(it.opportunity_domain for it in items),
         "problemStatement": representative_problem_statement(items),
@@ -327,10 +346,11 @@ async def _materialize_discovery(base, order_clauses, limit, offset, uid, db) ->
     cluster_ids = [c.id for c in clusters]
     items_map = await _items_by_cluster(cluster_ids, db)
     watched_ids = await _watched_cluster_ids(uid, cluster_ids, db)
+    signal_map = await _signals_by_cluster(cluster_ids, db)
 
     return {
         "data": [
-            _serialize_discovery_cluster(c, items_map.get(c.id, []), watched_ids)
+            _serialize_discovery_cluster(c, items_map.get(c.id, []), watched_ids, signal_map.get(c.id))
             for c in clusters
         ],
         "total": total or 0,
@@ -365,6 +385,7 @@ async def search_clusters(
     stats = _item_stats_subquery()
     base = (
         select(Cluster)
+        .outerjoin(ClusterSignal, ClusterSignal.cluster_id == Cluster.id)
         .join(stats, stats.c.cluster_id == Cluster.id)
         .where(
             Cluster.pipeline_version == PIPELINE_VERSION,
@@ -392,6 +413,7 @@ async def browse_clusters(
     stats = _item_stats_subquery()
     base = (
         select(Cluster)
+        .outerjoin(ClusterSignal, ClusterSignal.cluster_id == Cluster.id)
         .join(stats, stats.c.cluster_id == Cluster.id)
         .where(
             Cluster.pipeline_version == PIPELINE_VERSION,
@@ -436,13 +458,14 @@ async def get_trending_clusters(
 
     stats = _item_stats_subquery()
     result = await db.execute(
-        select(Cluster, stats.c.post_count)
+        select(Cluster, stats.c.post_count, ClusterSignal)
         .join(stats, stats.c.cluster_id == Cluster.id)
+        .outerjoin(ClusterSignal, ClusterSignal.cluster_id == Cluster.id)
         .where(
             Cluster.trending == True,
             Cluster.pipeline_version == PIPELINE_VERSION,
         )
-        .order_by(Cluster.signal_score.desc().nullslast())
+        .order_by(_signal_score_order().desc().nullslast())
         .limit(limit)
     )
     rows = result.all()
@@ -453,10 +476,10 @@ async def get_trending_clusters(
                 "name": c.name,
                 "summary": c.summary,
                 "trending": c.trending,
-                "signalScore": c.signal_score,
+                "signalScore": _signal_score(c, signal),
                 "postCount": post_count,
             }
-            for c, post_count in rows
+            for c, post_count, signal in rows
         ]
     }
 
@@ -511,6 +534,9 @@ async def get_cluster(
     total_posts = await count_cluster_items(db, cluster_id)
     top_items = await load_cluster_items(db, cluster_id, limit=TOP_EVIDENCE_COUNT)
     page_items = await load_cluster_items(db, cluster_id, limit=pageSize, offset=(page - 1) * pageSize)
+    signal = (await db.execute(
+        select(ClusterSignal).where(ClusterSignal.cluster_id == cluster_id)
+    )).scalar_one_or_none()
     all_ids = [row[0] for row in (await db.execute(
         select(ClusterItem.id).where(
             ClusterItem.cluster_id == cluster_id,
@@ -519,7 +545,7 @@ async def get_cluster(
     )).all()]
 
     return {
-        **_serialize_cluster(cluster, post_count=total_posts),
+        **_serialize_cluster(cluster, post_count=total_posts, signal=signal),
         "problemStatement": representative_problem_statement(top_items),
         "solutionAngle": (top_items[0].solution_angle if top_items else None),
         "topEvidence": [serialize_evidence_item(it) for it in top_items],
@@ -586,11 +612,14 @@ async def get_cluster_snapshots(
         .order_by(ClusterSnapshot.date.asc())
     )
     snapshots = result.scalars().all()
+    signal = (await db.execute(
+        select(ClusterSignal).where(ClusterSignal.cluster_id == cluster_id)
+    )).scalar_one_or_none()
 
     return {
         "clusterId": cluster_id,
         "hasSufficientHistory": len(snapshots) >= SUFFICIENT_HISTORY_DAYS,
-        "signalScore": cluster.signal_score,
+        "signalScore": _signal_score(cluster, signal),
         "snapshots": [
             {
                 "date": s.date.isoformat() if s.date else None,

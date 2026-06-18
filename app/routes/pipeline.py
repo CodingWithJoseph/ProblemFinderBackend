@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from app.db import get_db, AsyncSessionLocal
 from app.auth import get_uid
 from app.config import PIPELINE_VERSION
-from app.models import Pipeline, Cluster, ClusterItem, Issue, Team, TeamMember
+from app.models import Pipeline, Cluster, ClusterItem, ClusterSignal, Issue, Team, TeamMember
 from app.limits import get_plan, limit_for, LimitReached
 from app.routes.clusters import (
     serialize_evidence_item,
@@ -152,7 +152,13 @@ def _serialize_signal_post(it: ClusterItem) -> dict:
     }
 
 
-def _serialize_signal_cluster(cluster: Cluster | None) -> dict | None:
+def _effective_signal_score(cluster: Cluster | None, signal: ClusterSignal | None = None) -> float | None:
+    if signal and signal.signal_score is not None:
+        return signal.signal_score
+    return cluster.signal_score if cluster else None
+
+
+def _serialize_signal_cluster(cluster: Cluster | None, signal: ClusterSignal | None = None) -> dict | None:
     if not cluster:
         return None
     return {
@@ -160,21 +166,22 @@ def _serialize_signal_cluster(cluster: Cluster | None) -> dict | None:
         "name": cluster.name,
         "summary": cluster.summary,
         "trending": cluster.trending,
-        "signalScore": cluster.signal_score,
+        "signalScore": _effective_signal_score(cluster, signal),
     }
 
 
-def _serialize_signal_cluster_workspace(cluster: Cluster, items: list[ClusterItem]) -> dict:
+def _serialize_signal_cluster_workspace(cluster: Cluster, items: list[ClusterItem], signal: ClusterSignal | None = None) -> dict:
     dates = sorted(d for it in items if (d := _iso_or_none(_item_observed(it))))
+    signal_total = signal.total_posts if signal and signal.total_posts is not None else None
     return {
-        **_serialize_signal_cluster(cluster),
+        **_serialize_signal_cluster(cluster, signal),
         "opportunityType": _most_common(it.opportunity_type for it in items),
         "opportunityDomain": _most_common(it.opportunity_domain for it in items),
-        "postCount": len(items),
+        "postCount": signal_total if signal_total is not None else len(items),
         "commentCount": sum(it.num_comments or 0 for it in items),
         "averageUpvoteRatio": _avg([_upvote_ratio(it) for it in items]),
-        "authorCount": cluster.author_count,
-        "communityCount": cluster.community_count,
+        "authorCount": signal.author_count if signal and signal.author_count is not None else cluster.author_count,
+        "communityCount": signal.community_count if signal and signal.community_count is not None else cluster.community_count,
         "dateRange": {"from": dates[0] if dates else None, "to": dates[-1] if dates else None},
     }
 
@@ -191,6 +198,132 @@ def _workspace_metrics(items: list[ClusterItem]) -> dict:
         "avgSourceScore": _avg([it.score for it in items]),
         "commentCount": sum(it.num_comments or 0 for it in items),
         "averageUpvoteRatio": _avg([_upvote_ratio(it) for it in items]),
+    }
+
+
+def _top_problem_statements_from_items(items: list[ClusterItem]) -> list[dict]:
+    rows: list[dict] = []
+    for it in items:
+        statement = (it.problem_statement or "").strip()
+        if statement:
+            rows.append({
+                "postId": it.id,
+                "post_id": it.id,
+                "problemStatement": statement,
+                "problem_statement": statement,
+                "title": it.title,
+                "score": it.score,
+            })
+    rows.sort(key=lambda row: (row.get("score") is not None, row.get("score") or 0), reverse=True)
+    return rows[:5]
+
+
+def _source_communities_from_items(items: list[ClusterItem]) -> list[str]:
+    return sorted({
+        value.strip()
+        for it in items
+        for value in [it.community or it.platform]
+        if value and value.strip()
+    })
+
+
+def _normalize_top_problem_statements(raw: list | None, items: list[ClusterItem]) -> list[dict]:
+    if isinstance(raw, list) and raw:
+        normalized: list[dict] = []
+        for index, row in enumerate(raw):
+            if not isinstance(row, dict):
+                continue
+            statement = row.get("problem_statement") or row.get("problemStatement")
+            if not statement:
+                continue
+            post_id = row.get("post_id") or row.get("postId")
+            normalized.append({
+                **row,
+                "id": str(post_id or index),
+                "postId": post_id,
+                "post_id": post_id,
+                "problemStatement": statement,
+                "problem_statement": statement,
+            })
+        if normalized:
+            return normalized[:5]
+    return _top_problem_statements_from_items(items)
+
+
+def _derive_signal_status(mode: str, signal: ClusterSignal | None, completeness: dict) -> str:
+    if mode == "singleton":
+        return "singleton"
+    if signal is None:
+        return "missing"
+    raw = (signal.status or "").lower()
+    if raw == "failed":
+        return "failed"
+    if raw == "pending":
+        return "pending"
+    if not (completeness["score"] and completeness["itemCount"]):
+        return "partial"
+    if raw in {"ready", "generated"}:
+        return raw
+    return "partial"
+
+
+def _serialize_signal_payload(
+    *,
+    mode: str,
+    cluster: Cluster | None,
+    signal: ClusterSignal | None,
+    items: list[ClusterItem],
+) -> dict:
+    metrics = _workspace_metrics(items)
+    post_volume_by_week = signal.post_volume_by_week if signal and isinstance(signal.post_volume_by_week, list) else []
+    source_communities = (
+        signal.source_communities
+        if signal and isinstance(signal.source_communities, list) and signal.source_communities
+        else _source_communities_from_items(items)
+    )
+    top_problem_statements = _normalize_top_problem_statements(
+        signal.top_problem_statements if signal else None,
+        items,
+    )
+    total_posts = signal.total_posts if signal and signal.total_posts is not None else len(items)
+    author_count = signal.author_count if signal and signal.author_count is not None else (
+        cluster.author_count if cluster and cluster.author_count is not None else len({it.author for it in items if it.author})
+    )
+    community_count = signal.community_count if signal and signal.community_count is not None else (
+        cluster.community_count if cluster and cluster.community_count is not None else len(source_communities)
+    )
+    platform_count = signal.platform_count if signal and signal.platform_count is not None else len({it.platform for it in items if it.platform})
+    score = _effective_signal_score(cluster, signal)
+    completeness = {
+        "score": score is not None,
+        "momentum": bool(signal and any(value is not None for value in (signal.momentum_7d, signal.momentum_30d, signal.momentum_90d))),
+        "volume": bool(post_volume_by_week),
+        "evidence": bool(top_problem_statements),
+        "sources": bool(source_communities),
+        "itemCount": total_posts > 1,
+    }
+    status = _derive_signal_status(mode, signal, completeness)
+    return {
+        "mode": mode,
+        "status": status,
+        "score": score,
+        "recency": signal.recency if signal else None,
+        "momentum7d": signal.momentum_7d if signal else None,
+        "momentum30d": signal.momentum_30d if signal else None,
+        "momentum90d": signal.momentum_90d if signal else None,
+        "postVolumeByWeek": post_volume_by_week,
+        "totalPosts": total_posts,
+        "authorCount": author_count,
+        "communityCount": community_count,
+        "platformCount": platform_count,
+        "sourceCommunities": source_communities,
+        "avgComments": signal.avg_comments if signal and signal.avg_comments is not None else (metrics["commentCount"] / total_posts if total_posts else None),
+        "avgVotes": signal.avg_votes if signal and signal.avg_votes is not None else metrics["avgSourceScore"],
+        "topProblemStatements": top_problem_statements,
+        "generatedAt": _iso_or_none(signal.generated_at) if signal else None,
+        "lastError": signal.last_error if signal else None,
+        "inputFingerprint": signal.input_fingerprint if signal else None,
+        "completeness": completeness,
     }
 
 
@@ -259,6 +392,14 @@ async def _items_for_card(card: Pipeline, db: AsyncSession) -> tuple[Cluster | N
     else:
         items = []
     return cluster, items
+
+
+async def _cluster_signal(cluster_id: int | None, db: AsyncSession) -> ClusterSignal | None:
+    if cluster_id is None:
+        return None
+    return (await db.execute(
+        select(ClusterSignal).where(ClusterSignal.cluster_id == cluster_id)
+    )).scalar_one_or_none()
 
 
 def _csv_value(value):
@@ -613,6 +754,13 @@ async def get_pipeline_signal(
     """Signal workspace anchored to an active user pipeline card."""
     card = await _get_active_pipeline_card(pipeline_id, db, uid)
     cluster, items = await _items_for_card(card, db)
+    signal = await _cluster_signal(cluster.id if cluster else None, db)
+    if cluster:
+        mode = "cluster" if signal else "forming"
+    elif len(items) == 1:
+        mode = "singleton"
+    else:
+        mode = "custom"
 
     pipeline_payload = {
         "id": card.id,
@@ -625,7 +773,9 @@ async def get_pipeline_signal(
     if cluster:
         return {
             "pipeline": pipeline_payload,
-            "cluster": _serialize_signal_cluster_workspace(cluster, items),
+            "mode": mode,
+            "cluster": _serialize_signal_cluster_workspace(cluster, items, signal),
+            "signal": _serialize_signal_payload(mode=mode, cluster=cluster, signal=signal, items=items),
             "metrics": _workspace_metrics(items),
             "analytics": {
                 "sourceBreakdown": cluster.source_breakdown or [],
@@ -638,7 +788,9 @@ async def get_pipeline_signal(
 
     return {
         "pipeline": pipeline_payload,
+        "mode": mode,
         "cluster": None,
+        "signal": _serialize_signal_payload(mode=mode, cluster=None, signal=None, items=items),
         "metrics": _workspace_metrics(items),
         "analytics": None,
         "availability": {"clusterAnalytics": False, "brief": False},
