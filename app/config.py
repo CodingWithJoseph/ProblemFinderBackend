@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     stripe_pro_yearly_price_id: str
     stripe_elite_monthly_price_id: str
     stripe_elite_yearly_price_id: str
+    stripe_connect_client_id: str = ""
+    stripe_connect_redirect_url: str | None = None
     app_url: str = "http://localhost:3000"
 
     # OpenAI

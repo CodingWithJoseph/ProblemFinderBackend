@@ -43,6 +43,9 @@ os.environ.setdefault("OPENAI_API_KEY", "sk-test")
 os.environ.setdefault("ALLOWED_ORIGINS", "http://localhost:3000")
 
 sys.modules.setdefault("firebase_admin", MagicMock())
+stripe_stub = MagicMock()
+stripe_stub.OAuth.token = MagicMock(return_value={"stripe_user_id": "acct_test"})
+sys.modules.setdefault("stripe", stripe_stub)
 
 from fastapi import FastAPI  # noqa: E402
 
@@ -446,6 +449,7 @@ def make_revenue_source(**kw):
         user_id=TEST_UID,
         provider="stripe",
         status="not_connected",
+        provider_account_id=None,
         provider_account_label=None,
         current_mrr_cents=None,
         new_customers_30d=None,
@@ -454,6 +458,8 @@ def make_revenue_source(**kw):
         revenue_snapshot={},
         connected_at=None,
         last_synced_at=None,
+        oauth_state=None,
+        oauth_state_expires_at=None,
         created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
         updated_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
     )

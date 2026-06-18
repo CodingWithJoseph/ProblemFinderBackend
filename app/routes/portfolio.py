@@ -2,7 +2,7 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Literal
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.auth import get_uid
+from app.config import get_settings
 from app.models import Pipeline, PortfolioRevenueSource, PortfolioUsageEvent, PortfolioUsageSource
 from app.routes.pipeline import (
     _fetch_issue_counts_for_cards,
@@ -18,9 +19,12 @@ from app.routes.pipeline import (
     _fetch_teams_for_cards,
     _serialize_cards,
 )
+import stripe
 
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 public_router = APIRouter(prefix="/public/portfolio", tags=["public-portfolio"])
+settings = get_settings()
+stripe.api_key = settings.stripe_secret_key
 
 UsageEventType = Literal["pageview", "signup", "login", "activation", "custom"]
 RevenueProvider = Literal["stripe"]
@@ -98,6 +102,7 @@ def _serialize_revenue_source(source: PortfolioRevenueSource | None) -> dict | N
         "pipelineId": source.pipeline_id,
         "provider": source.provider,
         "status": source.status,
+        "providerAccountId": source.provider_account_id,
         "providerAccountLabel": source.provider_account_label,
         "currentMrrCents": source.current_mrr_cents,
         "newCustomers30d": source.new_customers_30d,
@@ -119,6 +124,16 @@ async def _revenue_source(pipeline_id: str, db: AsyncSession, provider: str = "s
             PortfolioRevenueSource.provider == provider,
         )
         .order_by(PortfolioRevenueSource.created_at.asc())
+    )).scalar_one_or_none()
+
+
+async def _revenue_source_by_oauth_state(state: str, db: AsyncSession) -> PortfolioRevenueSource | None:
+    return (await db.execute(
+        select(PortfolioRevenueSource)
+        .where(
+            PortfolioRevenueSource.provider == "stripe",
+            PortfolioRevenueSource.oauth_state == state,
+        )
     )).scalar_one_or_none()
 
 
@@ -155,6 +170,15 @@ def _usage_event_domain_allowed(source: PortfolioUsageSource, request: Request, 
         body.url,
     ]
     return any(_host_matches_allowed(candidate, source.allowed_domain) for candidate in candidates)
+
+
+def _stripe_connect_redirect_url() -> str:
+    return settings.stripe_connect_redirect_url or f"{settings.app_url.rstrip('/')}/api/portfolio/stripe/callback"
+
+
+def _stripe_connect_return_url(source: PortfolioRevenueSource, status: str) -> str:
+    params = urlencode({"pipelineId": source.pipeline_id, "stripe": status})
+    return f"{settings.app_url.rstrip('/')}/dashboard/portfolio?{params}"
 
 
 async def _require_launched_product(pipeline_id: str, db: AsyncSession, uid: str) -> Pipeline:
@@ -306,6 +330,77 @@ async def create_revenue_source(
     await db.commit()
     await db.refresh(source)
     return {"data": _serialize_revenue_source(source)}
+
+
+@router.post("/{pipeline_id}/revenue-source/connect")
+async def create_revenue_connect_url(
+    pipeline_id: str,
+    body: RevenueSourceBody,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    if body.provider != "stripe":
+        raise HTTPException(status_code=400, detail="Unsupported revenue provider")
+    if not settings.stripe_connect_client_id:
+        raise HTTPException(status_code=400, detail="Stripe Connect is not configured")
+
+    product = await _require_launched_product(pipeline_id, db, uid)
+    source = await _revenue_source(product.id, db, body.provider)
+    now = _now()
+    if not source:
+        source = PortfolioRevenueSource(
+            id=str(uuid.uuid4()),
+            pipeline_id=product.id,
+            user_id=uid,
+            provider=body.provider,
+            status="not_connected",
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(source)
+
+    source.oauth_state = secrets.token_urlsafe(32)
+    source.oauth_state_expires_at = now + timedelta(minutes=15)
+    source.updated_at = now
+    await db.commit()
+    await db.refresh(source)
+
+    query = urlencode({
+        "response_type": "code",
+        "client_id": settings.stripe_connect_client_id,
+        "scope": "read_write",
+        "state": source.oauth_state,
+        "redirect_uri": _stripe_connect_redirect_url(),
+    })
+    return {"data": {"url": f"https://connect.stripe.com/oauth/authorize?{query}"}}
+
+
+@router.get("/revenue-source/stripe/callback")
+async def complete_revenue_connect(
+    code: str,
+    state: str,
+    db: AsyncSession = Depends(get_db),
+):
+    source = await _revenue_source_by_oauth_state(state, db)
+    if not source or not source.oauth_state_expires_at or source.oauth_state_expires_at < _now():
+        raise HTTPException(status_code=400, detail="Invalid or expired Stripe connection state")
+
+    token = stripe.OAuth.token(grant_type="authorization_code", code=code)
+    account_id = token.get("stripe_user_id") if isinstance(token, dict) else getattr(token, "stripe_user_id", None)
+    if not account_id:
+        raise HTTPException(status_code=400, detail="Stripe did not return a connected account")
+
+    now = _now()
+    source.provider_account_id = account_id
+    source.provider_account_label = account_id
+    source.status = "connected"
+    source.connected_at = now
+    source.updated_at = now
+    source.oauth_state = None
+    source.oauth_state_expires_at = None
+    await db.commit()
+    await db.refresh(source)
+    return {"data": {"redirectUrl": _stripe_connect_return_url(source, "connected")}}
 
 
 @router.get("/{pipeline_id}/revenue")
