@@ -299,6 +299,25 @@ async def _get_active_pipeline_card(pipeline_id: str, db: AsyncSession, uid: str
     return card
 
 
+async def _get_signal_pipeline_card(pipeline_id: str, db: AsyncSession, uid: str) -> Pipeline:
+    """Resolve a user's card for the Signal view.
+
+    Unlike :func:`_get_active_pipeline_card`, this also serves *launched* cards —
+    a launched opportunity keeps its published signal — and only excludes removed
+    cards. Scoped to the Signal endpoint on purpose.
+    """
+    card = (await db.execute(
+        select(Pipeline).where(
+            Pipeline.id == pipeline_id,
+            Pipeline.user_id == uid,
+            Pipeline.removed_at == None,
+        )
+    )).scalar_one_or_none()
+    if not card:
+        raise HTTPException(status_code=404, detail="Pipeline card not found")
+    return card
+
+
 async def _team_visible(team_id: str, db: AsyncSession, uid: str) -> Team | None:
     team = (await db.execute(select(Team).where(Team.id == team_id))).scalar_one_or_none()
     if not team:
@@ -707,13 +726,14 @@ async def get_pipeline_signal(
     """Signal workspace for a pipeline card: the card's cluster's published
     cluster_signals payload.
 
-    Cluster-anchored cards only. This reads real signal data and fails loudly
-    rather than degrading:
-      * 404 — card not found / not active, card has no source cluster, or the
+    Cluster-anchored cards only. Serves active *and* launched cards (only removed
+    cards are excluded). This reads real signal data and fails loudly rather than
+    degrading:
+      * 404 — card not found / removed, card has no source cluster, or the
         cluster has no cluster_signals row yet.
       * 503 — the cluster_signals read itself failed (logged at ERROR).
     """
-    card = await _get_active_pipeline_card(pipeline_id, db, uid)
+    card = await _get_signal_pipeline_card(pipeline_id, db, uid)
     cluster_id = _cluster_id_from_card(card)
     if cluster_id is None:
         raise HTTPException(status_code=404, detail="Pipeline card has no source cluster")
