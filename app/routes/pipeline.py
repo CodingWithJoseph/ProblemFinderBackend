@@ -595,6 +595,17 @@ async def _fetch_issue_counts_for_cards(cards: list[Pipeline], db: AsyncSession)
     return counts
 
 
+async def _sync_issue_team_for_card(card: Pipeline, team_id: str | None, db: AsyncSession) -> None:
+    issues = list((await db.execute(
+        select(Issue).where(Issue.pipeline_id == card.id)
+    )).scalars().all())
+    now = datetime.now(timezone.utc)
+    for issue in issues:
+        issue.team_id = team_id
+        issue.assignee_id = None
+        issue.updated_at = now
+
+
 def _serialize_cards(
     cards: list[Pipeline],
     posts_map: dict[str, list[dict]],
@@ -1082,6 +1093,10 @@ async def patch_pipeline(
         raise HTTPException(status_code=404, detail="Team not found")
 
     post_ids_changed = "post_ids" in updates
+    team_changed = "team_id" in updates and updates["team_id"] != card.team_id
+
+    if team_changed:
+        await _sync_issue_team_for_card(card, updates["team_id"], db)
 
     for field, value in updates.items():
         setattr(card, field, value)

@@ -368,6 +368,7 @@ def make_issue(**kw):
         id=str(uuid.uuid4()),
         user_id=TEST_UID,
         team_id=None,
+        assignee_id=None,
         pipeline_id=None,
         parent_issue_id=None,
         title="Analyze signals",

@@ -263,6 +263,7 @@ class Issue(Base):
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     team_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("teams.id", ondelete="SET NULL"), nullable=True, index=True)
+    assignee_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("team_members.id", ondelete="SET NULL"), nullable=True, index=True)
     pipeline_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="SET NULL"), nullable=True, index=True)
     parent_issue_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("issues.id", ondelete="CASCADE"), nullable=True, index=True)
     title: Mapped[str] = mapped_column(Text, nullable=False)
