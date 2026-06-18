@@ -166,7 +166,10 @@ class FakeSession:
 
     async def execute(self, statement, params=None):
         if self.execute_results:
-            return self.execute_results.pop(0)
+            result = self.execute_results.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
         return FakeResult()
 
     async def scalar(self, statement=None, params=None):
