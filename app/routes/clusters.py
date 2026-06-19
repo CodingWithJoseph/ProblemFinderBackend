@@ -22,7 +22,6 @@ from app.db import get_db
 from app.auth import get_uid
 from app.config import PIPELINE_VERSION
 from app.models import Cluster, ClusterItem, ClusterSnapshot, ClusterSignal, Pipeline
-from app.limits import get_plan, ai_clusters_allowed, LimitReached
 
 router = APIRouter(prefix="/clusters", tags=["clusters"])
 logger = logging.getLogger(__name__)
@@ -468,11 +467,7 @@ async def get_trending_clusters(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
-    """Trending clusters by signal_score (dashboard intelligence feed, Pro-gated)."""
-    plan = await get_plan(uid, db)
-    if not ai_clusters_allowed(plan):
-        raise LimitReached("clusters", plan, status_code=403)
-
+    """Trending clusters by signal_score (dashboard intelligence feed)."""
     stats = _item_stats_subquery()
     try:
         result = await db.execute(

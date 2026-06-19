@@ -12,7 +12,6 @@ from app.db import get_db, AsyncSessionLocal
 from app.auth import get_uid
 from app.config import PIPELINE_VERSION
 from app.models import Problem, Pipeline, ClusterItem
-from app.limits import get_plan, enforce_problems_limit
 from app.openai_client import openai_client, EMBEDDING_MODEL
 from app.routes.clusters import serialize_evidence_item
 
@@ -223,10 +222,6 @@ async def create_problem(
     )).scalar_one_or_none()
     if owns is None:
         raise HTTPException(status_code=404, detail="Pipeline card not found")
-
-    # Free plan: cap problems per pipeline (403 with limit_reached on overflow).
-    plan = await get_plan(uid, db)
-    await enforce_problems_limit(uid, plan, body.pipeline_id, db)
 
     problem = Problem(
         pipeline_id=body.pipeline_id,

@@ -15,8 +15,6 @@ from conftest import (
     make_snapshot,
     make_pipeline,
     make_problem,
-    make_subscription,
-    PlanEnum,
 )
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -120,11 +118,10 @@ async def test_browse_clusters_trending_sort(client, fake_db, auth_headers):
 
 
 async def test_trending_accessible_to_free(client, fake_db, auth_headers):
-    # Tier gating is temporarily disabled: free users now get trending too.
+    # Tier gating has been removed: trending is available to every user.
     cluster = make_cluster()
     signal = make_cluster_signal(signal_score=0.93)
     fake_db.stub(execute=[
-        FakeResult(rows=[make_subscription(plan=PlanEnum.free)]),
         FakeResult(rows=[(cluster, 50, signal)]),
     ])
     resp = await client.get("/clusters/trending", headers=auth_headers)
@@ -136,7 +133,6 @@ async def test_trending_orders_by_signal_score(client, fake_db, auth_headers):
     cluster = make_cluster()
     signal = make_cluster_signal(signal_score=0.94)
     fake_db.stub(execute=[
-        FakeResult(rows=[make_subscription(plan=PlanEnum.pro)]),
         FakeResult(rows=[(cluster, 50, signal)]),
     ])
     resp = await client.get("/clusters/trending", headers=auth_headers)
@@ -494,8 +490,6 @@ async def test_watch_cluster_seeds_problems_and_tasks(client, fake_db, auth_head
         execute=[
             FakeResult(rows=[]),                              # _find_watch_card (none)
             FakeResult(rows=[cluster]),                       # cluster lookup
-            FakeResult(rows=[]),                              # active cards (under cap)
-            FakeResult(rows=[make_subscription()]),           # get_plan
             FakeResult(rows=[(item_a.id,)]),                  # post_id_rows
             FakeResult(rows=[item_a, item_b, item_skip, item_dup]),  # load_cluster_items (seed)
         ],
@@ -530,8 +524,6 @@ async def test_watch_cluster_does_not_seed_when_problems_exist(client, fake_db, 
         execute=[
             FakeResult(rows=[]),                  # _find_watch_card
             FakeResult(rows=[cluster]),           # cluster lookup
-            FakeResult(rows=[]),                  # active cards
-            FakeResult(rows=[make_subscription()]),  # get_plan
             FakeResult(rows=[(item_a.id,)]),      # post_id_rows
         ],
         scalar=[3],  # pipeline already has problems -> no seeding (no items load)
