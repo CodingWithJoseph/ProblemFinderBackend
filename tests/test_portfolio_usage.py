@@ -12,6 +12,14 @@ from app.routes import portfolio as portfolio_routes
 from app.models import PortfolioRevenueSource, PortfolioUsageEvent, PortfolioUsageSource
 
 
+class StripeList:
+    def __init__(self, data):
+        self.data = data
+
+    def auto_paging_iter(self):
+        return iter(self.data)
+
+
 async def test_portfolio_product_includes_usage_source(client, fake_db, auth_headers):
     product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
     source = make_usage_source(pipeline_id=product.id)
@@ -167,7 +175,7 @@ async def test_complete_revenue_connect_marks_source_connected(client, fake_db, 
 
     assert resp.status_code == 200
     body = resp.json()["data"]
-    assert body["redirectUrl"] == "https://console.example/dashboard/portfolio?pipelineId=pipe-1&stripe=connected"
+    assert body["redirectUrl"] == "https://console.example/dashboard/portfolio/setup?pipelineId=pipe-1&stripe=connected"
     assert source.status == "connected"
     assert source.provider_account_id == "acct_123"
     assert source.provider_account_label == "acct_123"
@@ -201,6 +209,62 @@ async def test_get_revenue_metrics_placeholder(client, fake_db, auth_headers):
     assert body["summary"]["newCustomers30d"] == 3
     assert body["summary"]["churnedCustomers30d"] == 1
     assert body["summary"]["churnRate30d"] == 0.05
+
+
+async def test_sync_revenue_metrics_from_connected_stripe_account(client, fake_db, auth_headers, monkeypatch):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    source = make_revenue_source(
+        pipeline_id=product.id,
+        status="connected",
+        provider_account_id="acct_123",
+    )
+    now = int(datetime.now(timezone.utc).timestamp())
+
+    monkeypatch.setattr(
+        portfolio_routes.stripe.Subscription,
+        "list",
+        lambda **kwargs: StripeList([
+            {
+                "id": "sub_active",
+                "status": "active",
+                "items": {
+                    "data": [
+                        {
+                            "quantity": 2,
+                            "price": {
+                                "unit_amount": 5000,
+                                "recurring": {"interval": "month", "interval_count": 1},
+                            },
+                        }
+                    ]
+                },
+            }
+        ]) if kwargs["status"] == "active" else StripeList([
+            {"id": "sub_canceled", "status": "canceled", "canceled_at": now},
+            {"id": "sub_old", "status": "canceled", "canceled_at": now - 60 * 24 * 60 * 60},
+        ]),
+    )
+    monkeypatch.setattr(
+        portfolio_routes.stripe.Customer,
+        "list",
+        lambda **kwargs: StripeList([{"id": "cus_1"}, {"id": "cus_2"}]),
+    )
+    fake_db.stub(execute=[
+        FakeResult(rows=[product]),  # launched product lookup
+        FakeResult(rows=[source]),   # revenue source
+    ])
+
+    resp = await client.post(f"/portfolio/{product.id}/revenue/sync", headers=auth_headers)
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["summary"]["mrrCents"] == 10000
+    assert body["summary"]["newCustomers30d"] == 2
+    assert body["summary"]["churnedCustomers30d"] == 1
+    assert body["summary"]["churnRate30d"] == 0.5
+    assert source.last_synced_at is not None
+    assert source.revenue_snapshot["activeSubscriptions"] == 1
+    assert fake_db.commit_count == 1
 
 
 async def test_public_usage_event_ingestion(client, fake_db):
