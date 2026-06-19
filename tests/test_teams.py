@@ -104,6 +104,34 @@ async def test_add_member_email_invite_mints_token_and_sends_email(client, fake_
     assert sent[0]["to"] == "new.person@example.com"
     # The accept link (carrying the token) must be in the email body.
     assert member_obj.invite_token in sent[0]["text"]
+    # ...and surfaced on the response so it can be copied/pasted.
+    assert resp.json()["data"]["inviteUrl"].endswith(member_obj.invite_token)
+
+
+async def test_get_team_includes_invite_url_for_owner(client, fake_db, auth_headers):
+    team = make_team()  # owner = TEST_UID
+    invited = make_team_member(team_id=team.id, status="invited", email="p@example.com", user_id=None, invite_token="tok-xyz")
+    fake_db.stub(execute=[FakeResult(rows=[team]), FakeResult(rows=[invited])])
+
+    resp = await client.get(f"/teams/{team.id}", headers=auth_headers)
+
+    assert resp.status_code == 200
+    member = resp.json()["data"]["members"][0]
+    assert member["inviteUrl"].endswith("tok-xyz")
+
+
+async def test_get_team_hides_invite_url_from_plain_member(client, fake_db, auth_headers):
+    team = make_team(owner_user_id="someone-else")
+    viewer = make_team_member(team_id=team.id, user_id=TEST_UID, role="member", status="active")
+    invited = make_team_member(team_id=team.id, status="invited", email="p@example.com", user_id=None, invite_token="tok-xyz")
+    # team lookup, membership (role resolution), then members list.
+    fake_db.stub(execute=[FakeResult(rows=[team]), FakeResult(rows=[viewer]), FakeResult(rows=[viewer, invited])])
+
+    resp = await client.get(f"/teams/{team.id}", headers=auth_headers)
+
+    assert resp.status_code == 200
+    invited_payload = next(m for m in resp.json()["data"]["members"] if m["status"] == "invited")
+    assert "inviteUrl" not in invited_payload
 
 
 async def test_add_member_with_user_id_does_not_invite(client, fake_db, auth_headers, monkeypatch):

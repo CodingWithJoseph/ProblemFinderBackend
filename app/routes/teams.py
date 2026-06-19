@@ -71,8 +71,12 @@ def _display_name_from_email(email: str | None) -> str | None:
     return name or None
 
 
-def _serialize_member(member: TeamMember) -> dict:
-    return {
+def _accept_url(token: str) -> str:
+    return f"{settings.app_url.rstrip('/')}/invite/{token}"
+
+
+def _serialize_member(member: TeamMember, *, include_invite: bool = False) -> dict:
+    payload = {
         "id": member.id,
         "teamId": member.team_id,
         "userId": member.user_id,
@@ -84,6 +88,11 @@ def _serialize_member(member: TeamMember) -> dict:
         "createdAt": _iso(member.created_at),
         "updatedAt": _iso(member.updated_at),
     }
+    # The accept link carries a secret join token, so only expose it to callers
+    # allowed to manage members (owners/admins). Pending email invites only.
+    if include_invite and member.status == "invited" and member.invite_token:
+        payload["inviteUrl"] = _accept_url(member.invite_token)
+    return payload
 
 
 def _issue_invite_token(member: TeamMember, now: datetime) -> str:
@@ -97,8 +106,7 @@ def _issue_invite_token(member: TeamMember, now: datetime) -> str:
 
 def _queue_invite_email(background: BackgroundTasks, *, team: Team, email: str, token: str) -> None:
     """Schedule the invite email after the response. Sending is non-fatal."""
-    accept_url = f"{settings.app_url.rstrip('/')}/invite/{token}"
-    subject, text, html = render_team_invite(team_name=team.name, accept_url=accept_url)
+    subject, text, html = render_team_invite(team_name=team.name, accept_url=_accept_url(token))
     background.add_task(email_service.send, to=email, subject=subject, text=text, html=html)
 
 
@@ -115,7 +123,7 @@ async def _member_by_token(token: str, db: AsyncSession) -> TeamMember:
     return member
 
 
-def _serialize_team(team: Team, role: str | None = None, members: list[TeamMember] | None = None) -> dict:
+def _serialize_team(team: Team, role: str | None = None, members: list[TeamMember] | None = None, include_invites: bool = False) -> dict:
     payload = {
         "id": team.id,
         "ownerUserId": team.owner_user_id,
@@ -126,7 +134,7 @@ def _serialize_team(team: Team, role: str | None = None, members: list[TeamMembe
         "updatedAt": _iso(team.updated_at),
     }
     if members is not None:
-        payload["members"] = [_serialize_member(member) for member in members]
+        payload["members"] = [_serialize_member(member, include_invite=include_invites) for member in members]
     return payload
 
 
@@ -278,7 +286,7 @@ async def get_team(
 ):
     team, role = await _require_view(team_id, uid, db)
     members = await _members_for_team(team.id, db)
-    return {"data": _serialize_team(team, role=role, members=members)}
+    return {"data": _serialize_team(team, role=role, members=members, include_invites=role in {"owner", "admin"})}
 
 
 @router.patch("/{team_id}")
@@ -303,7 +311,7 @@ async def patch_team(
     await db.commit()
     await db.refresh(team)
     members = await _members_for_team(team.id, db)
-    return {"data": _serialize_team(team, role="owner", members=members)}
+    return {"data": _serialize_team(team, role="owner", members=members, include_invites=True)}
 
 
 @router.delete("/{team_id}")
@@ -363,7 +371,7 @@ async def add_member(
     await db.refresh(member)
     if invite_token:
         _queue_invite_email(background, team=team, email=email, token=invite_token)
-    return {"data": _serialize_member(member)}
+    return {"data": _serialize_member(member, include_invite=True)}
 
 
 @router.patch("/{team_id}/members/{member_id}")
@@ -396,7 +404,7 @@ async def patch_member(
     team.updated_at = now
     await db.commit()
     await db.refresh(member)
-    return {"data": _serialize_member(member)}
+    return {"data": _serialize_member(member, include_invite=True)}
 
 
 @router.delete("/{team_id}/members/{member_id}")
@@ -437,7 +445,7 @@ async def resend_invite(
     await db.commit()
     await db.refresh(member)
     _queue_invite_email(background, team=team, email=member.email, token=token)
-    return {"data": _serialize_member(member)}
+    return {"data": _serialize_member(member, include_invite=True)}
 
 
 @invites_router.get("/{token}")
