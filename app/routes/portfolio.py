@@ -959,6 +959,143 @@ async def get_usage_metrics(
     }
 
 
+def _build_correlation_days(usage_rows, error_rows, days: int = 30, today: date | None = None) -> list[dict]:
+    """Merge usage + error daily rows into one aligned timeline."""
+    today = today or _now().date()
+    skeleton: dict[str, dict] = {}
+    for offset in range(days - 1, -1, -1):
+        day = today - timedelta(days=offset)
+        skeleton[day.isoformat()] = {"date": day.isoformat(), "visitors": 0, "pageviews": 0, "signups": 0, "errors": 0}
+
+    for day, event_type, count, visitors in usage_rows:
+        key = day.isoformat() if hasattr(day, "isoformat") else str(day)
+        if key not in skeleton:
+            continue
+        if event_type == "pageview":
+            skeleton[key]["pageviews"] += int(count or 0)
+            skeleton[key]["visitors"] = max(skeleton[key]["visitors"], int(visitors or 0))
+        elif event_type == "signup":
+            skeleton[key]["signups"] += int(count or 0)
+
+    for day, count in error_rows:
+        key = day.isoformat() if hasattr(day, "isoformat") else str(day)
+        if key in skeleton:
+            skeleton[key]["errors"] += int(count or 0)
+
+    return list(skeleton.values())
+
+
+def _correlation_insights(days: list[dict]) -> list[str]:
+    """Plain-language callouts where signals move together — the cross-source read."""
+    if not days:
+        return []
+    errors = [d["errors"] for d in days]
+    signups = [d["signups"] for d in days]
+    avg_err = sum(errors) / len(errors) if errors else 0
+    avg_signups = sum(signups) / len(signups) if signups else 0
+
+    insights: list[str] = []
+    for day in reversed(days):  # most recent first
+        if day["errors"] >= 5 and avg_err > 0 and day["errors"] >= 2 * avg_err:
+            msg = f"Errors spiked to {day['errors']} on {day['date']}"
+            if day["signups"] <= avg_signups:
+                msg += f", while signups dipped to {day['signups']}"
+            insights.append(msg + ".")
+        if len(insights) >= 3:
+            break
+    return insights
+
+
+@router.get("/{pipeline_id}/correlation")
+async def get_correlation(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    await _require_launched_product(pipeline_id, db, uid)
+    now = _now()
+    since = now - timedelta(days=30)
+    week_start = now - timedelta(days=7)
+    prev_week_start = now - timedelta(days=14)
+    fourteen_ago = now - timedelta(days=14)
+
+    usage_rows = (await db.execute(
+        select(
+            func.date(PortfolioUsageEvent.occurred_at),
+            PortfolioUsageEvent.event_type,
+            func.count(PortfolioUsageEvent.id),
+            func.count(func.distinct(PortfolioUsageEvent.visitor_id)),
+        )
+        .where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.occurred_at >= since,
+        )
+        .group_by(func.date(PortfolioUsageEvent.occurred_at), PortfolioUsageEvent.event_type)
+    )).all()
+    error_rows = (await db.execute(
+        select(func.date(PortfolioErrorEvent.occurred_at), func.count(PortfolioErrorEvent.id))
+        .where(
+            PortfolioErrorEvent.pipeline_id == pipeline_id,
+            PortfolioErrorEvent.occurred_at >= since,
+        )
+        .group_by(func.date(PortfolioErrorEvent.occurred_at))
+    )).all()
+
+    days = _build_correlation_days(list(usage_rows), list(error_rows), today=now.date())
+    insights = _correlation_insights(days)
+
+    revenue = await db.scalar(
+        select(PortfolioRevenueSource).where(
+            PortfolioRevenueSource.pipeline_id == pipeline_id,
+            PortfolioRevenueSource.provider == "stripe",
+        )
+    )
+    this_week_signups = int(await db.scalar(
+        select(func.count(PortfolioUsageEvent.id)).where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.event_type == "signup",
+            PortfolioUsageEvent.occurred_at >= week_start,
+        )
+    ) or 0)
+    prev_week_signups = int(await db.scalar(
+        select(func.count(PortfolioUsageEvent.id)).where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.event_type == "signup",
+            PortfolioUsageEvent.occurred_at >= prev_week_start,
+            PortfolioUsageEvent.occurred_at < week_start,
+        )
+    ) or 0)
+    errors_14d = int(await db.scalar(
+        select(func.count(PortfolioErrorEvent.id)).where(
+            PortfolioErrorEvent.pipeline_id == pipeline_id,
+            PortfolioErrorEvent.occurred_at >= fourteen_ago,
+        )
+    ) or 0)
+    sessions_14d = int(await db.scalar(
+        select(func.count(func.distinct(PortfolioUsageEvent.session_id))).where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.occurred_at >= fourteen_ago,
+            PortfolioUsageEvent.session_id != None,
+        )
+    ) or 0)
+
+    mrr = revenue.current_mrr_cents if revenue else None
+    prev_mrr = revenue.previous_mrr_cents if revenue else None
+
+    return {
+        "data": {
+            "days": days,
+            "insights": insights,
+            "summary": {
+                "mrrCents": mrr,
+                "mrrChangePct": _pct_change(mrr, prev_mrr) if (mrr is not None and prev_mrr) else None,
+                "signupsChangePct": _pct_change(this_week_signups, prev_week_signups),
+                "errorsPerSession14d": round(errors_14d / sessions_14d, 4) if sessions_14d else None,
+            },
+        }
+    }
+
+
 @router.get("/{pipeline_id}/errors")
 async def get_error_metrics(
     pipeline_id: str,
