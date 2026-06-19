@@ -175,7 +175,7 @@ async def test_complete_revenue_connect_marks_source_connected(client, fake_db, 
 
     assert resp.status_code == 200
     body = resp.json()["data"]
-    assert body["redirectUrl"] == "https://console.example/dashboard/portfolio/setup?pipelineId=pipe-1&stripe=connected"
+    assert body["redirectUrl"] == "https://console.example/dashboard/monitor/setup?pipelineId=pipe-1&stripe=connected"
     assert source.status == "connected"
     assert source.provider_account_id == "acct_123"
     assert source.provider_account_label == "acct_123"
