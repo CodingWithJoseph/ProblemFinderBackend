@@ -426,6 +426,26 @@ class PortfolioAlert(Base):
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
+class PortfolioAlertSettings(Base):
+    """Per-product alert preferences. One row per pipeline; absence means
+    "all triggers on, global thresholds". Threshold columns are nullable —
+    null falls back to the global default in config."""
+
+    __tablename__ = "portfolio_alert_settings"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    new_issue_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    error_spike_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    signups_drop_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    revenue_drop_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    error_spike_multiplier: Mapped[float | None] = mapped_column(Float, nullable=True)
+    signups_drop_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    revenue_drop_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
 class Problem(Base):
     __tablename__ = "problems"
 

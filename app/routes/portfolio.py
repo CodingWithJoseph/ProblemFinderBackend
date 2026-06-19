@@ -17,12 +17,14 @@ from app.auth import get_uid
 from app.config import get_settings
 from app.models import (
     Pipeline,
+    PortfolioAlertSettings,
     PortfolioErrorEvent,
     PortfolioErrorGroup,
     PortfolioRevenueSource,
     PortfolioUsageEvent,
     PortfolioUsageSource,
 )
+from app.services.alerts import AlertPrefs, alert_settings_row
 from app.routes.pipeline import (
     _fetch_issue_counts_for_cards,
     _fetch_posts_for_cards,
@@ -79,6 +81,18 @@ class UsageSourceUpdateBody(BaseModel):
 
 class RevenueSourceBody(BaseModel):
     provider: RevenueProvider = "stripe"
+
+
+class AlertSettingsBody(BaseModel):
+    # All optional: only fields present in the request are applied. A null
+    # threshold clears the override and reverts to the global default.
+    new_issue_enabled: bool | None = None
+    error_spike_enabled: bool | None = None
+    signups_drop_enabled: bool | None = None
+    revenue_drop_enabled: bool | None = None
+    error_spike_multiplier: float | None = Field(default=None, ge=1.0, le=100.0)
+    signups_drop_pct: float | None = Field(default=None, ge=0.05, le=1.0)
+    revenue_drop_pct: float | None = Field(default=None, ge=0.05, le=1.0)
 
 
 def _now() -> datetime:
@@ -1096,6 +1110,49 @@ async def get_correlation(
             },
         }
     }
+
+
+def _serialize_alert_settings(prefs: AlertPrefs) -> dict:
+    return {
+        "newIssueEnabled": prefs.new_issue_enabled,
+        "errorSpikeEnabled": prefs.error_spike_enabled,
+        "signupsDropEnabled": prefs.signups_drop_enabled,
+        "revenueDropEnabled": prefs.revenue_drop_enabled,
+        "errorSpikeMultiplier": prefs.error_spike_multiplier,
+        "signupsDropPct": prefs.signups_drop_pct,
+        "revenueDropPct": prefs.revenue_drop_pct,
+    }
+
+
+@router.get("/{pipeline_id}/alert-settings")
+async def get_alert_settings(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    await _require_launched_product(pipeline_id, db, uid)
+    row = await alert_settings_row(db, pipeline_id)
+    return {"data": _serialize_alert_settings(AlertPrefs.resolve(row))}
+
+
+@router.put("/{pipeline_id}/alert-settings")
+async def update_alert_settings(
+    pipeline_id: str,
+    body: AlertSettingsBody,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    await _require_launched_product(pipeline_id, db, uid)
+    row = await alert_settings_row(db, pipeline_id)
+    if row is None:
+        row = PortfolioAlertSettings(pipeline_id=pipeline_id)
+        db.add(row)
+    for field, value in body.model_dump(exclude_unset=True).items():
+        setattr(row, field, value)
+    row.updated_at = _now()
+    await db.commit()
+    await db.refresh(row)
+    return {"data": _serialize_alert_settings(AlertPrefs.resolve(row))}
 
 
 @router.get("/{pipeline_id}/errors")

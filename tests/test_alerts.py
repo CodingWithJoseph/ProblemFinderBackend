@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from conftest import FakeResult
 from app.services import alerts as alerts_mod
 from app.services.alerts import (
+    AlertPrefs,
     already_alerted,
     detect_error_spike,
     detect_revenue_drop,
@@ -11,6 +12,20 @@ from app.services.alerts import (
     render_alert,
     resolve_owner_email,
 )
+
+
+class FakeSettingsRow:
+    """Stand-in for a PortfolioAlertSettings row."""
+
+    def __init__(self, **kw):
+        defaults = dict(
+            new_issue_enabled=True, error_spike_enabled=True,
+            signups_drop_enabled=True, revenue_drop_enabled=True,
+            error_spike_multiplier=None, signups_drop_pct=None, revenue_drop_pct=None,
+        )
+        defaults.update(kw)
+        for k, v in defaults.items():
+            setattr(self, k, v)
 
 
 # ── detectors ────────────────────────────────────────────────────────────────
@@ -49,6 +64,47 @@ def test_evaluate_alerts_fires_all_four():
     }
     types = {a["type"] for a in evaluate_alerts(snapshot)}
     assert types == {"new_issue", "error_spike", "signups_drop", "revenue_drop"}
+
+
+def _all_fire_snapshot():
+    return {
+        "product_name": "Acme",
+        "today": "2026-06-01",
+        "week": "2026-W23",
+        "new_issues": [{"id": "g1", "title": "TypeError: boom", "level": "error"}],
+        "error": {"current": 30, "baseline": 2.0},
+        "signups": {"current": 2, "previous": 20},
+        "revenue": {"current_mrr": 8000, "previous_mrr": 12000},
+    }
+
+
+def test_evaluate_alerts_respects_disabled_triggers():
+    prefs = AlertPrefs(new_issue_enabled=False, error_spike_enabled=False)
+    types = {a["type"] for a in evaluate_alerts(_all_fire_snapshot(), prefs)}
+    assert types == {"signups_drop", "revenue_drop"}
+
+
+def test_evaluate_alerts_respects_custom_thresholds():
+    # A stricter 50% revenue-drop threshold should not fire on the 33% drop.
+    prefs = AlertPrefs(revenue_drop_pct=0.5)
+    types = {a["type"] for a in evaluate_alerts(_all_fire_snapshot(), prefs)}
+    assert "revenue_drop" not in types
+
+
+def test_alert_prefs_resolve_merges_overrides():
+    row = FakeSettingsRow(error_spike_enabled=False, signups_drop_pct=0.8)
+    prefs = AlertPrefs.resolve(row)
+    assert prefs.error_spike_enabled is False
+    assert prefs.signups_drop_pct == 0.8
+    # Unset override falls back to the global default; min floors stay global.
+    assert prefs.revenue_drop_pct == AlertPrefs.from_settings().revenue_drop_pct
+    assert prefs.error_spike_min == AlertPrefs.from_settings().error_spike_min
+
+
+def test_alert_prefs_resolve_none_is_all_defaults():
+    prefs = AlertPrefs.resolve(None)
+    assert prefs.new_issue_enabled and prefs.error_spike_enabled
+    assert prefs.signups_drop_enabled and prefs.revenue_drop_enabled
 
 
 def test_evaluate_alerts_quiet_when_healthy():
