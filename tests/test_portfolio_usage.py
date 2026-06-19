@@ -107,6 +107,48 @@ async def test_get_usage_metrics(client, fake_db, auth_headers):
     assert body["recentEvents"][0]["eventType"] == "pageview"
 
 
+async def test_get_usage_metrics_funnel_and_growth(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    source = make_usage_source(pipeline_id=product.id)
+    fake_db.stub(
+        execute=[
+            FakeResult(rows=[product]),   # launched product lookup
+            FakeResult(rows=[source]),    # usage source
+            FakeResult(rows=[("pageview", 100), ("signup", 20), ("activation", 8)]),  # window counts
+            FakeResult(rows=[]),          # daily
+            FakeResult(rows=[]),          # recent events
+            FakeResult(rows=[("signup", 20), ("activation", 8)]),  # funnel: distinct visitors per stage
+        ],
+        scalar=[
+            128,  # total_events
+            100,  # visitors_14d
+            90,   # active_users_14d
+            60,   # this_week_visitors
+            40,   # prev_week_visitors
+            12,   # this_week_signups
+            8,    # prev_week_signups
+        ],
+    )
+
+    resp = await client.get(f"/portfolio/{product.id}/usage", headers=auth_headers)
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+
+    funnel = body["funnel"]
+    assert funnel["visited"] == 100
+    assert funnel["signedUp"] == 20
+    assert funnel["activated"] == 8
+    assert funnel["signupRate"] == 0.2      # 20 / 100
+    assert funnel["activationRate"] == 0.4  # 8 / 20
+
+    growth = body["growth"]
+    assert growth["visitors"]["current"] == 60
+    assert growth["visitors"]["previous"] == 40
+    assert growth["visitors"]["changePct"] == 0.5  # (60 - 40) / 40
+    assert growth["signups"]["changePct"] == 0.5   # (12 - 8) / 8
+
+
 async def test_create_revenue_source_for_launched_product(client, fake_db, auth_headers):
     product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
     fake_db.stub(execute=[

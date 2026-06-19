@@ -656,6 +656,13 @@ async def sync_revenue_metrics(
     }
 
 
+def _pct_change(current: int, previous: int) -> float | None:
+    """Week-over-week change as a fraction, or None when there's no baseline."""
+    if not previous:
+        return None
+    return round((current - previous) / previous, 4)
+
+
 @router.get("/{pipeline_id}/usage")
 async def get_usage_metrics(
     pipeline_id: str,
@@ -664,7 +671,10 @@ async def get_usage_metrics(
 ):
     await _require_launched_product(pipeline_id, db, uid)
     source = await _usage_source(pipeline_id, db)
-    since = _now() - timedelta(days=14)
+    now = _now()
+    since = now - timedelta(days=14)
+    week_start = now - timedelta(days=7)
+    prev_week_start = now - timedelta(days=14)
 
     total_events = await db.scalar(
         select(func.count(PortfolioUsageEvent.id)).where(PortfolioUsageEvent.pipeline_id == pipeline_id)
@@ -729,6 +739,74 @@ async def get_usage_metrics(
         .limit(20)
     )).scalars().all())
 
+    # Conversion funnel (14d): distinct visitors at each stage, so a few noisy
+    # visitors firing many events don't distort the rates.
+    stage_rows = (await db.execute(
+        select(PortfolioUsageEvent.event_type, func.count(func.distinct(PortfolioUsageEvent.visitor_id)))
+        .where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.occurred_at >= since,
+            PortfolioUsageEvent.visitor_id != None,
+            PortfolioUsageEvent.event_type.in_(["signup", "activation"]),
+        )
+        .group_by(PortfolioUsageEvent.event_type)
+    )).all()
+    stage_visitors = {event_type: int(count) for event_type, count in stage_rows}
+    visited = int(visitors_14d)
+    signed_up = stage_visitors.get("signup", 0)
+    activated = stage_visitors.get("activation", 0)
+    funnel = {
+        "visited": visited,
+        "signedUp": signed_up,
+        "activated": activated,
+        "signupRate": round(signed_up / visited, 4) if visited else None,
+        "activationRate": round(activated / signed_up, 4) if signed_up else None,
+    }
+
+    # Week-over-week growth: this 7d window vs the prior 7d window.
+    this_week_visitors = int(await db.scalar(
+        select(func.count(func.distinct(PortfolioUsageEvent.visitor_id))).where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.occurred_at >= week_start,
+            PortfolioUsageEvent.visitor_id != None,
+        )
+    ) or 0)
+    prev_week_visitors = int(await db.scalar(
+        select(func.count(func.distinct(PortfolioUsageEvent.visitor_id))).where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.occurred_at >= prev_week_start,
+            PortfolioUsageEvent.occurred_at < week_start,
+            PortfolioUsageEvent.visitor_id != None,
+        )
+    ) or 0)
+    this_week_signups = int(await db.scalar(
+        select(func.count(PortfolioUsageEvent.id)).where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.occurred_at >= week_start,
+            PortfolioUsageEvent.event_type == "signup",
+        )
+    ) or 0)
+    prev_week_signups = int(await db.scalar(
+        select(func.count(PortfolioUsageEvent.id)).where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.occurred_at >= prev_week_start,
+            PortfolioUsageEvent.occurred_at < week_start,
+            PortfolioUsageEvent.event_type == "signup",
+        )
+    ) or 0)
+    growth = {
+        "visitors": {
+            "current": this_week_visitors,
+            "previous": prev_week_visitors,
+            "changePct": _pct_change(this_week_visitors, prev_week_visitors),
+        },
+        "signups": {
+            "current": this_week_signups,
+            "previous": prev_week_signups,
+            "changePct": _pct_change(this_week_signups, prev_week_signups),
+        },
+    }
+
     return {
         "data": {
             "source": _serialize_usage_source(source),
@@ -744,6 +822,8 @@ async def get_usage_metrics(
                 "customEvents": counts.get("custom", 0),
                 "activeUsers": int(active_users_14d),
             },
+            "funnel": funnel,
+            "growth": growth,
             "daily": list(daily.values()),
             "recentEvents": [_serialize_usage_event(event) for event in recent_events],
         }
