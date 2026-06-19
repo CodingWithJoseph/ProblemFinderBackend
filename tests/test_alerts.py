@@ -78,6 +78,19 @@ def _all_fire_snapshot():
     }
 
 
+def test_evaluate_alerts_caps_new_issues():
+    snapshot = {
+        "product_name": "Acme", "today": "2026-06-01", "week": "2026-W23",
+        "new_issues": [{"id": f"g{i}", "title": f"err {i}", "level": "error"} for i in range(10)],
+        "error": {"current": 0, "baseline": 0.0},
+        "signups": {"current": 10, "previous": 10},
+        "revenue": {"current_mrr": None, "previous_mrr": None},
+    }
+    prefs = AlertPrefs(new_issue_cap=3)
+    fired = [a for a in evaluate_alerts(snapshot, prefs) if a["type"] == "new_issue"]
+    assert len(fired) == 3
+
+
 def test_evaluate_alerts_respects_disabled_triggers():
     prefs = AlertPrefs(new_issue_enabled=False, error_spike_enabled=False)
     types = {a["type"] for a in evaluate_alerts(_all_fire_snapshot(), prefs)}

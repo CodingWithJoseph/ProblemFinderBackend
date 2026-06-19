@@ -12,6 +12,9 @@ PIPELINE_VERSION = "v2"
 class Settings(BaseSettings):
     # App
     app_name: str = "Immensity API"
+    # Customer-facing product name used in outbound copy (emails, etc.). Kept
+    # separate from app_name (the API service name) so branding lives in one place.
+    product_name: str = "Immensity"
     environment: str = "development"
     debug: bool = False
 
@@ -31,6 +34,8 @@ class Settings(BaseSettings):
     stripe_elite_yearly_price_id: str
     stripe_connect_client_id: str = ""
     stripe_connect_redirect_url: str | None = None
+    # How long a Stripe Connect OAuth state token stays valid, in minutes.
+    stripe_oauth_state_ttl_minutes: int = 15
     app_url: str = "http://localhost:3000"
 
     # OpenAI
@@ -53,6 +58,16 @@ class Settings(BaseSettings):
     # How often to auto-refresh connected Stripe revenue sources, in hours.
     # Set to 0 to disable the in-process scheduler.
     revenue_sync_interval_hours: int = 6
+    # Lookback span for new-customer / churn revenue stats, in days.
+    revenue_sync_window_days: int = 30
+
+    # Analytics windows (days). These are the single source of truth for the
+    # monitoring readouts; each API response echoes the window it used so the
+    # frontend renders labels from data instead of hardcoding "14d"/"30d".
+    analytics_usage_window_days: int = 14
+    analytics_correlation_window_days: int = 30
+    analytics_retention_window_days: int = 30
+    analytics_growth_window_days: int = 7  # week-over-week comparison span
 
     # Alerting: scheduled checks email the product owner when something needs
     # attention. Real mail only sends when EMAIL_TRANSPORT is configured.
@@ -63,6 +78,12 @@ class Settings(BaseSettings):
     alert_signups_drop_pct: float = 0.5
     alert_signups_min_previous: int = 5
     alert_revenue_drop_pct: float = 0.2
+    # Days of history averaged into the error-spike baseline (excludes today).
+    alert_error_baseline_days: int = 7
+    # Signup comparison span: this window vs the immediately prior one.
+    alert_signups_window_days: int = 7
+    # Max new-issue emails emitted per run, so a burst can't blast an inbox.
+    alert_new_issue_cap: int = 5
 
     # CORS
     allowed_origins: str = "http://localhost:3000"

@@ -539,7 +539,7 @@ async def create_revenue_connect_url(
         db.add(source)
 
     source.oauth_state = secrets.token_urlsafe(32)
-    source.oauth_state_expires_at = now + timedelta(minutes=15)
+    source.oauth_state_expires_at = now + timedelta(minutes=settings.stripe_oauth_state_ttl_minutes)
     source.updated_at = now
     await db.commit()
     await db.refresh(source)
@@ -599,6 +599,7 @@ async def get_revenue_metrics(
                 "newCustomers30d": source.new_customers_30d if source else None,
                 "churnedCustomers30d": source.churned_customers_30d if source else None,
                 "churnRate30d": source.churn_rate_30d if source else None,
+                "windowDays": settings.revenue_sync_window_days,
             },
         }
     }
@@ -629,6 +630,7 @@ async def sync_revenue_metrics(
                 "newCustomers30d": source.new_customers_30d,
                 "churnedCustomers30d": source.churned_customers_30d,
                 "churnRate30d": source.churn_rate_30d,
+                "windowDays": settings.revenue_sync_window_days,
             },
         }
     }
@@ -637,7 +639,7 @@ async def sync_revenue_metrics(
 async def _perform_revenue_sync(source: PortfolioRevenueSource, db: AsyncSession) -> None:
     """Pull fresh metrics from the connected Stripe account onto ``source`` and
     commit. Raises on Stripe failure; callers decide how to surface it."""
-    since = int((_now() - timedelta(days=30)).timestamp())
+    since = int((_now() - timedelta(days=settings.revenue_sync_window_days)).timestamp())
     active_subscriptions = _stripe_items(stripe.Subscription.list(
         status="active",
         limit=100,
@@ -790,9 +792,11 @@ async def get_usage_metrics(
     await _require_launched_product(pipeline_id, db, uid)
     source = await _usage_source(pipeline_id, db)
     now = _now()
-    since = now - timedelta(days=14)
-    week_start = now - timedelta(days=7)
-    prev_week_start = now - timedelta(days=14)
+    usage_window = settings.analytics_usage_window_days
+    growth_window = settings.analytics_growth_window_days
+    since = now - timedelta(days=usage_window)
+    week_start = now - timedelta(days=growth_window)
+    prev_week_start = now - timedelta(days=2 * growth_window)
 
     total_events = await db.scalar(
         select(func.count(PortfolioUsageEvent.id)).where(PortfolioUsageEvent.pipeline_id == pipeline_id)
@@ -822,7 +826,7 @@ async def get_usage_metrics(
         )
     ) or 0
 
-    daily = _empty_daily()
+    daily = _empty_daily(usage_window)
     daily_rows = (await db.execute(
         select(
             func.date(PortfolioUsageEvent.occurred_at),
@@ -927,7 +931,7 @@ async def get_usage_metrics(
 
     # Retention: pull each visitor's first-seen day and their distinct active
     # days over a 30d window, then compute D1/D7 return in-process.
-    retention_window_days = 30
+    retention_window_days = settings.analytics_retention_window_days
     retention_since = now - timedelta(days=retention_window_days)
     first_seen_rows = (await db.execute(
         select(PortfolioUsageEvent.visitor_id, func.min(func.date(PortfolioUsageEvent.occurred_at)))
@@ -957,6 +961,8 @@ async def get_usage_metrics(
             "connected": source is not None,
             "totalEvents": int(total_events),
             "lastSeenAt": _iso(source.last_seen_at if source else None),
+            "windowDays": usage_window,
+            "growthWindowDays": growth_window,
             "summary14d": {
                 "pageviews": counts.get("pageview", 0),
                 "visitors": int(visitors_14d),
@@ -1030,10 +1036,13 @@ async def get_correlation(
 ):
     await _require_launched_product(pipeline_id, db, uid)
     now = _now()
-    since = now - timedelta(days=30)
-    week_start = now - timedelta(days=7)
-    prev_week_start = now - timedelta(days=14)
-    fourteen_ago = now - timedelta(days=14)
+    correlation_window = settings.analytics_correlation_window_days
+    growth_window = settings.analytics_growth_window_days
+    usage_window = settings.analytics_usage_window_days
+    since = now - timedelta(days=correlation_window)
+    week_start = now - timedelta(days=growth_window)
+    prev_week_start = now - timedelta(days=2 * growth_window)
+    usage_window_ago = now - timedelta(days=usage_window)
 
     usage_rows = (await db.execute(
         select(
@@ -1057,7 +1066,7 @@ async def get_correlation(
         .group_by(func.date(PortfolioErrorEvent.occurred_at))
     )).all()
 
-    days = _build_correlation_days(list(usage_rows), list(error_rows), today=now.date())
+    days = _build_correlation_days(list(usage_rows), list(error_rows), days=correlation_window, today=now.date())
     insights = _correlation_insights(days)
 
     revenue = await db.scalar(
@@ -1084,13 +1093,13 @@ async def get_correlation(
     errors_14d = int(await db.scalar(
         select(func.count(PortfolioErrorEvent.id)).where(
             PortfolioErrorEvent.pipeline_id == pipeline_id,
-            PortfolioErrorEvent.occurred_at >= fourteen_ago,
+            PortfolioErrorEvent.occurred_at >= usage_window_ago,
         )
     ) or 0)
     sessions_14d = int(await db.scalar(
         select(func.count(func.distinct(PortfolioUsageEvent.session_id))).where(
             PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.occurred_at >= fourteen_ago,
+            PortfolioUsageEvent.occurred_at >= usage_window_ago,
             PortfolioUsageEvent.session_id != None,
         )
     ) or 0)
@@ -1102,11 +1111,13 @@ async def get_correlation(
         "data": {
             "days": days,
             "insights": insights,
+            "windowDays": correlation_window,
             "summary": {
                 "mrrCents": mrr,
                 "mrrChangePct": _pct_change(mrr, prev_mrr) if (mrr is not None and prev_mrr) else None,
                 "signupsChangePct": _pct_change(this_week_signups, prev_week_signups),
                 "errorsPerSession14d": round(errors_14d / sessions_14d, 4) if sessions_14d else None,
+                "errorsPerSessionWindowDays": usage_window,
             },
         }
     }
@@ -1163,7 +1174,8 @@ async def get_error_metrics(
 ):
     await _require_launched_product(pipeline_id, db, uid)
     source = await _usage_source(pipeline_id, db)
-    since = _now() - timedelta(days=14)
+    usage_window = settings.analytics_usage_window_days
+    since = _now() - timedelta(days=usage_window)
 
     total_errors = await db.scalar(
         select(func.count(PortfolioErrorEvent.id)).where(PortfolioErrorEvent.pipeline_id == pipeline_id)
@@ -1197,7 +1209,7 @@ async def get_error_metrics(
         )
     ) or 0
 
-    daily = _empty_error_daily()
+    daily = _empty_error_daily(usage_window)
     daily_rows = (await db.execute(
         select(func.date(PortfolioErrorEvent.occurred_at), func.count(PortfolioErrorEvent.id))
         .where(
@@ -1248,6 +1260,7 @@ async def get_error_metrics(
             "connected": source is not None,
             "totalErrors": int(total_errors),
             "lastSeenAt": _iso(source.last_seen_at if source else None),
+            "windowDays": usage_window,
             "summary14d": {
                 "errors": int(errors_14d),
                 "openIssues": int(open_issues),

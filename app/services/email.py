@@ -84,17 +84,18 @@ class EmailService:
             return False
 
 
-def render_team_invite(*, team_name: str, accept_url: str, inviter_label: str | None = None) -> tuple[str, str, str]:
+def render_team_invite(*, team_name: str, accept_url: str, inviter_label: str | None = None, product_name: str | None = None) -> tuple[str, str, str]:
     """Return (subject, text, html) for a team invite email."""
+    product = product_name or get_settings().product_name
     inviter = f"{inviter_label} invited you" if inviter_label else "You've been invited"
-    subject = f"{inviter} to join {team_name} on Immensity"
+    subject = f"{inviter} to join {team_name} on {product}"
     text = (
-        f"{inviter} to join the team \"{team_name}\" on Immensity.\n\n"
+        f"{inviter} to join the team \"{team_name}\" on {product}.\n\n"
         f"Accept the invitation:\n{accept_url}\n\n"
         f"If you weren't expecting this, you can ignore this email."
     )
     html = (
-        f"<p>{inviter} to join the team <strong>{team_name}</strong> on Immensity.</p>"
+        f"<p>{inviter} to join the team <strong>{team_name}</strong> on {product}.</p>"
         f'<p><a href="{accept_url}">Accept the invitation</a></p>'
         f'<p style="color:#6b7280;font-size:12px">'
         f"If you weren't expecting this, you can ignore this email.</p>"

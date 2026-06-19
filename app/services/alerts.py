@@ -58,6 +58,7 @@ class AlertPrefs:
     signups_drop_pct: float = 0.5
     signups_min_previous: int = 5
     revenue_drop_pct: float = 0.2
+    new_issue_cap: int = 5
 
     @classmethod
     def from_settings(cls, settings=None) -> "AlertPrefs":
@@ -68,6 +69,7 @@ class AlertPrefs:
             signups_drop_pct=s.alert_signups_drop_pct,
             signups_min_previous=s.alert_signups_min_previous,
             revenue_drop_pct=s.alert_revenue_drop_pct,
+            new_issue_cap=s.alert_new_issue_cap,
         )
 
     @classmethod
@@ -90,6 +92,7 @@ class AlertPrefs:
             signups_drop_pct=row.signups_drop_pct if row.signups_drop_pct is not None else base.signups_drop_pct,
             signups_min_previous=base.signups_min_previous,
             revenue_drop_pct=row.revenue_drop_pct if row.revenue_drop_pct is not None else base.revenue_drop_pct,
+            new_issue_cap=base.new_issue_cap,
         )
 
 
@@ -128,7 +131,7 @@ def evaluate_alerts(snapshot: dict, prefs: AlertPrefs | None = None) -> list[dic
 
     # New error issues (cap a few per run so a burst can't blast inboxes).
     if p.new_issue_enabled:
-        for group in (snapshot.get("new_issues") or [])[:5]:
+        for group in (snapshot.get("new_issues") or [])[: p.new_issue_cap]:
             alerts.append({
                 "type": "new_issue",
                 "dedupe_key": str(group["id"]),
@@ -230,11 +233,15 @@ async def already_alerted(db: AsyncSession, pipeline_id: str, alert_type: str, d
 
 # ── Snapshot gathering + orchestration ──────────────────────────────────────
 
-async def _gather_snapshot(pipeline_id: str, user_id: str, product_name: str, db: AsyncSession, now: datetime) -> dict:
+async def _gather_snapshot(pipeline_id: str, user_id: str, product_name: str, db: AsyncSession, now: datetime, settings=None) -> dict:
+    s = settings or get_settings()
+    baseline_days = s.alert_error_baseline_days
+    signups_window = s.alert_signups_window_days
     day_ago = now - timedelta(days=1)
-    week_ago = now - timedelta(days=7)
-    prev_week = now - timedelta(days=14)
-    baseline_start = now - timedelta(days=8)
+    week_ago = now - timedelta(days=signups_window)
+    prev_week = now - timedelta(days=2 * signups_window)
+    # Baseline spans the `baseline_days` ending yesterday (today is the spike day).
+    baseline_start = now - timedelta(days=1 + baseline_days)
 
     new_issues = list((await db.execute(
         select(PortfolioErrorGroup).where(
@@ -287,7 +294,7 @@ async def _gather_snapshot(pipeline_id: str, user_id: str, product_name: str, db
         "today": now.date().isoformat(),
         "week": f"{now.isocalendar().year}-W{now.isocalendar().week:02d}",
         "new_issues": [{"id": g.id, "title": g.title, "level": g.level} for g in new_issues],
-        "error": {"current": current_errors, "baseline": prior_errors / 7.0},
+        "error": {"current": current_errors, "baseline": prior_errors / baseline_days},
         "signups": {"current": this_week_signups, "previous": prev_week_signups},
         "revenue": {
             "current_mrr": revenue.current_mrr_cents if revenue else None,
@@ -327,7 +334,7 @@ async def run_alert_checks() -> int:
         for pipeline_id, uid in products:
             try:
                 prefs = AlertPrefs.resolve(await alert_settings_row(db, pipeline_id), settings)
-                snapshot = await _gather_snapshot(pipeline_id, uid, names.get(pipeline_id, "Your product"), db, now)
+                snapshot = await _gather_snapshot(pipeline_id, uid, names.get(pipeline_id, "Your product"), db, now, settings)
                 for alert in evaluate_alerts(snapshot, prefs):
                     if await already_alerted(db, pipeline_id, alert["type"], alert["dedupe_key"]):
                         continue

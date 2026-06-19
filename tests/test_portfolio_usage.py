@@ -127,6 +127,9 @@ async def test_get_usage_metrics(client, fake_db, auth_headers):
     body = resp.json()["data"]
     assert body["connected"] is True
     assert body["totalEvents"] == 5
+    # Window is echoed from config so the frontend renders labels from data.
+    assert body["windowDays"] == 14
+    assert body["growthWindowDays"] == 7
     assert body["summary14d"]["pageviews"] == 4
     assert body["summary14d"]["signups"] == 1
     assert body["summary14d"]["visitors"] == 2
@@ -257,6 +260,34 @@ async def test_complete_revenue_connect_marks_source_connected(client, fake_db, 
     assert source.oauth_state is None
     assert source.oauth_state_expires_at is None
     assert source.connected_at is not None
+
+
+async def test_usage_window_is_config_driven(client, fake_db, auth_headers, monkeypatch):
+    # Changing the configured window flows straight through to the response.
+    monkeypatch.setattr(portfolio_routes.settings, "analytics_usage_window_days", 7)
+    monkeypatch.setattr(portfolio_routes.settings, "analytics_growth_window_days", 3)
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    source = make_usage_source(pipeline_id=product.id)
+    fake_db.stub(
+        execute=[
+            FakeResult(rows=[product]),
+            FakeResult(rows=[source]),
+            FakeResult(rows=[]),  # window counts
+            FakeResult(rows=[]),  # daily
+            FakeResult(rows=[]),  # recent events
+            FakeResult(rows=[]),  # funnel
+            FakeResult(rows=[]),  # retention first-seen
+            FakeResult(rows=[]),  # retention active-days
+        ],
+        scalar=[0, 0, 0, 0, 0, 0, 0],
+    )
+
+    resp = await client.get(f"/portfolio/{product.id}/usage", headers=auth_headers)
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["windowDays"] == 7
+    assert body["growthWindowDays"] == 3
 
 
 async def test_get_revenue_metrics_placeholder(client, fake_db, auth_headers):
