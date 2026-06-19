@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from app.db import get_db, AsyncSessionLocal
 from app.auth import get_uid
 from app.config import PIPELINE_VERSION
-from app.models import Pipeline, Cluster, ClusterItem, ClusterSignal, Issue, Team, TeamMember
+from app.models import Pipeline, Cluster, ClusterItem, ClusterSignal, Issue, Team, TeamMember, Problem, Task
 from app.routes.clusters import (
     serialize_evidence_item,
     load_cluster_items,
@@ -170,22 +170,6 @@ def _serialize_signal_cluster(cluster: Cluster | None, signal: ClusterSignal | N
     }
 
 
-def _serialize_signal_cluster_workspace(cluster: Cluster, items: list[ClusterItem], signal: ClusterSignal | None = None) -> dict:
-    dates = sorted(d for it in items if (d := _iso_or_none(_item_observed(it))))
-    signal_total = signal.total_posts if signal and signal.total_posts is not None else None
-    return {
-        **_serialize_signal_cluster(cluster, signal),
-        "opportunityType": _most_common(it.opportunity_type for it in items),
-        "opportunityDomain": _most_common(it.opportunity_domain for it in items),
-        "postCount": signal_total if signal_total is not None else len(items),
-        "commentCount": sum(it.num_comments or 0 for it in items),
-        "averageUpvoteRatio": _avg([_upvote_ratio(it) for it in items]),
-        "authorCount": signal.author_count if signal and signal.author_count is not None else cluster.author_count,
-        "communityCount": signal.community_count if signal and signal.community_count is not None else cluster.community_count,
-        "dateRange": {"from": dates[0] if dates else None, "to": dates[-1] if dates else None},
-    }
-
-
 def _most_common(values):
     from collections import Counter
     cleaned = [v for v in values if v]
@@ -201,129 +185,94 @@ def _workspace_metrics(items: list[ClusterItem]) -> dict:
     }
 
 
-def _top_problem_statements_from_items(items: list[ClusterItem]) -> list[dict]:
+# Signal fields counted for the completeness fraction (non-null / total).
+_SIGNAL_COMPLETENESS_FIELDS = (
+    "signal_score", "recency", "momentum_7d", "momentum_30d", "momentum_90d",
+    "total_posts", "avg_comments", "avg_votes",
+)
+
+# The Supabase cluster_signal_status enum, surfaced verbatim. The API status set
+# matches the DB enum exactly (no lossy collapse) so a healthy "ready" signal is
+# never misreported. Kept here to validate values and guard a malformed read.
+SIGNAL_STATUSES = frozenset({"pending", "processing", "ready", "stale", "failed"})
+
+
+def _signal_status(raw: str | None) -> str:
+    value = (raw or "").strip().lower()
+    return value if value in SIGNAL_STATUSES else "failed"
+
+
+def _signal_mode(signal: ClusterSignal) -> str:
+    """Derive the workspace mode from the published values themselves."""
+    score = signal.signal_score
+    m7 = signal.momentum_7d
+    if score is not None and score >= 0.6 and m7 is not None and m7 > 0:
+        return "active"
+    if (score is not None and score < 0.3) or (m7 is not None and m7 < 0):
+        return "dormant"
+    return "forming"
+
+
+def _signal_completeness(signal: ClusterSignal) -> float:
+    present = sum(1 for field in _SIGNAL_COMPLETENESS_FIELDS if getattr(signal, field) is not None)
+    return round(present / len(_SIGNAL_COMPLETENESS_FIELDS), 4)
+
+
+def _signal_post_volume_by_week(raw) -> list[dict] | None:
+    if not isinstance(raw, list):
+        return None
     rows: list[dict] = []
-    for it in items:
-        statement = (it.problem_statement or "").strip()
-        if statement:
-            rows.append({
-                "postId": it.id,
-                "post_id": it.id,
-                "problemStatement": statement,
-                "problem_statement": statement,
-                "title": it.title,
-                "score": it.score,
-            })
-    rows.sort(key=lambda row: (row.get("score") is not None, row.get("score") or 0), reverse=True)
-    return rows[:5]
-
-
-def _source_communities_from_items(items: list[ClusterItem]) -> list[str]:
-    return sorted({
-        value.strip()
-        for it in items
-        for value in [it.community or it.platform]
-        if value and value.strip()
-    })
-
-
-def _normalize_top_problem_statements(raw: list | None, items: list[ClusterItem]) -> list[dict]:
-    if isinstance(raw, list) and raw:
-        normalized: list[dict] = []
-        for index, row in enumerate(raw):
-            if not isinstance(row, dict):
+    for item in raw:
+        if isinstance(item, dict) and item.get("week") is not None and item.get("count") is not None:
+            try:
+                rows.append({"week": str(item["week"]), "count": int(item["count"])})
+            except (TypeError, ValueError):
                 continue
-            statement = row.get("problem_statement") or row.get("problemStatement")
-            if not statement:
-                continue
-            post_id = row.get("post_id") or row.get("postId")
-            normalized.append({
-                **row,
-                "id": str(post_id or index),
-                "postId": post_id,
-                "post_id": post_id,
-                "problemStatement": statement,
-                "problem_statement": statement,
-            })
-        if normalized:
-            return normalized[:5]
-    return _top_problem_statements_from_items(items)
+    return rows or None
 
 
-def _derive_signal_status(mode: str, signal: ClusterSignal | None, completeness: dict) -> str:
-    if mode == "singleton":
-        return "singleton"
-    if signal is None:
-        return "missing"
-    raw = (signal.status or "").lower()
-    if raw == "failed":
-        return "failed"
-    if raw in {"pending", "processing", "stale"}:
-        return raw
-    if not (completeness["score"] and completeness["itemCount"]):
-        return "partial"
-    if raw in {"ready", "generated"}:
-        return raw
-    return "partial"
+def _signal_source_communities(raw) -> list[str] | None:
+    if not isinstance(raw, list):
+        return None
+    values = [str(value).strip() for value in raw if value is not None and str(value).strip()]
+    return values or None
 
 
-def _serialize_signal_payload(
-    *,
-    mode: str,
-    cluster: Cluster | None,
-    signal: ClusterSignal | None,
-    items: list[ClusterItem],
-) -> dict:
-    metrics = _workspace_metrics(items)
-    post_volume_by_week = signal.post_volume_by_week if signal and isinstance(signal.post_volume_by_week, list) else []
-    source_communities = (
-        signal.source_communities
-        if signal and isinstance(signal.source_communities, list) and signal.source_communities
-        else _source_communities_from_items(items)
-    )
-    top_problem_statements = _normalize_top_problem_statements(
-        signal.top_problem_statements if signal else None,
-        items,
-    )
-    total_posts = signal.total_posts if signal and signal.total_posts is not None else len(items)
-    author_count = signal.author_count if signal and signal.author_count is not None else (
-        cluster.author_count if cluster and cluster.author_count is not None else len({it.author for it in items if it.author})
-    )
-    community_count = signal.community_count if signal and signal.community_count is not None else (
-        cluster.community_count if cluster and cluster.community_count is not None else len(source_communities)
-    )
-    platform_count = signal.platform_count if signal and signal.platform_count is not None else len({it.platform for it in items if it.platform})
-    score = _effective_signal_score(cluster, signal)
-    completeness = {
-        "score": score is not None,
-        "momentum": bool(signal and any(value is not None for value in (signal.momentum_7d, signal.momentum_30d, signal.momentum_90d))),
-        "volume": bool(post_volume_by_week),
-        "evidence": bool(top_problem_statements),
-        "sources": bool(source_communities),
-        "itemCount": total_posts > 1,
-    }
-    status = _derive_signal_status(mode, signal, completeness)
+def _signal_top_problem_statements(raw) -> list[dict] | None:
+    """Expose only the problem_statement text — strip post_id and any other keys."""
+    if not isinstance(raw, list):
+        return None
+    statements: list[dict] = []
+    for item in raw:
+        if isinstance(item, dict):
+            text = item.get("problem_statement") or item.get("problemStatement")
+            if text:
+                statements.append({"problem_statement": str(text)})
+    return statements or None
+
+
+def _serialize_cluster_signal(signal: ClusterSignal) -> dict:
+    """Flatten a cluster_signals row into the Signal page contract (camelCase)."""
     return {
-        "mode": mode,
-        "status": status,
-        "score": score,
-        "recency": signal.recency if signal else None,
-        "momentum7d": signal.momentum_7d if signal else None,
-        "momentum30d": signal.momentum_30d if signal else None,
-        "momentum90d": signal.momentum_90d if signal else None,
-        "postVolumeByWeek": post_volume_by_week,
-        "totalPosts": total_posts,
-        "authorCount": author_count,
-        "communityCount": community_count,
-        "platformCount": platform_count,
-        "sourceCommunities": source_communities,
-        "avgComments": signal.avg_comments if signal and signal.avg_comments is not None else (metrics["commentCount"] / total_posts if total_posts else None),
-        "avgVotes": signal.avg_votes if signal and signal.avg_votes is not None else metrics["avgSourceScore"],
-        "topProblemStatements": top_problem_statements,
-        "generatedAt": _iso_or_none(signal.generated_at) if signal else None,
-        "lastError": signal.last_error if signal else None,
-        "inputFingerprint": signal.input_fingerprint if signal else None,
-        "completeness": completeness,
+        "clusterId": signal.cluster_id,
+        "signalScore": signal.signal_score,
+        "recency": signal.recency,
+        "momentum7d": signal.momentum_7d,
+        "momentum30d": signal.momentum_30d,
+        "momentum90d": signal.momentum_90d,
+        "totalPosts": signal.total_posts,
+        "authorCount": signal.author_count,
+        "communityCount": signal.community_count,
+        "platformCount": signal.platform_count,
+        "sourceCommunities": _signal_source_communities(signal.source_communities),
+        "avgComments": signal.avg_comments,
+        "avgVotes": signal.avg_votes,
+        "postVolumeByWeek": _signal_post_volume_by_week(signal.post_volume_by_week),
+        "topProblemStatements": _signal_top_problem_statements(signal.top_problem_statements),
+        "status": _signal_status(signal.status),
+        "generatedAt": _iso_or_none(signal.generated_at),
+        "mode": _signal_mode(signal),
+        "completeness": _signal_completeness(signal),
     }
 
 
@@ -346,6 +295,25 @@ async def _get_active_pipeline_card(pipeline_id: str, db: AsyncSession, uid: str
     card = result.scalar_one_or_none()
     if not card:
         raise HTTPException(status_code=404, detail="Active pipeline card not found")
+    return card
+
+
+async def _get_signal_pipeline_card(pipeline_id: str, db: AsyncSession, uid: str) -> Pipeline:
+    """Resolve a user's card for the Signal view.
+
+    Unlike :func:`_get_active_pipeline_card`, this also serves *launched* cards —
+    a launched opportunity keeps its published signal — and only excludes removed
+    cards. Scoped to the Signal endpoint on purpose.
+    """
+    card = (await db.execute(
+        select(Pipeline).where(
+            Pipeline.id == pipeline_id,
+            Pipeline.user_id == uid,
+            Pipeline.removed_at == None,
+        )
+    )).scalar_one_or_none()
+    if not card:
+        raise HTTPException(status_code=404, detail="Pipeline card not found")
     return card
 
 
@@ -392,19 +360,6 @@ async def _items_for_card(card: Pipeline, db: AsyncSession) -> tuple[Cluster | N
     else:
         items = []
     return cluster, items
-
-
-async def _cluster_signal(cluster_id: int | None, db: AsyncSession) -> ClusterSignal | None:
-    if cluster_id is None:
-        return None
-    try:
-        return (await db.execute(
-            select(ClusterSignal).where(ClusterSignal.cluster_id == cluster_id)
-        )).scalar_one_or_none()
-    except SQLAlchemyError:
-        await db.rollback()
-        logger.warning("cluster_signals unavailable for pipeline signal cluster %s", cluster_id, exc_info=True)
-        return None
 
 
 def _csv_value(value):
@@ -594,6 +549,17 @@ async def _fetch_issue_counts_for_cards(cards: list[Pipeline], db: AsyncSession)
     return counts
 
 
+async def _sync_issue_team_for_card(card: Pipeline, team_id: str | None, db: AsyncSession) -> None:
+    issues = list((await db.execute(
+        select(Issue).where(Issue.pipeline_id == card.id)
+    )).scalars().all())
+    now = datetime.now(timezone.utc)
+    for issue in issues:
+        issue.team_id = team_id
+        issue.assignee_id = None
+        issue.updated_at = now
+
+
 def _serialize_cards(
     cards: list[Pipeline],
     posts_map: dict[str, list[dict]],
@@ -674,6 +640,67 @@ async def _find_watch_card(uid: str, cluster_id: str, db: AsyncSession) -> Pipel
     )).scalar_one_or_none()
 
 
+SEED_BREAKDOWN_LIMIT = 10
+
+
+def _dedupe_problem_items(items: list[ClusterItem]) -> list[ClusterItem]:
+    """Top-scored item per distinct ``problem_statement``.
+
+    ``items`` must already be score-desc. Mirrors ``distinct_solution_angles``'
+    dedupe pattern but keys on ``problem_statement`` so a problem can be seeded
+    even when it has no ``solution_angle``.
+    """
+    seen: dict[str, ClusterItem] = {}
+    for it in items:
+        statement = (it.problem_statement or "").strip()
+        if not statement:
+            continue
+        key = statement.lower()
+        if key not in seen:
+            seen[key] = it
+    return list(seen.values())
+
+
+async def _seed_breakdown_from_cluster(card: Pipeline, cluster_id: int, uid: str, db: AsyncSession) -> None:
+    """Seed problems (and their tasks) for a freshly watched cluster card from the
+    cluster's ``cluster_items`` problem_statement / solution_angle.
+
+    Idempotent: no-op if the pipeline already has any problems. All seeded rows
+    are written in a single transaction.
+    """
+    existing = await db.scalar(
+        select(func.count()).select_from(Problem).where(Problem.pipeline_id == card.id)
+    )
+    if existing:
+        return
+
+    items = await load_cluster_items(db, cluster_id, limit=SIGNAL_BRIEF_SCAN)
+    deduped = _dedupe_problem_items(items)[:SEED_BREAKDOWN_LIMIT]
+    if not deduped:
+        return
+
+    for index, it in enumerate(deduped):
+        problem = Problem(
+            pipeline_id=card.id,
+            user_id=uid,
+            title=(it.problem_statement or "").strip(),
+            source_post_id=it.source_item_id,
+            position=index,
+        )
+        db.add(problem)
+        angle = (it.solution_angle or "").strip()
+        if angle:
+            db.add(Task(
+                pipeline_id=card.id,
+                user_id=uid,
+                title=angle,
+                problem_id=problem.id,
+                position=index,
+                status="todo",
+            ))
+    await db.commit()
+
+
 @router.post("/watch")
 async def watch_cluster(
     body: WatchBody,
@@ -681,7 +708,9 @@ async def watch_cluster(
     uid: str = Depends(get_uid),
 ):
     """Add a cluster to the user's pipeline at the Watching stage. The card is
-    seeded with the cluster's cluster_items ids. Idempotent."""
+    seeded with the cluster's cluster_items ids, and (on first watch) its
+    Breakdown problems / tasks from each item's problem_statement /
+    solution_angle. Idempotent."""
     existing = await _find_watch_card(uid, body.cluster_id, db)
     if existing:
         return {"is_watched": True, "pipeline_id": str(existing.id)}
@@ -720,6 +749,7 @@ async def watch_cluster(
     db.add(card)
     await db.commit()
     await db.refresh(card)
+    await _seed_breakdown_from_cluster(card, cluster_int_id, uid, db)
     return {"is_watched": True, "pipeline_id": str(card.id)}
 
 
@@ -744,52 +774,33 @@ async def get_pipeline_signal(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
-    """Signal workspace anchored to an active user pipeline card."""
-    card = await _get_active_pipeline_card(pipeline_id, db, uid)
-    cluster, items = await _items_for_card(card, db)
-    signal = await _cluster_signal(cluster.id if cluster else None, db)
-    if cluster:
-        mode = "cluster" if signal else "forming"
-    elif len(items) == 1:
-        mode = "singleton"
-    else:
-        mode = "custom"
+    """Signal workspace for a pipeline card: the card's cluster's published
+    cluster_signals payload.
 
-    pipeline_payload = {
-        "id": card.id,
-        "name": card.name,
-        "notes": card.notes,
-        "sourceClusterId": card.source_cluster_id,
-        "stage": card.stage,
-    }
+    Cluster-anchored cards only. Serves active *and* launched cards (only removed
+    cards are excluded). This reads real signal data and fails loudly rather than
+    degrading:
+      * 404 — card not found / removed, card has no source cluster, or the
+        cluster has no cluster_signals row yet.
+      * 503 — the cluster_signals read itself failed (logged at ERROR).
+    """
+    card = await _get_signal_pipeline_card(pipeline_id, db, uid)
+    cluster_id = _cluster_id_from_card(card)
+    if cluster_id is None:
+        raise HTTPException(status_code=404, detail="Pipeline card has no source cluster")
 
-    if cluster:
-        return {
-            "pipeline": pipeline_payload,
-            "mode": mode,
-            "cluster": _serialize_signal_cluster_workspace(cluster, items, signal),
-            "signal": _serialize_signal_payload(mode=mode, cluster=cluster, signal=signal, items=items),
-            "metrics": _workspace_metrics(items),
-            "analytics": {
-                "sourceBreakdown": cluster.source_breakdown or [],
-                "postVolumeByDate": cluster.post_volume_by_date or [],
-            },
-            "availability": {"clusterAnalytics": True, "brief": True},
-            "problemStatement": representative_problem_statement(items),
-            "posts": [_serialize_signal_post(it) for it in items],
-        }
+    try:
+        signal = (await db.execute(
+            select(ClusterSignal).where(ClusterSignal.cluster_id == cluster_id)
+        )).scalar_one_or_none()
+    except SQLAlchemyError:
+        logger.error("cluster_signals read failed for cluster %s", cluster_id, exc_info=True)
+        raise HTTPException(status_code=503, detail="Signal store unavailable")
 
-    return {
-        "pipeline": pipeline_payload,
-        "mode": mode,
-        "cluster": None,
-        "signal": _serialize_signal_payload(mode=mode, cluster=None, signal=None, items=items),
-        "metrics": _workspace_metrics(items),
-        "analytics": None,
-        "availability": {"clusterAnalytics": False, "brief": False},
-        "problemStatement": representative_problem_statement(items),
-        "posts": [_serialize_signal_post(it) for it in items],
-    }
+    if signal is None:
+        raise HTTPException(status_code=404, detail="No signal for this cluster")
+
+    return _serialize_cluster_signal(signal)
 
 
 def _evidence_scope(card: Pipeline, cluster_id: int | None):
@@ -1064,6 +1075,10 @@ async def patch_pipeline(
         raise HTTPException(status_code=404, detail="Team not found")
 
     post_ids_changed = "post_ids" in updates
+    team_changed = "team_id" in updates and updates["team_id"] != card.team_id
+
+    if team_changed:
+        await _sync_issue_team_for_card(card, updates["team_id"], db)
 
     for field, value in updates.items():
         setattr(card, field, value)

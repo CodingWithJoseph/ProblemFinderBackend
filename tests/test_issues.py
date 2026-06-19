@@ -67,6 +67,52 @@ async def test_create_pipeline_issue_inherits_project_team(client, fake_db, auth
     assert any(isinstance(obj, Issue) and obj.team_id == team.id for obj in fake_db.added)
 
 
+async def test_create_issue_accepts_assignee_from_project_team(client, fake_db, auth_headers):
+    team = make_team()
+    member = make_team_member(team_id=team.id, display_name="Alex Builder")
+    pipeline = make_pipeline(team_id=team.id)
+    fake_db.stub(execute=[
+        FakeResult(rows=[pipeline]),  # _require_pipeline
+        FakeResult(rows=[team]),      # _require_team
+        FakeResult(rows=[member]),    # _require_assignee
+        FakeResult(rows=[pipeline]),  # response project context
+        FakeResult(rows=[team]),      # response team context
+        FakeResult(rows=[member]),    # response assignee context
+    ])
+
+    resp = await client.post(
+        "/issues",
+        json={"title": "Validate pricing", "pipeline_id": pipeline.id, "assignee_id": member.id},
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["assigneeId"] == member.id
+    assert body["assignee"]["displayName"] == "Alex Builder"
+    assert any(isinstance(obj, Issue) and obj.assignee_id == member.id for obj in fake_db.added)
+
+
+async def test_create_issue_rejects_assignee_outside_project_team(client, fake_db, auth_headers):
+    team = make_team()
+    pipeline = make_pipeline(team_id=team.id)
+    fake_db.stub(execute=[
+        FakeResult(rows=[pipeline]),  # _require_pipeline
+        FakeResult(rows=[team]),      # _require_team
+        FakeResult(rows=[]),          # _require_assignee
+    ])
+
+    resp = await client.post(
+        "/issues",
+        json={"title": "Validate pricing", "pipeline_id": pipeline.id, "assignee_id": "wrong-member"},
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Assignee must belong to the issue team"
+    assert fake_db.added == []
+
+
 async def test_list_issues(client, fake_db, auth_headers):
     issue = make_issue()
     fake_db.stub(execute=[
@@ -130,6 +176,30 @@ async def test_update_issue_title_summary_status(client, fake_db, auth_headers):
     assert issue.title == "Validate problems"
     assert issue.closed_at is not None
     assert fake_db.commit_count == 1
+
+
+async def test_update_issue_assignee(client, fake_db, auth_headers):
+    team = make_team()
+    pipeline = make_pipeline(team_id=team.id)
+    member = make_team_member(team_id=team.id, display_name="Jordan")
+    issue = make_issue(pipeline_id=pipeline.id, team_id=team.id)
+    fake_db.stub(execute=[
+        FakeResult(rows=[issue]),
+        FakeResult(rows=[member]),
+        FakeResult(rows=[pipeline]),
+        FakeResult(rows=[team]),
+        FakeResult(rows=[member]),
+    ])
+
+    resp = await client.patch(
+        f"/issues/{issue.id}",
+        json={"assignee_id": member.id},
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 200
+    assert issue.assignee_id == member.id
+    assert resp.json()["data"]["assignee"]["displayName"] == "Jordan"
 
 
 async def test_create_and_list_comments(client, fake_db, auth_headers):

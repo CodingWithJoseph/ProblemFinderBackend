@@ -77,6 +77,15 @@ class Cluster(Base):
 
 
 class ClusterSignal(Base):
+    """Read model for the founder-facing ``cluster_signals`` payload.
+
+    Mirrors the live Supabase schema column-for-column (verified via
+    ``information_schema``): all 21 columns are mapped, including
+    ``input_fingerprint`` / ``last_error`` and the ``created_at`` / ``updated_at``
+    bookkeeping timestamps (NOT NULL, ``now()`` defaults). ``status`` is a
+    ``cluster_signal_status`` enum in Postgres; mapping it as text is read-safe.
+    """
+
     __tablename__ = "cluster_signals"
 
     cluster_id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -98,6 +107,8 @@ class ClusterSignal(Base):
     avg_comments: Mapped[float | None] = mapped_column(Float, nullable=True)
     avg_votes: Mapped[float | None] = mapped_column(Float, nullable=True)
     top_problem_statements: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
 
 
 class ClusterItem(Base):
@@ -263,6 +274,7 @@ class Issue(Base):
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     team_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("teams.id", ondelete="SET NULL"), nullable=True, index=True)
+    assignee_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("team_members.id", ondelete="SET NULL"), nullable=True, index=True)
     pipeline_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="SET NULL"), nullable=True, index=True)
     parent_issue_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("issues.id", ondelete="CASCADE"), nullable=True, index=True)
     title: Mapped[str] = mapped_column(Text, nullable=False)
@@ -283,6 +295,62 @@ class IssueComment(Base):
     issue_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("issues.id", ondelete="CASCADE"), nullable=False, index=True)
     user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class PortfolioUsageSource(Base):
+    __tablename__ = "portfolio_usage_sources"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    public_key: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False, default="Website usage snippet")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="connected")
+    product_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    allowed_domain: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    last_seen_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+
+class PortfolioUsageEvent(Base):
+    __tablename__ = "portfolio_usage_events"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("portfolio_usage_sources.id", ondelete="SET NULL"), nullable=True, index=True)
+    event_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    visitor_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    referrer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    event_metadata: Mapped[dict | None] = mapped_column("metadata", JSONB, nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
+    received_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class PortfolioRevenueSource(Base):
+    __tablename__ = "portfolio_revenue_sources"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(50), nullable=False, default="stripe")
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="not_connected")
+    provider_account_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    provider_account_label: Mapped[str | None] = mapped_column(Text, nullable=True)
+    current_mrr_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    new_customers_30d: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    churned_customers_30d: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    churn_rate_30d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    revenue_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    connected_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    oauth_state: Mapped[str | None] = mapped_column(Text, nullable=True)
+    oauth_state_expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 

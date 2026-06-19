@@ -43,6 +43,9 @@ os.environ.setdefault("OPENAI_API_KEY", "sk-test")
 os.environ.setdefault("ALLOWED_ORIGINS", "http://localhost:3000")
 
 sys.modules.setdefault("firebase_admin", MagicMock())
+stripe_stub = MagicMock()
+stripe_stub.OAuth.token = MagicMock(return_value={"stripe_user_id": "acct_test"})
+sys.modules.setdefault("stripe", stripe_stub)
 
 from fastapi import FastAPI  # noqa: E402
 
@@ -61,10 +64,14 @@ from app.models import (  # noqa: E402
     TeamMember,
     Issue,
     IssueComment,
+    PortfolioUsageSource,
+    PortfolioUsageEvent,
+    PortfolioRevenueSource,
 )
 from app.routes.clusters import router as clusters_router  # noqa: E402
 from app.routes.problems import router as problems_router  # noqa: E402
 from app.routes.pipeline import router as pipeline_router  # noqa: E402
+from app.routes.portfolio import public_router as portfolio_public_router  # noqa: E402
 from app.routes.portfolio import router as portfolio_router  # noqa: E402
 from app.routes.tasks import router as tasks_router  # noqa: E402
 from app.routes.teams import router as teams_router  # noqa: E402
@@ -368,6 +375,7 @@ def make_issue(**kw):
         id=str(uuid.uuid4()),
         user_id=TEST_UID,
         team_id=None,
+        assignee_id=None,
         pipeline_id=None,
         parent_issue_id=None,
         title="Analyze signals",
@@ -395,6 +403,68 @@ def make_issue_comment(**kw):
     )
     defaults.update(kw)
     return IssueComment(**defaults)
+
+
+def make_usage_source(**kw):
+    defaults = dict(
+        id=str(uuid.uuid4()),
+        pipeline_id=str(uuid.uuid4()),
+        user_id=TEST_UID,
+        public_key="usage_public_key",
+        name="Website usage snippet",
+        status="connected",
+        product_url=None,
+        allowed_domain=None,
+        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        last_seen_at=None,
+    )
+    defaults.update(kw)
+    return PortfolioUsageSource(**defaults)
+
+
+def make_usage_event(**kw):
+    defaults = dict(
+        id=str(uuid.uuid4()),
+        pipeline_id=str(uuid.uuid4()),
+        source_id=None,
+        event_type="pageview",
+        visitor_id="visitor-1",
+        session_id="session-1",
+        user_ref=None,
+        url="https://example.com/",
+        referrer=None,
+        event_metadata={},
+        occurred_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        received_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+    )
+    defaults.update(kw)
+    return PortfolioUsageEvent(**defaults)
+
+
+def make_revenue_source(**kw):
+    defaults = dict(
+        id=str(uuid.uuid4()),
+        pipeline_id=str(uuid.uuid4()),
+        user_id=TEST_UID,
+        provider="stripe",
+        status="not_connected",
+        provider_account_id=None,
+        provider_account_label=None,
+        current_mrr_cents=None,
+        new_customers_30d=None,
+        churned_customers_30d=None,
+        churn_rate_30d=None,
+        revenue_snapshot={},
+        connected_at=None,
+        last_synced_at=None,
+        oauth_state=None,
+        oauth_state_expires_at=None,
+        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+    )
+    defaults.update(kw)
+    return PortfolioRevenueSource(**defaults)
 
 
 def make_problem(**kw):
@@ -434,6 +504,7 @@ def app(fake_db):
     application.include_router(problems_router)
     application.include_router(pipeline_router)
     application.include_router(portfolio_router)
+    application.include_router(portfolio_public_router)
     application.include_router(tasks_router)
     application.include_router(teams_router)
     application.include_router(issues_router)
