@@ -5,12 +5,19 @@ from conftest import (
     FakeResult,
     make_pipeline,
     make_revenue_source,
+    make_subscription,
     make_usage_event,
     make_usage_source,
 )
 from app.routes import portfolio as portfolio_routes
 from app.routes.portfolio import _compute_retention
-from app.models import PortfolioRevenueSource, PortfolioUsageEvent, PortfolioUsageSource
+from app.models import (
+    Pipeline,
+    PlanEnum,
+    PortfolioRevenueSource,
+    PortfolioUsageEvent,
+    PortfolioUsageSource,
+)
 
 
 def test_compute_retention_d1_d7():
@@ -183,6 +190,57 @@ async def test_get_usage_metrics_funnel_and_growth(client, fake_db, auth_headers
     assert retention["windowDays"] == 30
     assert retention["d1"]["rate"] is None  # no retention rows stubbed
     assert retention["cohorts"] == []
+
+
+async def test_admin_can_create_monitored_product(client, fake_db, auth_headers):
+    fake_db.stub(
+        scalar=[make_subscription(plan=PlanEnum.admin)],  # admin gate
+        execute=[FakeResult(rows=[])],                    # issue counts for the new card
+    )
+
+    resp = await client.post(
+        "/portfolio/products",
+        headers=auth_headers,
+        json={"name": "Immensity", "product_url": "https://www.useimmensity.com/app"},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["name"] == "Immensity"
+    assert body["launchedAt"] is not None
+    # Usage source is auto-created and live, with the domain derived from the URL.
+    assert body["usageSource"]["publicKey"]
+    assert body["usageSource"]["allowedDomain"] == "useimmensity.com"
+    assert body["revenueSource"] is None
+    # A launched Pipeline and its usage source were persisted together.
+    product = next(o for o in fake_db.added if isinstance(o, Pipeline))
+    assert product.launched_at is not None
+    assert any(isinstance(o, PortfolioUsageSource) and o.pipeline_id == product.id for o in fake_db.added)
+
+
+async def test_non_admin_cannot_create_monitored_product(client, fake_db, auth_headers):
+    fake_db.stub(scalar=[make_subscription(plan=PlanEnum.pro)])
+
+    resp = await client.post(
+        "/portfolio/products",
+        headers=auth_headers,
+        json={"name": "X", "product_url": "https://x.com"},
+    )
+
+    assert resp.status_code == 403
+    assert not any(isinstance(o, Pipeline) for o in fake_db.added)
+
+
+async def test_create_monitored_product_requires_subscription(client, fake_db, auth_headers):
+    fake_db.stub(scalar=[None])  # no subscription row at all
+
+    resp = await client.post(
+        "/portfolio/products",
+        headers=auth_headers,
+        json={"name": "X", "product_url": "https://x.com"},
+    )
+
+    assert resp.status_code == 403
 
 
 async def test_create_revenue_source_for_launched_product(client, fake_db, auth_headers):

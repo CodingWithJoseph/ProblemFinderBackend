@@ -17,12 +17,14 @@ from app.auth import get_uid
 from app.config import get_settings
 from app.models import (
     Pipeline,
+    PlanEnum,
     PortfolioAlertSettings,
     PortfolioErrorEvent,
     PortfolioErrorGroup,
     PortfolioRevenueSource,
     PortfolioUsageEvent,
     PortfolioUsageSource,
+    Subscription,
 )
 from app.services.alerts import AlertPrefs, alert_settings_row
 from app.routes.pipeline import (
@@ -81,6 +83,13 @@ class UsageSourceUpdateBody(BaseModel):
 
 class RevenueSourceBody(BaseModel):
     provider: RevenueProvider = "stripe"
+
+
+class MonitoredProductBody(BaseModel):
+    # Admin direct-add: register a product to monitor by hand (name + URL),
+    # skipping the discovery pipeline entirely.
+    name: str = Field(min_length=1, max_length=200)
+    product_url: str = Field(min_length=1, max_length=2048)
 
 
 class AlertSettingsBody(BaseModel):
@@ -430,6 +439,69 @@ async def get_portfolio_product(
             **_serialize_cards([product], posts_map, teams_map, counts_map)[0],
             "usageSource": _serialize_usage_source(await _usage_source(pipeline_id, db)),
             "revenueSource": _serialize_revenue_source(await _revenue_source(pipeline_id, db)),
+        }
+    }
+
+
+async def require_admin_uid(
+    uid: str = Depends(get_uid),
+    db: AsyncSession = Depends(get_db),
+) -> str:
+    """Gate: the caller must be on the admin plan. Returns their uid."""
+    sub = await db.scalar(select(Subscription).where(Subscription.uid == uid))
+    if not sub or sub.plan != PlanEnum.admin:
+        raise HTTPException(status_code=403, detail="Admin plan required")
+    return uid
+
+
+@router.post("/products")
+async def create_monitored_product(
+    body: MonitoredProductBody,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(require_admin_uid),
+):
+    """Admin direct-add: create a launched product plus its usage source so
+    monitoring is live immediately, without going through discovery."""
+    now = _now()
+    name = _clean_text(body.name) or "Untitled product"
+    url = _clean_text(body.product_url)
+
+    product = Pipeline(
+        id=str(uuid.uuid4()),
+        user_id=uid,
+        name=name,
+        url=url,
+        launched_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(product)
+
+    source = PortfolioUsageSource(
+        id=str(uuid.uuid4()),
+        pipeline_id=product.id,
+        user_id=uid,
+        public_key=secrets.token_urlsafe(24),
+        status="connected",
+        product_url=url,
+        allowed_domain=_domain_from_url(url),
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(source)
+
+    await db.commit()
+    await db.refresh(product)
+    await db.refresh(source)
+
+    posts_map = await _fetch_posts_for_cards([product], db)
+    teams_map = await _fetch_teams_for_cards([product], db)
+    counts_map = await _fetch_issue_counts_for_cards([product], db)
+    return {
+        "data": {
+            **_serialize_cards([product], posts_map, teams_map, counts_map)[0],
+            "usageSource": _serialize_usage_source(source),
+            "revenueSource": None,
         }
     }
 
