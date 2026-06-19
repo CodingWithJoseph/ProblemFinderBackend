@@ -178,7 +178,7 @@ def _stripe_connect_redirect_url() -> str:
 
 def _stripe_connect_return_url(source: PortfolioRevenueSource, status: str) -> str:
     params = urlencode({"pipelineId": source.pipeline_id, "stripe": status})
-    return f"{settings.app_url.rstrip('/')}/dashboard/portfolio/setup?{params}"
+    return f"{settings.app_url.rstrip('/')}/dashboard/monitor/setup?{params}"
 
 
 def _stripe_value(obj: Any, key: str, default: Any = None) -> Any:
