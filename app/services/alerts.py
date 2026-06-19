@@ -19,6 +19,7 @@ orchestrator is thin glue around it.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
@@ -28,6 +29,7 @@ from app.config import get_settings
 from app.models import (
     Pipeline,
     PortfolioAlert,
+    PortfolioAlertSettings,
     PortfolioErrorEvent,
     PortfolioErrorGroup,
     PortfolioRevenueSource,
@@ -37,6 +39,58 @@ from app.models import (
 from app.services.email import email_service
 
 logger = logging.getLogger(__name__)
+
+
+# ── Effective preferences ────────────────────────────────────────────────────
+
+@dataclass
+class AlertPrefs:
+    """Effective per-product alert settings: which triggers are on and the
+    thresholds to use. Built by merging a product's saved row (if any) over the
+    global config defaults; the anti-noise minimum floors always stay global."""
+
+    new_issue_enabled: bool = True
+    error_spike_enabled: bool = True
+    signups_drop_enabled: bool = True
+    revenue_drop_enabled: bool = True
+    error_spike_multiplier: float = 3.0
+    error_spike_min: int = 5
+    signups_drop_pct: float = 0.5
+    signups_min_previous: int = 5
+    revenue_drop_pct: float = 0.2
+
+    @classmethod
+    def from_settings(cls, settings=None) -> "AlertPrefs":
+        s = settings or get_settings()
+        return cls(
+            error_spike_multiplier=s.alert_error_spike_multiplier,
+            error_spike_min=s.alert_error_spike_min,
+            signups_drop_pct=s.alert_signups_drop_pct,
+            signups_min_previous=s.alert_signups_min_previous,
+            revenue_drop_pct=s.alert_revenue_drop_pct,
+        )
+
+    @classmethod
+    def resolve(cls, row: PortfolioAlertSettings | None, settings=None) -> "AlertPrefs":
+        base = cls.from_settings(settings)
+        if row is None:
+            return base
+        # Coalesce booleans: a freshly created, not-yet-flushed row carries None
+        # for columns whose defaults only apply on INSERT.
+        def _on(value: bool | None) -> bool:
+            return True if value is None else value
+
+        return cls(
+            new_issue_enabled=_on(row.new_issue_enabled),
+            error_spike_enabled=_on(row.error_spike_enabled),
+            signups_drop_enabled=_on(row.signups_drop_enabled),
+            revenue_drop_enabled=_on(row.revenue_drop_enabled),
+            error_spike_multiplier=row.error_spike_multiplier if row.error_spike_multiplier is not None else base.error_spike_multiplier,
+            error_spike_min=base.error_spike_min,
+            signups_drop_pct=row.signups_drop_pct if row.signups_drop_pct is not None else base.signups_drop_pct,
+            signups_min_previous=base.signups_min_previous,
+            revenue_drop_pct=row.revenue_drop_pct if row.revenue_drop_pct is not None else base.revenue_drop_pct,
+        )
 
 
 # ── Detection (pure) ────────────────────────────────────────────────────────
@@ -62,27 +116,29 @@ def detect_revenue_drop(current_mrr: int | None, previous_mrr: int | None, *, dr
     return (previous_mrr - current_mrr) / previous_mrr >= drop_pct
 
 
-def evaluate_alerts(snapshot: dict, settings=None) -> list[dict]:
-    """Given a product snapshot, return the alerts that should fire.
+def evaluate_alerts(snapshot: dict, prefs: AlertPrefs | None = None) -> list[dict]:
+    """Given a product snapshot and its effective prefs, return the alerts that
+    should fire. Each alert is ``{"type", "dedupe_key", "context"}``. Pure: no I/O.
 
-    Each alert is ``{"type", "dedupe_key", "context"}``. Pure: no I/O.
+    Disabled triggers are skipped entirely.
     """
-    s = settings or get_settings()
+    p = prefs or AlertPrefs.from_settings()
     product = snapshot.get("product_name") or "Your product"
     alerts: list[dict] = []
 
     # New error issues (cap a few per run so a burst can't blast inboxes).
-    for group in (snapshot.get("new_issues") or [])[:5]:
-        alerts.append({
-            "type": "new_issue",
-            "dedupe_key": str(group["id"]),
-            "context": {"product": product, "title": group.get("title") or "New error", "level": group.get("level", "error")},
-        })
+    if p.new_issue_enabled:
+        for group in (snapshot.get("new_issues") or [])[:5]:
+            alerts.append({
+                "type": "new_issue",
+                "dedupe_key": str(group["id"]),
+                "context": {"product": product, "title": group.get("title") or "New error", "level": group.get("level", "error")},
+            })
 
     err = snapshot.get("error") or {}
-    if detect_error_spike(
+    if p.error_spike_enabled and detect_error_spike(
         int(err.get("current", 0)), float(err.get("baseline", 0.0)),
-        min_errors=s.alert_error_spike_min, multiplier=s.alert_error_spike_multiplier,
+        min_errors=p.error_spike_min, multiplier=p.error_spike_multiplier,
     ):
         alerts.append({
             "type": "error_spike",
@@ -91,9 +147,9 @@ def evaluate_alerts(snapshot: dict, settings=None) -> list[dict]:
         })
 
     sign = snapshot.get("signups") or {}
-    if detect_signups_drop(
+    if p.signups_drop_enabled and detect_signups_drop(
         int(sign.get("current", 0)), int(sign.get("previous", 0)),
-        min_previous=s.alert_signups_min_previous, drop_pct=s.alert_signups_drop_pct,
+        min_previous=p.signups_min_previous, drop_pct=p.signups_drop_pct,
     ):
         alerts.append({
             "type": "signups_drop",
@@ -102,7 +158,7 @@ def evaluate_alerts(snapshot: dict, settings=None) -> list[dict]:
         })
 
     rev = snapshot.get("revenue") or {}
-    if detect_revenue_drop(rev.get("current_mrr"), rev.get("previous_mrr"), drop_pct=s.alert_revenue_drop_pct):
+    if p.revenue_drop_enabled and detect_revenue_drop(rev.get("current_mrr"), rev.get("previous_mrr"), drop_pct=p.revenue_drop_pct):
         alerts.append({
             "type": "revenue_drop",
             "dedupe_key": snapshot["today"],
@@ -110,6 +166,12 @@ def evaluate_alerts(snapshot: dict, settings=None) -> list[dict]:
         })
 
     return alerts
+
+
+async def alert_settings_row(db: AsyncSession, pipeline_id: str) -> PortfolioAlertSettings | None:
+    return (await db.execute(
+        select(PortfolioAlertSettings).where(PortfolioAlertSettings.pipeline_id == pipeline_id)
+    )).scalar_one_or_none()
 
 
 # ── Rendering ───────────────────────────────────────────────────────────────
@@ -264,8 +326,9 @@ async def run_alert_checks() -> int:
 
         for pipeline_id, uid in products:
             try:
+                prefs = AlertPrefs.resolve(await alert_settings_row(db, pipeline_id), settings)
                 snapshot = await _gather_snapshot(pipeline_id, uid, names.get(pipeline_id, "Your product"), db, now)
-                for alert in evaluate_alerts(snapshot, settings):
+                for alert in evaluate_alerts(snapshot, prefs):
                     if await already_alerted(db, pipeline_id, alert["type"], alert["dedupe_key"]):
                         continue
                     recipient = resolve_owner_email(uid)
