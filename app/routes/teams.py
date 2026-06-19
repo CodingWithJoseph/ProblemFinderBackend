@@ -5,7 +5,7 @@ from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_uid
@@ -184,6 +184,27 @@ async def _members_for_team(team_id: str, db: AsyncSession) -> list[TeamMember]:
     )).scalars().all())
 
 
+async def _existing_member(
+    team_id: str, db: AsyncSession, *, user_id: str | None = None, email: str | None = None
+) -> TeamMember | None:
+    """A non-removed member of the team matching the given user_id or email
+    (email compared case-insensitively). Used to reject duplicate invites."""
+    conditions = []
+    if user_id:
+        conditions.append(TeamMember.user_id == user_id)
+    if email:
+        conditions.append(func.lower(TeamMember.email) == email.lower())
+    if not conditions:
+        return None
+    return (await db.execute(
+        select(TeamMember).where(
+            TeamMember.team_id == team_id,
+            TeamMember.status != "removed",
+            or_(*conditions),
+        )
+    )).scalars().first()
+
+
 async def _member_for_team(team_id: str, member_id: str, db: AsyncSession) -> TeamMember:
     member = (await db.execute(
         select(TeamMember).where(TeamMember.team_id == team_id, TeamMember.id == member_id)
@@ -310,6 +331,14 @@ async def add_member(
     email = _clean_text(body.email)
     if not user_id and not email:
         raise HTTPException(status_code=400, detail="Member user_id or email is required")
+
+    # Guard against duplicates (e.g. a double-clicked invite button): if this
+    # person is already on the team, return 409 instead of a second membership.
+    existing = await _existing_member(team.id, db, user_id=user_id, email=email)
+    if existing:
+        who = existing.email or existing.user_id or "This person"
+        state = "already a member" if existing.status == "active" else "already invited"
+        raise HTTPException(status_code=409, detail=f"{who} is {state}")
 
     now = _now()
     status = body.status or ("active" if user_id else "invited")
