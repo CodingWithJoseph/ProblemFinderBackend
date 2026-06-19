@@ -54,6 +54,31 @@ async def test_add_member(client, fake_db, auth_headers):
     assert any(isinstance(obj, TeamMember) and obj.email == "new.person@example.com" for obj in fake_db.added)
 
 
+async def test_add_member_rejects_duplicate_email(client, fake_db, auth_headers, monkeypatch):
+    team = make_team()
+    existing = make_team_member(team_id=team.id, status="invited", email="dupe@example.com", user_id=None)
+    # team lookup, then the duplicate-check finds an existing pending invite.
+    fake_db.stub(execute=[FakeResult(rows=[team]), FakeResult(rows=[existing])])
+    sent = []
+
+    async def fake_send(**kwargs):
+        sent.append(kwargs)
+        return True
+
+    monkeypatch.setattr("app.routes.teams.email_service.send", fake_send)
+
+    resp = await client.post(
+        f"/teams/{team.id}/members",
+        json={"email": "DUPE@example.com", "role": "member"},  # case-insensitive match
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 409
+    assert "invited" in resp.json()["detail"]
+    assert sent == []  # no second email
+    assert not any(isinstance(obj, TeamMember) for obj in fake_db.added)
+
+
 async def test_add_member_email_invite_mints_token_and_sends_email(client, fake_db, auth_headers, monkeypatch):
     team = make_team()
     fake_db.stub(execute=[FakeResult(rows=[team])])
