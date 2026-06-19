@@ -40,6 +40,20 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-4-6"
 
+    # Email
+    # Transport selector: "console" logs the rendered message (default for dev
+    # and tests, needs no credentials); "smtp" relays through the SMTP settings
+    # below. Anything else falls back to console.
+    email_transport: str = "console"
+    email_from: str = "Immensity <no-reply@useimmensity.com>"
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_starttls: bool = True
+    # How long a team invite link stays valid, in hours (default 7 days).
+    invite_token_ttl_hours: int = 168
+
     # CORS
     allowed_origins: str = "http://localhost:3000"
 

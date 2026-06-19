@@ -1,17 +1,23 @@
+import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_uid
+from app.config import get_settings
 from app.db import get_db
 from app.models import Team, TeamMember
+from app.services.email import email_service, render_team_invite
+
+settings = get_settings()
 
 router = APIRouter(prefix="/teams", tags=["teams"])
+invites_router = APIRouter(prefix="/invites", tags=["invites"])
 
 TeamRole = Literal["owner", "admin", "member"]
 MemberStatus = Literal["active", "invited", "removed"]
@@ -74,9 +80,39 @@ def _serialize_member(member: TeamMember) -> dict:
         "displayName": member.display_name,
         "role": member.role,
         "status": member.status,
+        "invitedAt": _iso(member.invited_at),
         "createdAt": _iso(member.created_at),
         "updatedAt": _iso(member.updated_at),
     }
+
+
+def _issue_invite_token(member: TeamMember, now: datetime) -> str:
+    """Mint a fresh single-use invite token on ``member`` and return it."""
+    token = secrets.token_urlsafe(32)
+    member.invite_token = token
+    member.invited_at = now
+    member.invite_token_expires_at = now + timedelta(hours=settings.invite_token_ttl_hours)
+    return token
+
+
+def _queue_invite_email(background: BackgroundTasks, *, team: Team, email: str, token: str) -> None:
+    """Schedule the invite email after the response. Sending is non-fatal."""
+    accept_url = f"{settings.app_url.rstrip('/')}/invite/{token}"
+    subject, text, html = render_team_invite(team_name=team.name, accept_url=accept_url)
+    background.add_task(email_service.send, to=email, subject=subject, text=text, html=html)
+
+
+def _invite_expired(member: TeamMember, now: datetime) -> bool:
+    return member.invite_token_expires_at is not None and member.invite_token_expires_at < now
+
+
+async def _member_by_token(token: str, db: AsyncSession) -> TeamMember:
+    member = (await db.execute(
+        select(TeamMember).where(TeamMember.invite_token == token)
+    )).scalar_one_or_none()
+    if not member:
+        raise HTTPException(status_code=404, detail="Invite not found")
+    return member
 
 
 def _serialize_team(team: Team, role: str | None = None, members: list[TeamMember] | None = None) -> dict:
@@ -265,6 +301,7 @@ async def delete_team(
 async def add_member(
     team_id: str,
     body: AddMemberBody,
+    background: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
@@ -275,6 +312,7 @@ async def add_member(
         raise HTTPException(status_code=400, detail="Member user_id or email is required")
 
     now = _now()
+    status = body.status or ("active" if user_id else "invited")
     member = TeamMember(
         id=str(uuid.uuid4()),
         team_id=team.id,
@@ -282,14 +320,20 @@ async def add_member(
         email=email,
         display_name=_display_name_from_email(email),
         role=body.role,
-        status=body.status or ("active" if user_id else "invited"),
+        status=status,
         created_at=now,
         updated_at=now,
     )
+    # Email-only invite (no linked account yet) → mint a token and send the link.
+    invite_token = None
+    if email and not user_id and status == "invited":
+        invite_token = _issue_invite_token(member, now)
     team.updated_at = now
     db.add(member)
     await db.commit()
     await db.refresh(member)
+    if invite_token:
+        _queue_invite_email(background, team=team, email=email, token=invite_token)
     return {"data": _serialize_member(member)}
 
 
@@ -342,3 +386,71 @@ async def delete_member(
     await db.delete(member)
     await db.commit()
     return {"success": True}
+
+
+@router.post("/{team_id}/members/{member_id}/resend")
+async def resend_invite(
+    team_id: str,
+    member_id: str,
+    background: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    team, _ = await _require_member_manager(team_id, uid, db)
+    member = await _member_for_team(team.id, member_id, db)
+    if member.status != "invited" or not member.email:
+        raise HTTPException(status_code=400, detail="Only pending email invites can be resent")
+
+    now = _now()
+    token = _issue_invite_token(member, now)
+    member.updated_at = now
+    team.updated_at = now
+    await db.commit()
+    await db.refresh(member)
+    _queue_invite_email(background, team=team, email=member.email, token=token)
+    return {"data": _serialize_member(member)}
+
+
+@invites_router.get("/{token}")
+async def get_invite(token: str, db: AsyncSession = Depends(get_db)):
+    """Public preview of an invite, used to render the accept page."""
+    member = await _member_by_token(token, db)
+    team = await _get_team(member.team_id, db)
+    now = _now()
+    return {"data": {
+        "token": token,
+        "teamId": team.id,
+        "teamName": team.name,
+        "teamDescription": team.description,
+        "email": member.email,
+        "role": member.role,
+        "status": member.status,
+        "expiresAt": _iso(member.invite_token_expires_at),
+        "expired": _invite_expired(member, now),
+    }}
+
+
+@invites_router.post("/{token}/accept")
+async def accept_invite(
+    token: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Bind the signed-in user to the invited membership."""
+    member = await _member_by_token(token, db)
+    now = _now()
+    if member.status == "active":
+        raise HTTPException(status_code=409, detail="Invite has already been accepted")
+    if _invite_expired(member, now):
+        raise HTTPException(status_code=410, detail="Invite has expired")
+
+    member.user_id = uid
+    member.status = "active"
+    member.invite_token = None
+    member.invite_token_expires_at = None
+    member.updated_at = now
+    team = await _get_team(member.team_id, db)
+    team.updated_at = now
+    await db.commit()
+    await db.refresh(member)
+    return {"data": _serialize_member(member)}

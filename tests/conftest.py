@@ -75,6 +75,7 @@ from app.routes.portfolio import public_router as portfolio_public_router  # noq
 from app.routes.portfolio import router as portfolio_router  # noqa: E402
 from app.routes.tasks import router as tasks_router  # noqa: E402
 from app.routes.teams import router as teams_router  # noqa: E402
+from app.routes.teams import invites_router as invites_router  # noqa: E402
 from app.routes.issues import router as issues_router  # noqa: E402
 from app.routes.dashboard import router as dashboard_router  # noqa: E402
 from app.routes.homepage import router as homepage_router  # noqa: E402
@@ -507,6 +508,7 @@ def app(fake_db):
     application.include_router(portfolio_public_router)
     application.include_router(tasks_router)
     application.include_router(teams_router)
+    application.include_router(invites_router)
     application.include_router(issues_router)
     application.include_router(dashboard_router)
     application.include_router(homepage_router)
