@@ -342,6 +342,51 @@ async def test_sync_revenue_metrics_from_connected_stripe_account(client, fake_d
     assert fake_db.commit_count == 1
 
 
+async def test_scheduled_sync_refreshes_connected_sources(fake_db, monkeypatch):
+    source_a = make_revenue_source(status="connected", provider_account_id="acct_a")
+    source_b = make_revenue_source(status="connected", provider_account_id="acct_b")
+    fake_db.stub(execute=[FakeResult(rows=[source_a, source_b])])
+
+    monkeypatch.setattr(
+        portfolio_routes.stripe.Subscription,
+        "list",
+        lambda **kwargs: StripeList([]),
+    )
+    monkeypatch.setattr(
+        portfolio_routes.stripe.Customer,
+        "list",
+        lambda **kwargs: StripeList([]),
+    )
+
+    synced = await portfolio_routes._sync_connected_revenue_sources(fake_db)
+
+    assert synced == 2
+    assert source_a.last_synced_at is not None
+    assert source_b.last_synced_at is not None
+    assert fake_db.commit_count == 2  # one commit per source
+
+
+async def test_scheduled_sync_skips_failing_source(fake_db, monkeypatch):
+    good = make_revenue_source(status="connected", provider_account_id="acct_good")
+    bad = make_revenue_source(status="connected", provider_account_id="acct_bad")
+    fake_db.stub(execute=[FakeResult(rows=[bad, good])])
+
+    def _subscription_list(**kwargs):
+        if kwargs.get("stripe_account") == "acct_bad":
+            raise RuntimeError("stripe down")
+        return StripeList([])
+
+    monkeypatch.setattr(portfolio_routes.stripe.Subscription, "list", _subscription_list)
+    monkeypatch.setattr(portfolio_routes.stripe.Customer, "list", lambda **kwargs: StripeList([]))
+
+    synced = await portfolio_routes._sync_connected_revenue_sources(fake_db)
+
+    # One source fails, the other still syncs.
+    assert synced == 1
+    assert good.last_synced_at is not None
+    assert bad.last_synced_at is None
+
+
 async def test_public_usage_event_ingestion(client, fake_db):
     source = make_usage_source()
     fake_db.stub(execute=[FakeResult(rows=[source])])

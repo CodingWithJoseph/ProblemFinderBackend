@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     # How long a team invite link stays valid, in hours (default 7 days).
     invite_token_ttl_hours: int = 168
 
+    # How often to auto-refresh connected Stripe revenue sources, in hours.
+    # Set to 0 to disable the in-process scheduler.
+    revenue_sync_interval_hours: int = 6
+
     # CORS
     allowed_origins: str = "http://localhost:3000"
 

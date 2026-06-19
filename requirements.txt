@@ -18,3 +18,4 @@ anthropic
 httpx
 pgvector
 resend
+apscheduler

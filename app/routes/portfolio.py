@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import re
 import secrets
 import uuid
@@ -29,6 +30,8 @@ from app.routes.pipeline import (
     _serialize_cards,
 )
 import stripe
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 public_router = APIRouter(prefix="/public/portfolio", tags=["public-portfolio"])
@@ -598,25 +601,44 @@ async def sync_revenue_metrics(
     if not source or source.status != "connected" or not source.provider_account_id:
         raise HTTPException(status_code=400, detail="Stripe is not connected for this product")
 
-    since = int((_now() - timedelta(days=30)).timestamp())
     try:
-        active_subscriptions = _stripe_items(stripe.Subscription.list(
-            status="active",
-            limit=100,
-            stripe_account=source.provider_account_id,
-        ))
-        customers = _stripe_items(stripe.Customer.list(
-            created={"gte": since},
-            limit=100,
-            stripe_account=source.provider_account_id,
-        ))
-        canceled_subscriptions = _stripe_items(stripe.Subscription.list(
-            status="canceled",
-            limit=100,
-            stripe_account=source.provider_account_id,
-        ))
+        await _perform_revenue_sync(source, db)
     except Exception as exc:
         raise HTTPException(status_code=502, detail="Could not sync Stripe revenue") from exc
+
+    return {
+        "data": {
+            "source": _serialize_revenue_source(source),
+            "connected": True,
+            "summary": {
+                "mrrCents": source.current_mrr_cents,
+                "newCustomers30d": source.new_customers_30d,
+                "churnedCustomers30d": source.churned_customers_30d,
+                "churnRate30d": source.churn_rate_30d,
+            },
+        }
+    }
+
+
+async def _perform_revenue_sync(source: PortfolioRevenueSource, db: AsyncSession) -> None:
+    """Pull fresh metrics from the connected Stripe account onto ``source`` and
+    commit. Raises on Stripe failure; callers decide how to surface it."""
+    since = int((_now() - timedelta(days=30)).timestamp())
+    active_subscriptions = _stripe_items(stripe.Subscription.list(
+        status="active",
+        limit=100,
+        stripe_account=source.provider_account_id,
+    ))
+    customers = _stripe_items(stripe.Customer.list(
+        created={"gte": since},
+        limit=100,
+        stripe_account=source.provider_account_id,
+    ))
+    canceled_subscriptions = _stripe_items(stripe.Subscription.list(
+        status="canceled",
+        limit=100,
+        stripe_account=source.provider_account_id,
+    ))
 
     churned = [
         subscription for subscription in canceled_subscriptions
@@ -642,18 +664,36 @@ async def sync_revenue_metrics(
     await db.commit()
     await db.refresh(source)
 
-    return {
-        "data": {
-            "source": _serialize_revenue_source(source),
-            "connected": True,
-            "summary": {
-                "mrrCents": source.current_mrr_cents,
-                "newCustomers30d": source.new_customers_30d,
-                "churnedCustomers30d": source.churned_customers_30d,
-                "churnRate30d": source.churn_rate_30d,
-            },
-        }
-    }
+
+async def _sync_connected_revenue_sources(db: AsyncSession) -> int:
+    """Re-sync every connected Stripe revenue source. Per-source failures are
+    logged and skipped so one bad account can't stall the rest. Returns the
+    number successfully synced."""
+    sources = list((await db.execute(
+        select(PortfolioRevenueSource).where(
+            PortfolioRevenueSource.status == "connected",
+            PortfolioRevenueSource.provider_account_id != None,
+        )
+    )).scalars().all())
+
+    synced = 0
+    for source in sources:
+        try:
+            await _perform_revenue_sync(source, db)
+            synced += 1
+        except Exception as exc:
+            logger.warning("scheduled revenue sync failed for source %s: %s", source.id, exc)
+    return synced
+
+
+async def run_scheduled_revenue_sync() -> int:
+    """Entrypoint for the scheduler: open a session and sync all connected sources."""
+    from app.db import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db:
+        count = await _sync_connected_revenue_sources(db)
+    logger.info("scheduled revenue sync complete: %s source(s)", count)
+    return count
 
 
 def _pct_change(current: int, previous: int) -> float | None:
