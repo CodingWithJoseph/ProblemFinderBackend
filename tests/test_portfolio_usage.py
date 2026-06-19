@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
 from conftest import (
@@ -9,7 +9,33 @@ from conftest import (
     make_usage_source,
 )
 from app.routes import portfolio as portfolio_routes
+from app.routes.portfolio import _compute_retention
 from app.models import PortfolioRevenueSource, PortfolioUsageEvent, PortfolioUsageSource
+
+
+def test_compute_retention_d1_d7():
+    today = date(2026, 6, 1)
+    first_seen = [("a", "2026-05-20"), ("b", "2026-05-20"), ("c", "2026-05-31")]
+    active = [
+        ("a", "2026-05-20"), ("a", "2026-05-21"), ("a", "2026-05-27"),  # D1 + D7 returns
+        ("b", "2026-05-20"),                                            # no return
+        ("c", "2026-05-31"), ("c", "2026-06-01"),                       # D1 return only
+    ]
+
+    r = _compute_retention(first_seen, active, today)
+
+    # D1 eligible: a, b, c (all observed for >=1 day); retained: a, c
+    assert r["d1"]["eligible"] == 3
+    assert r["d1"]["retained"] == 2
+    assert r["d1"]["rate"] == round(2 / 3, 4)
+    # D7 eligible: a, b (5/20 + 7 <= today); c is too new; retained: a
+    assert r["d7"]["eligible"] == 2
+    assert r["d7"]["retained"] == 1
+    assert r["d7"]["rate"] == 0.5
+    # Cohorts, most recent first
+    assert [c["date"] for c in r["cohorts"]] == ["2026-05-31", "2026-05-20"]
+    newest = r["cohorts"][0]
+    assert newest["size"] == 1 and newest["d1Rate"] == 1.0 and newest["d7Rate"] is None
 
 
 class StripeList:
@@ -118,6 +144,8 @@ async def test_get_usage_metrics_funnel_and_growth(client, fake_db, auth_headers
             FakeResult(rows=[]),          # daily
             FakeResult(rows=[]),          # recent events
             FakeResult(rows=[("signup", 20), ("activation", 8)]),  # funnel: distinct visitors per stage
+            FakeResult(rows=[]),          # retention: first-seen per visitor
+            FakeResult(rows=[]),          # retention: distinct visitor active-days
         ],
         scalar=[
             128,  # total_events
@@ -147,6 +175,11 @@ async def test_get_usage_metrics_funnel_and_growth(client, fake_db, auth_headers
     assert growth["visitors"]["previous"] == 40
     assert growth["visitors"]["changePct"] == 0.5  # (60 - 40) / 40
     assert growth["signups"]["changePct"] == 0.5   # (12 - 8) / 8
+
+    retention = body["retention"]
+    assert retention["windowDays"] == 30
+    assert retention["d1"]["rate"] is None  # no retention rows stubbed
+    assert retention["cohorts"] == []
 
 
 async def test_create_revenue_source_for_launched_product(client, fake_db, auth_headers):
