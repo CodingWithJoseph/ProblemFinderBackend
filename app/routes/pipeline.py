@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from app.db import get_db, AsyncSessionLocal
 from app.auth import get_uid
 from app.config import PIPELINE_VERSION
-from app.models import Pipeline, Cluster, ClusterItem, ClusterSignal, Issue, Team, TeamMember
+from app.models import Pipeline, Cluster, ClusterItem, ClusterSignal, Issue, Team, TeamMember, Problem, Task
 from app.limits import get_plan, limit_for, LimitReached
 from app.routes.clusters import (
     serialize_evidence_item,
@@ -641,6 +641,67 @@ async def _find_watch_card(uid: str, cluster_id: str, db: AsyncSession) -> Pipel
     )).scalar_one_or_none()
 
 
+SEED_BREAKDOWN_LIMIT = 10
+
+
+def _dedupe_problem_items(items: list[ClusterItem]) -> list[ClusterItem]:
+    """Top-scored item per distinct ``problem_statement``.
+
+    ``items`` must already be score-desc. Mirrors ``distinct_solution_angles``'
+    dedupe pattern but keys on ``problem_statement`` so a problem can be seeded
+    even when it has no ``solution_angle``.
+    """
+    seen: dict[str, ClusterItem] = {}
+    for it in items:
+        statement = (it.problem_statement or "").strip()
+        if not statement:
+            continue
+        key = statement.lower()
+        if key not in seen:
+            seen[key] = it
+    return list(seen.values())
+
+
+async def _seed_breakdown_from_cluster(card: Pipeline, cluster_id: int, uid: str, db: AsyncSession) -> None:
+    """Seed problems (and their tasks) for a freshly watched cluster card from the
+    cluster's ``cluster_items`` problem_statement / solution_angle.
+
+    Idempotent: no-op if the pipeline already has any problems. All seeded rows
+    are written in a single transaction.
+    """
+    existing = await db.scalar(
+        select(func.count()).select_from(Problem).where(Problem.pipeline_id == card.id)
+    )
+    if existing:
+        return
+
+    items = await load_cluster_items(db, cluster_id, limit=SIGNAL_BRIEF_SCAN)
+    deduped = _dedupe_problem_items(items)[:SEED_BREAKDOWN_LIMIT]
+    if not deduped:
+        return
+
+    for index, it in enumerate(deduped):
+        problem = Problem(
+            pipeline_id=card.id,
+            user_id=uid,
+            title=(it.problem_statement or "").strip(),
+            source_post_id=it.source_item_id,
+            position=index,
+        )
+        db.add(problem)
+        angle = (it.solution_angle or "").strip()
+        if angle:
+            db.add(Task(
+                pipeline_id=card.id,
+                user_id=uid,
+                title=angle,
+                problem_id=problem.id,
+                position=index,
+                status="todo",
+            ))
+    await db.commit()
+
+
 @router.post("/watch")
 async def watch_cluster(
     body: WatchBody,
@@ -648,7 +709,9 @@ async def watch_cluster(
     uid: str = Depends(get_uid),
 ):
     """Add a cluster to the user's pipeline at the Watching stage. The card is
-    seeded with the cluster's cluster_items ids. Idempotent."""
+    seeded with the cluster's cluster_items ids, and (on first watch) its
+    Breakdown problems / tasks from each item's problem_statement /
+    solution_angle. Idempotent."""
     existing = await _find_watch_card(uid, body.cluster_id, db)
     if existing:
         return {"is_watched": True, "pipeline_id": str(existing.id)}
@@ -699,6 +762,7 @@ async def watch_cluster(
     db.add(card)
     await db.commit()
     await db.refresh(card)
+    await _seed_breakdown_from_cluster(card, cluster_int_id, uid, db)
     return {"is_watched": True, "pipeline_id": str(card.id)}
 
 
