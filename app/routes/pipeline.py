@@ -283,27 +283,12 @@ def _cluster_id_from_card(card: Pipeline) -> int | None:
         return None
 
 
-async def _get_active_pipeline_card(pipeline_id: str, db: AsyncSession, uid: str) -> Pipeline:
-    result = await db.execute(
-        select(Pipeline).where(
-            Pipeline.id == pipeline_id,
-            Pipeline.user_id == uid,
-            Pipeline.launched_at == None,
-            Pipeline.removed_at == None,
-        )
-    )
-    card = result.scalar_one_or_none()
-    if not card:
-        raise HTTPException(status_code=404, detail="Active pipeline card not found")
-    return card
+async def _get_pipeline_card(pipeline_id: str, db: AsyncSession, uid: str) -> Pipeline:
+    """Resolve a user's pipeline card for the read-only workspace views
+    (Signal, Posts / source review, brief).
 
-
-async def _get_signal_pipeline_card(pipeline_id: str, db: AsyncSession, uid: str) -> Pipeline:
-    """Resolve a user's card for the Signal view.
-
-    Unlike :func:`_get_active_pipeline_card`, this also serves *launched* cards —
-    a launched opportunity keeps its published signal — and only excludes removed
-    cards. Scoped to the Signal endpoint on purpose.
+    Serves both active *and* launched cards — a launched opportunity keeps its
+    published signal and source posts — and only excludes removed cards.
     """
     card = (await db.execute(
         select(Pipeline).where(
@@ -784,7 +769,7 @@ async def get_pipeline_signal(
         cluster has no cluster_signals row yet.
       * 503 — the cluster_signals read itself failed (logged at ERROR).
     """
-    card = await _get_signal_pipeline_card(pipeline_id, db, uid)
+    card = await _get_pipeline_card(pipeline_id, db, uid)
     cluster_id = _cluster_id_from_card(card)
     if cluster_id is None:
         raise HTTPException(status_code=404, detail="Pipeline card has no source cluster")
@@ -821,7 +806,7 @@ async def _list_pipeline_posts(
     uid: str,
 ):
     """Paginated, searchable source posts for a pipeline workspace."""
-    card = await _get_active_pipeline_card(pipeline_id, db, uid)
+    card = await _get_pipeline_card(pipeline_id, db, uid)
     cluster_id = _cluster_id_from_card(card)
     offset = (page - 1) * pageSize
 
@@ -872,7 +857,7 @@ async def _get_pipeline_post(
     uid: str,
 ):
     """Full source post after verifying it belongs to the pipeline workspace."""
-    card = await _get_active_pipeline_card(pipeline_id, db, uid)
+    card = await _get_pipeline_card(pipeline_id, db, uid)
     cluster_id = _cluster_id_from_card(card)
 
     item = None
@@ -955,7 +940,7 @@ async def get_pipeline_signal_brief(
 ):
     """Problem/solution brief for the card's cluster, derived from the
     pre-computed per-item problem_statement / solution_angle."""
-    card = await _get_active_pipeline_card(pipeline_id, db, uid)
+    card = await _get_pipeline_card(pipeline_id, db, uid)
     cluster_id = _cluster_id_from_card(card)
     if cluster_id is None:
         return {"available": False, "reason": "Cluster analytics are unavailable for this pipeline card."}

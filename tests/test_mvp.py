@@ -445,6 +445,24 @@ async def test_pipeline_posts_alias(client, fake_db, auth_headers):
     assert body["data"][0]["title"] == item.title
 
 
+async def test_pipeline_posts_serves_launched_card(client, fake_db, auth_headers):
+    # A launched (but not removed) card keeps its source posts (regression: the
+    # Posts/Source-Review view used to 404 on launched cards).
+    card = make_pipeline(source_cluster_id="42", launched_at=datetime(2026, 6, 17, tzinfo=timezone.utc))
+    item = make_cluster_item()
+    fake_db.stub(
+        scalar=[1],
+        execute=[
+            FakeResult(rows=[card]),                # card (active or launched)
+            FakeResult(rows=[item]),                # posts page
+            FakeResult(rows=[("r/freelance",)]),    # communities
+        ],
+    )
+    resp = await client.get(f"/pipeline/{card.id}/posts", headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json()["data"][0]["title"] == item.title
+
+
 async def test_pipeline_signal_brief(client, fake_db, auth_headers):
     card = make_pipeline(source_cluster_id="42")
     item = make_cluster_item()
