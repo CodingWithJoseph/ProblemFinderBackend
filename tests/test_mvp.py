@@ -11,8 +11,6 @@ from conftest import (
     make_snapshot,
     make_pipeline,
     make_problem,
-    make_subscription,
-    PlanEnum,
 )
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -116,11 +114,10 @@ async def test_browse_clusters_trending_sort(client, fake_db, auth_headers):
 
 
 async def test_trending_accessible_to_free(client, fake_db, auth_headers):
-    # Tier gating is temporarily disabled: free users now get trending too.
+    # Tier gating has been removed: trending is available to every user.
     cluster = make_cluster()
     signal = make_cluster_signal(signal_score=0.93)
     fake_db.stub(execute=[
-        FakeResult(rows=[make_subscription(plan=PlanEnum.free)]),
         FakeResult(rows=[(cluster, 50, signal)]),
     ])
     resp = await client.get("/clusters/trending", headers=auth_headers)
@@ -132,7 +129,6 @@ async def test_trending_orders_by_signal_score(client, fake_db, auth_headers):
     cluster = make_cluster()
     signal = make_cluster_signal(signal_score=0.94)
     fake_db.stub(execute=[
-        FakeResult(rows=[make_subscription(plan=PlanEnum.pro)]),
         FakeResult(rows=[(cluster, 50, signal)]),
     ])
     resp = await client.get("/clusters/trending", headers=auth_headers)

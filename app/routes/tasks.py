@@ -8,7 +8,6 @@ from pydantic import BaseModel
 from app.db import get_db
 from app.auth import get_uid
 from app.models import Task, Pipeline, Problem
-from app.limits import get_plan, enforce_tasks_limit
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -83,10 +82,6 @@ async def create_task(
         )).scalar_one_or_none()
         if owns_problem is None:
             raise HTTPException(status_code=404, detail="Problem not found")
-
-    # Free plan: cap tasks per pipeline (403 with limit_reached on overflow).
-    plan = await get_plan(uid, db)
-    await enforce_tasks_limit(uid, plan, body.pipeline_id, db)
 
     task = Task(
         pipeline_id=body.pipeline_id,

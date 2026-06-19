@@ -24,7 +24,6 @@ from app.db import get_db, AsyncSessionLocal
 from app.auth import get_uid
 from app.config import PIPELINE_VERSION
 from app.models import Pipeline, Cluster, ClusterItem, ClusterSignal, Issue, Team, TeamMember
-from app.limits import get_plan, limit_for, LimitReached
 from app.routes.clusters import (
     serialize_evidence_item,
     load_cluster_items,
@@ -703,18 +702,6 @@ async def watch_cluster(
     if not cluster:
         raise HTTPException(status_code=404, detail="Cluster not found")
 
-    active_cards = (await db.execute(
-        select(Pipeline).where(
-            Pipeline.user_id == uid,
-            Pipeline.launched_at == None,
-            Pipeline.removed_at == None,
-        )
-    )).scalars().all()
-    plan = await get_plan(uid, db)
-    cap = limit_for(plan, "max_pipeline_cards")
-    if cap is not None and len(active_cards) >= cap:
-        raise LimitReached("pipeline", plan, status_code=403)
-
     post_id_rows = (await db.execute(
         select(ClusterItem.id).where(
             ClusterItem.cluster_id == cluster_int_id,
@@ -1021,11 +1008,6 @@ async def create_pipeline(
         )
     )
     active_cards = existing_result.scalars().all()
-
-    plan = await get_plan(uid, db)
-    cap = limit_for(plan, "max_pipeline_cards")
-    if cap is not None and len(active_cards) >= cap:
-        raise LimitReached("pipeline", plan, status_code=403)
 
     new_ids_set = set(body.post_ids)
     for card in active_cards:
