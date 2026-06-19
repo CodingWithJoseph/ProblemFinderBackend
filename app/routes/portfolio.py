@@ -1,3 +1,5 @@
+import hashlib
+import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -12,7 +14,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
 from app.auth import get_uid
 from app.config import get_settings
-from app.models import Pipeline, PortfolioRevenueSource, PortfolioUsageEvent, PortfolioUsageSource
+from app.models import (
+    Pipeline,
+    PortfolioErrorEvent,
+    PortfolioErrorGroup,
+    PortfolioRevenueSource,
+    PortfolioUsageEvent,
+    PortfolioUsageSource,
+)
 from app.routes.pipeline import (
     _fetch_issue_counts_for_cards,
     _fetch_posts_for_cards,
@@ -28,6 +37,7 @@ stripe.api_key = settings.stripe_secret_key
 
 UsageEventType = Literal["pageview", "signup", "login", "activation", "custom"]
 RevenueProvider = Literal["stripe"]
+ErrorLevel = Literal["error", "warning"]
 
 
 class UsageEventBody(BaseModel):
@@ -39,6 +49,22 @@ class UsageEventBody(BaseModel):
     user_id: str | None = Field(default=None, max_length=256)
     url: str | None = None
     referrer: str | None = None
+    metadata: dict | None = None
+    occurred_at: datetime | None = None
+
+
+class ErrorEventBody(BaseModel):
+    product_id: str
+    key: str
+    message: str = Field(min_length=1, max_length=2000)
+    stack: str | None = Field(default=None, max_length=20000)
+    level: ErrorLevel = "error"
+    handled: bool | None = None
+    url: str | None = None
+    release: str | None = Field(default=None, max_length=128)
+    visitor_id: str | None = None
+    session_id: str | None = None
+    user_id: str | None = Field(default=None, max_length=256)
     metadata: dict | None = None
     occurred_at: datetime | None = None
 
@@ -88,6 +114,45 @@ def _serialize_usage_event(event: PortfolioUsageEvent) -> dict:
         "userId": event.user_ref,
         "url": event.url,
         "referrer": event.referrer,
+        "metadata": event.event_metadata or {},
+        "occurredAt": _iso(event.occurred_at),
+        "receivedAt": _iso(event.received_at),
+    }
+
+
+def _serialize_error_group(group: PortfolioErrorGroup, affected_sessions: int | None = None) -> dict:
+    payload = {
+        "id": group.id,
+        "pipelineId": group.pipeline_id,
+        "fingerprint": group.fingerprint,
+        "title": group.title,
+        "level": group.level,
+        "status": group.status,
+        "eventCount": int(group.event_count or 0),
+        "lastRelease": group.last_release,
+        "firstSeenAt": _iso(group.first_seen_at),
+        "lastSeenAt": _iso(group.last_seen_at),
+    }
+    if affected_sessions is not None:
+        payload["affectedSessions"] = int(affected_sessions)
+    return payload
+
+
+def _serialize_error_event(event: PortfolioErrorEvent) -> dict:
+    return {
+        "id": event.id,
+        "pipelineId": event.pipeline_id,
+        "groupId": event.group_id,
+        "fingerprint": event.fingerprint,
+        "message": event.message,
+        "stack": event.stack,
+        "level": event.level,
+        "handled": event.handled,
+        "url": event.url,
+        "release": event.release,
+        "visitorId": event.visitor_id,
+        "sessionId": event.session_id,
+        "userId": event.user_ref,
         "metadata": event.event_metadata or {},
         "occurredAt": _iso(event.occurred_at),
         "receivedAt": _iso(event.received_at),
@@ -161,15 +226,59 @@ def _host_matches_allowed(host: str | None, allowed_domain: str | None) -> bool:
     return host == allowed or host.endswith(f".{allowed}")
 
 
-def _usage_event_domain_allowed(source: PortfolioUsageSource, request: Request, body: UsageEventBody) -> bool:
-    if not source.allowed_domain:
+def _origin_allowed(allowed_domain: str | None, request: Request, url: str | None) -> bool:
+    if not allowed_domain:
         return True
     candidates = [
         request.headers.get("origin"),
         request.headers.get("referer"),
-        body.url,
+        url,
     ]
-    return any(_host_matches_allowed(candidate, source.allowed_domain) for candidate in candidates)
+    return any(_host_matches_allowed(candidate, allowed_domain) for candidate in candidates)
+
+
+def _usage_event_domain_allowed(source: PortfolioUsageSource, request: Request, body: UsageEventBody) -> bool:
+    return _origin_allowed(source.allowed_domain, request, body.url)
+
+
+# Fingerprinting: collapse near-identical errors ("user 123 not found" /
+# "user 456 not found") into one issue. We normalize volatile bits out of the
+# message and pin to the top stack frame so distinct call sites stay distinct.
+_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+_HEX_RE = re.compile(r"0x[0-9a-fA-F]+")
+_NUM_RE = re.compile(r"\d+")
+
+
+def _normalize_error_message(message: str) -> str:
+    text = (message or "").strip()
+    text = _UUID_RE.sub("<uuid>", text)
+    text = _HEX_RE.sub("<hex>", text)
+    text = _NUM_RE.sub("<n>", text)
+    return " ".join(text.split())
+
+
+def _top_stack_frame(stack: str | None) -> str:
+    if not stack:
+        return ""
+    for raw in stack.splitlines():
+        line = raw.strip()
+        if line.startswith("at ") or line.startswith("File ") or "@" in line:
+            return _NUM_RE.sub("<n>", line)
+    return ""
+
+
+def _error_fingerprint(message: str, stack: str | None) -> str:
+    basis = f"{_normalize_error_message(message)}|{_top_stack_frame(stack)}"
+    return hashlib.sha1(basis.encode("utf-8")).hexdigest()
+
+
+async def _error_group(pipeline_id: str, fingerprint: str, db: AsyncSession) -> PortfolioErrorGroup | None:
+    return (await db.execute(
+        select(PortfolioErrorGroup).where(
+            PortfolioErrorGroup.pipeline_id == pipeline_id,
+            PortfolioErrorGroup.fingerprint == fingerprint,
+        )
+    )).scalar_one_or_none()
 
 
 def _stripe_connect_redirect_url() -> str:
@@ -244,6 +353,15 @@ async def _usage_source(pipeline_id: str, db: AsyncSession) -> PortfolioUsageSou
         .where(PortfolioUsageSource.pipeline_id == pipeline_id)
         .order_by(PortfolioUsageSource.created_at.asc())
     )).scalar_one_or_none()
+
+
+def _empty_error_daily(days: int = 14) -> dict[str, dict]:
+    today = _now().date()
+    rows: dict[str, dict] = {}
+    for offset in range(days - 1, -1, -1):
+        day = today - timedelta(days=offset)
+        rows[day.isoformat()] = {"date": day.isoformat(), "errors": 0}
+    return rows
 
 
 def _empty_daily(days: int = 14) -> dict[str, dict]:
@@ -632,6 +750,115 @@ async def get_usage_metrics(
     }
 
 
+@router.get("/{pipeline_id}/errors")
+async def get_error_metrics(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    await _require_launched_product(pipeline_id, db, uid)
+    source = await _usage_source(pipeline_id, db)
+    since = _now() - timedelta(days=14)
+
+    total_errors = await db.scalar(
+        select(func.count(PortfolioErrorEvent.id)).where(PortfolioErrorEvent.pipeline_id == pipeline_id)
+    ) or 0
+    errors_14d = await db.scalar(
+        select(func.count(PortfolioErrorEvent.id)).where(
+            PortfolioErrorEvent.pipeline_id == pipeline_id,
+            PortfolioErrorEvent.occurred_at >= since,
+        )
+    ) or 0
+    affected_sessions_14d = await db.scalar(
+        select(func.count(func.distinct(PortfolioErrorEvent.session_id))).where(
+            PortfolioErrorEvent.pipeline_id == pipeline_id,
+            PortfolioErrorEvent.occurred_at >= since,
+            PortfolioErrorEvent.session_id != None,
+        )
+    ) or 0
+    # Denominator for a rate (not a raw count): a traffic spike shouldn't read
+    # as an error spike. Uses the usage sessions already collected for the product.
+    usage_sessions_14d = await db.scalar(
+        select(func.count(func.distinct(PortfolioUsageEvent.session_id))).where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.occurred_at >= since,
+            PortfolioUsageEvent.session_id != None,
+        )
+    ) or 0
+    open_issues = await db.scalar(
+        select(func.count(PortfolioErrorGroup.id)).where(
+            PortfolioErrorGroup.pipeline_id == pipeline_id,
+            PortfolioErrorGroup.status == "unresolved",
+        )
+    ) or 0
+
+    daily = _empty_error_daily()
+    daily_rows = (await db.execute(
+        select(func.date(PortfolioErrorEvent.occurred_at), func.count(PortfolioErrorEvent.id))
+        .where(
+            PortfolioErrorEvent.pipeline_id == pipeline_id,
+            PortfolioErrorEvent.occurred_at >= since,
+        )
+        .group_by(func.date(PortfolioErrorEvent.occurred_at))
+        .order_by(func.date(PortfolioErrorEvent.occurred_at).asc())
+    )).all()
+    for day, count in daily_rows:
+        key = day.isoformat() if hasattr(day, "isoformat") else str(day)
+        if key in daily:
+            daily[key]["errors"] += int(count)
+
+    top_groups = list((await db.execute(
+        select(PortfolioErrorGroup)
+        .where(
+            PortfolioErrorGroup.pipeline_id == pipeline_id,
+            PortfolioErrorGroup.last_seen_at >= since,
+        )
+        .order_by(PortfolioErrorGroup.event_count.desc(), PortfolioErrorGroup.last_seen_at.desc())
+        .limit(10)
+    )).scalars().all())
+
+    session_rows = (await db.execute(
+        select(PortfolioErrorEvent.group_id, func.count(func.distinct(PortfolioErrorEvent.session_id)))
+        .where(
+            PortfolioErrorEvent.pipeline_id == pipeline_id,
+            PortfolioErrorEvent.occurred_at >= since,
+            PortfolioErrorEvent.session_id != None,
+        )
+        .group_by(PortfolioErrorEvent.group_id)
+    )).all()
+    sessions_by_group = {group_id: int(count) for group_id, count in session_rows}
+
+    recent_errors = list((await db.execute(
+        select(PortfolioErrorEvent)
+        .where(PortfolioErrorEvent.pipeline_id == pipeline_id)
+        .order_by(PortfolioErrorEvent.occurred_at.desc())
+        .limit(20)
+    )).scalars().all())
+
+    errors_per_session = round(int(errors_14d) / int(usage_sessions_14d), 4) if usage_sessions_14d else None
+
+    return {
+        "data": {
+            "source": _serialize_usage_source(source),
+            "connected": source is not None,
+            "totalErrors": int(total_errors),
+            "lastSeenAt": _iso(source.last_seen_at if source else None),
+            "summary14d": {
+                "errors": int(errors_14d),
+                "openIssues": int(open_issues),
+                "affectedSessions": int(affected_sessions_14d),
+                "errorsPerSession": errors_per_session,
+            },
+            "daily": list(daily.values()),
+            "issues": [
+                _serialize_error_group(group, affected_sessions=sessions_by_group.get(group.id, 0))
+                for group in top_groups
+            ],
+            "recentErrors": [_serialize_error_event(event) for event in recent_errors],
+        }
+    }
+
+
 @public_router.post("/events")
 async def ingest_usage_event(
     request: Request,
@@ -670,3 +897,83 @@ async def ingest_usage_event(
     db.add(event)
     await db.commit()
     return {"success": True}
+
+
+@public_router.post("/errors")
+async def ingest_error_event(
+    request: Request,
+    body: ErrorEventBody,
+    db: AsyncSession = Depends(get_db),
+):
+    source = (await db.execute(
+        select(PortfolioUsageSource).where(
+            PortfolioUsageSource.pipeline_id == body.product_id,
+            PortfolioUsageSource.public_key == body.key,
+            PortfolioUsageSource.status == "connected",
+        )
+    )).scalar_one_or_none()
+    if not source:
+        raise HTTPException(status_code=404, detail="Usage source not found")
+    if not _origin_allowed(source.allowed_domain, request, body.url):
+        raise HTTPException(status_code=403, detail="Error event origin is not allowed")
+
+    now = _now()
+    occurred = body.occurred_at or now
+    fingerprint = _error_fingerprint(body.message, body.stack)
+    title = (_normalize_error_message(body.message) or body.message)[:500]
+
+    group = await _error_group(source.pipeline_id, fingerprint, db)
+    if group is None:
+        group = PortfolioErrorGroup(
+            id=str(uuid.uuid4()),
+            pipeline_id=source.pipeline_id,
+            source_id=source.id,
+            fingerprint=fingerprint,
+            title=title,
+            level=body.level,
+            status="unresolved",
+            event_count=1,
+            last_release=body.release,
+            first_seen_at=occurred,
+            last_seen_at=occurred,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(group)
+    else:
+        group.event_count = int(group.event_count or 0) + 1
+        if group.last_seen_at is None or occurred > group.last_seen_at:
+            group.last_seen_at = occurred
+        if group.first_seen_at is None or occurred < group.first_seen_at:
+            group.first_seen_at = occurred
+        if body.release:
+            group.last_release = body.release
+        # Regression: a previously resolved issue is happening again → reopen it.
+        if group.status == "resolved":
+            group.status = "unresolved"
+        group.updated_at = now
+
+    event = PortfolioErrorEvent(
+        id=str(uuid.uuid4()),
+        pipeline_id=source.pipeline_id,
+        source_id=source.id,
+        group_id=group.id,
+        fingerprint=fingerprint,
+        message=body.message[:2000],
+        stack=body.stack,
+        level=body.level,
+        handled=body.handled,
+        url=body.url,
+        release=body.release,
+        visitor_id=body.visitor_id,
+        session_id=body.session_id,
+        user_ref=body.user_id,
+        event_metadata=body.metadata or {},
+        occurred_at=occurred,
+        received_at=now,
+    )
+    source.last_seen_at = now
+    source.updated_at = now
+    db.add(event)
+    await db.commit()
+    return {"success": True, "groupId": group.id, "fingerprint": fingerprint}

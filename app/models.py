@@ -337,6 +337,53 @@ class PortfolioUsageEvent(Base):
     received_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
+class PortfolioErrorGroup(Base):
+    """A distinct error "issue" — many raw occurrences folded together by a
+    deterministic fingerprint, so the dashboard shows a handful of problems
+    instead of thousands of rows."""
+
+    __tablename__ = "portfolio_error_groups"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("portfolio_usage_sources.id", ondelete="SET NULL"), nullable=True, index=True)
+    fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    level: Mapped[str] = mapped_column(String(20), nullable=False, default="error")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="unresolved")
+    event_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_release: Mapped[str | None] = mapped_column(Text, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    last_seen_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class PortfolioErrorEvent(Base):
+    """A single raw error occurrence, linked to its group and (when available)
+    to the visitor/session it happened in — the tie-back to usage data."""
+
+    __tablename__ = "portfolio_error_events"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("portfolio_usage_sources.id", ondelete="SET NULL"), nullable=True, index=True)
+    group_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("portfolio_error_groups.id", ondelete="CASCADE"), nullable=True, index=True)
+    fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    stack: Mapped[str | None] = mapped_column(Text, nullable=True)
+    level: Mapped[str] = mapped_column(String(20), nullable=False, default="error")
+    handled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    release: Mapped[str | None] = mapped_column(Text, nullable=True)
+    visitor_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    event_metadata: Mapped[dict | None] = mapped_column("metadata", JSONB, nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
+    received_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
 class PortfolioRevenueSource(Base):
     __tablename__ = "portfolio_revenue_sources"
 

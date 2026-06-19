@@ -66,6 +66,8 @@ from app.models import (  # noqa: E402
     IssueComment,
     PortfolioUsageSource,
     PortfolioUsageEvent,
+    PortfolioErrorGroup,
+    PortfolioErrorEvent,
     PortfolioRevenueSource,
 )
 from app.routes.clusters import router as clusters_router  # noqa: E402
@@ -441,6 +443,50 @@ def make_usage_event(**kw):
     )
     defaults.update(kw)
     return PortfolioUsageEvent(**defaults)
+
+
+def make_error_group(**kw):
+    defaults = dict(
+        id=str(uuid.uuid4()),
+        pipeline_id=str(uuid.uuid4()),
+        source_id=str(uuid.uuid4()),
+        fingerprint="fp-abc",
+        title="TypeError: cannot read properties of undefined",
+        level="error",
+        status="unresolved",
+        event_count=1,
+        last_release=None,
+        first_seen_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        last_seen_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+    )
+    defaults.update(kw)
+    return PortfolioErrorGroup(**defaults)
+
+
+def make_error_event(**kw):
+    defaults = dict(
+        id=str(uuid.uuid4()),
+        pipeline_id=str(uuid.uuid4()),
+        source_id=None,
+        group_id=None,
+        fingerprint="fp-abc",
+        message="TypeError: cannot read properties of undefined (reading 'x')",
+        stack="at foo (app.js:10:5)\nat bar (app.js:20:7)",
+        level="error",
+        handled=False,
+        url="https://example.com/app",
+        release="v1.0.0",
+        visitor_id="visitor-1",
+        session_id="session-1",
+        user_ref=None,
+        event_metadata={},
+        occurred_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        received_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+    )
+    defaults.update(kw)
+    return PortfolioErrorEvent(**defaults)
 
 
 def make_revenue_source(**kw):
