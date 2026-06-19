@@ -264,6 +264,11 @@ class TeamMember(Base):
     display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     role: Mapped[str] = mapped_column(String(20), nullable=False, default="member")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    # Email-invite acceptance: the token is the secret embedded in the invite
+    # link; it is single-use and cleared once the invite is accepted.
+    invite_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    invite_token_expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    invited_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
