@@ -2,7 +2,7 @@ import hashlib
 import re
 import secrets
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 from urllib.parse import urlencode, urlparse
 
@@ -663,6 +663,68 @@ def _pct_change(current: int, previous: int) -> float | None:
     return round((current - previous) / previous, 4)
 
 
+def _as_date(value) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value)[:10])
+
+
+def _compute_retention(
+    first_seen_rows: list[tuple],
+    active_rows: list[tuple],
+    today: date,
+    window_days: int = 30,
+    cohort_limit: int = 7,
+) -> dict:
+    """Day-1 / Day-7 return retention.
+
+    A visitor is "retained DN" if they have any activity N days after their
+    first-seen day. Only cohorts old enough to have been observed for N days
+    count toward the rate, so a brand-new cohort doesn't drag it down.
+    """
+    active = {(visitor, _as_date(day)) for visitor, day in active_rows}
+    overall = {1: {"eligible": 0, "retained": 0}, 7: {"eligible": 0, "retained": 0}}
+    cohorts: dict[date, dict] = {}
+
+    for visitor, day in first_seen_rows:
+        first = _as_date(day)
+        cohort = cohorts.setdefault(first, {"size": 0, 1: {"eligible": 0, "retained": 0}, 7: {"eligible": 0, "retained": 0}})
+        cohort["size"] += 1
+        for n in (1, 7):
+            if first + timedelta(days=n) <= today:
+                overall[n]["eligible"] += 1
+                cohort[n]["eligible"] += 1
+                if (visitor, first + timedelta(days=n)) in active:
+                    overall[n]["retained"] += 1
+                    cohort[n]["retained"] += 1
+
+    def _bucket(agg: dict) -> dict:
+        rate = round(agg["retained"] / agg["eligible"], 4) if agg["eligible"] else None
+        return {"eligible": agg["eligible"], "retained": agg["retained"], "rate": rate}
+
+    def _rate(agg: dict) -> float | None:
+        return round(agg["retained"] / agg["eligible"], 4) if agg["eligible"] else None
+
+    cohort_list = [
+        {
+            "date": cohort_date.isoformat(),
+            "size": cohorts[cohort_date]["size"],
+            "d1Rate": _rate(cohorts[cohort_date][1]),
+            "d7Rate": _rate(cohorts[cohort_date][7]),
+        }
+        for cohort_date in sorted(cohorts.keys(), reverse=True)[:cohort_limit]
+    ]
+
+    return {
+        "windowDays": window_days,
+        "d1": _bucket(overall[1]),
+        "d7": _bucket(overall[7]),
+        "cohorts": cohort_list,
+    }
+
+
 @router.get("/{pipeline_id}/usage")
 async def get_usage_metrics(
     pipeline_id: str,
@@ -807,6 +869,32 @@ async def get_usage_metrics(
         },
     }
 
+    # Retention: pull each visitor's first-seen day and their distinct active
+    # days over a 30d window, then compute D1/D7 return in-process.
+    retention_window_days = 30
+    retention_since = now - timedelta(days=retention_window_days)
+    first_seen_rows = (await db.execute(
+        select(PortfolioUsageEvent.visitor_id, func.min(func.date(PortfolioUsageEvent.occurred_at)))
+        .where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.occurred_at >= retention_since,
+            PortfolioUsageEvent.visitor_id != None,
+        )
+        .group_by(PortfolioUsageEvent.visitor_id)
+    )).all()
+    active_rows = (await db.execute(
+        select(PortfolioUsageEvent.visitor_id, func.date(PortfolioUsageEvent.occurred_at))
+        .where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.occurred_at >= retention_since,
+            PortfolioUsageEvent.visitor_id != None,
+        )
+        .distinct()
+    )).all()
+    retention = _compute_retention(
+        list(first_seen_rows), list(active_rows), now.date(), window_days=retention_window_days
+    )
+
     return {
         "data": {
             "source": _serialize_usage_source(source),
@@ -824,6 +912,7 @@ async def get_usage_metrics(
             },
             "funnel": funnel,
             "growth": growth,
+            "retention": retention,
             "daily": list(daily.values()),
             "recentEvents": [_serialize_usage_event(event) for event in recent_events],
         }
