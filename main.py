@@ -25,35 +25,39 @@ settings = get_settings()
 logger = logging.getLogger(__name__)
 
 
-def _start_revenue_scheduler():
-    """Start the periodic revenue-sync job, or return None when disabled/unavailable.
+def _start_background_scheduler():
+    """Start periodic background jobs (revenue sync, alert checks), or return
+    None when disabled/unavailable.
 
-    Best-effort: a missing apscheduler or a zero interval simply skips it rather
-    than failing app startup.
+    Best-effort: a missing apscheduler simply skips scheduling rather than
+    failing app startup. Individual jobs are skipped when their interval is 0.
     """
-    interval = settings.revenue_sync_interval_hours
-    if interval and interval <= 0:
-        return None
-    if not interval:
+    revenue_interval = settings.revenue_sync_interval_hours
+    alert_interval = settings.alert_check_interval_hours
+    if revenue_interval <= 0 and alert_interval <= 0:
         return None
     try:
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
     except ImportError:  # pragma: no cover - depends on deploy env
-        logger.warning("apscheduler not installed; scheduled revenue sync disabled")
+        logger.warning("apscheduler not installed; background jobs disabled")
         return None
 
-    from app.routes.portfolio import run_scheduled_revenue_sync
-
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(run_scheduled_revenue_sync, "interval", hours=interval, id="revenue_sync")
+    if revenue_interval > 0:
+        from app.routes.portfolio import run_scheduled_revenue_sync
+        scheduler.add_job(run_scheduled_revenue_sync, "interval", hours=revenue_interval, id="revenue_sync")
+        logger.info("scheduled revenue sync every %s hour(s)", revenue_interval)
+    if alert_interval > 0:
+        from app.services.alerts import run_alert_checks
+        scheduler.add_job(run_alert_checks, "interval", hours=alert_interval, id="alert_checks")
+        logger.info("scheduled alert checks every %s hour(s)", alert_interval)
     scheduler.start()
-    logger.info("scheduled revenue sync every %s hour(s)", interval)
     return scheduler
 
 
 @asynccontextmanager
 async def lifespan(app: "FastAPI"):
-    scheduler = _start_revenue_scheduler()
+    scheduler = _start_background_scheduler()
     try:
         yield
     finally:

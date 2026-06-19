@@ -54,6 +54,16 @@ class Settings(BaseSettings):
     # Set to 0 to disable the in-process scheduler.
     revenue_sync_interval_hours: int = 6
 
+    # Alerting: scheduled checks email the product owner when something needs
+    # attention. Real mail only sends when EMAIL_TRANSPORT is configured.
+    alerts_enabled: bool = True
+    alert_check_interval_hours: int = 1
+    alert_error_spike_multiplier: float = 3.0
+    alert_error_spike_min: int = 5
+    alert_signups_drop_pct: float = 0.5
+    alert_signups_min_previous: int = 5
+    alert_revenue_drop_pct: float = 0.2
+
     # CORS
     allowed_origins: str = "http://localhost:3000"
 

@@ -395,6 +395,8 @@ class PortfolioRevenueSource(Base):
     provider_account_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     provider_account_label: Mapped[str | None] = mapped_column(Text, nullable=True)
     current_mrr_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # MRR from the prior sync, kept so a drop can be detected for alerts.
+    previous_mrr_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
     new_customers_30d: Mapped[int | None] = mapped_column(Integer, nullable=True)
     churned_customers_30d: Mapped[int | None] = mapped_column(Integer, nullable=True)
     churn_rate_30d: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -405,6 +407,23 @@ class PortfolioRevenueSource(Base):
     oauth_state_expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class PortfolioAlert(Base):
+    """A record that an alert was sent, used to dedupe so the same condition
+    doesn't email repeatedly. ``dedupe_key`` is per alert type (e.g. the error
+    group id for new-issue, or a date bucket for spike/drop alerts)."""
+
+    __tablename__ = "portfolio_alerts"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
+    alert_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    dedupe_key: Mapped[str] = mapped_column(Text, nullable=False)
+    recipient: Mapped[str | None] = mapped_column(Text, nullable=True)
+    channel: Mapped[str] = mapped_column(String(20), nullable=False, default="email")
+    sent_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
 class Problem(Base):

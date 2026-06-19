@@ -648,6 +648,8 @@ async def _perform_revenue_sync(source: PortfolioRevenueSource, db: AsyncSession
     churned_count = len(churned)
     now = _now()
 
+    # Keep the prior MRR so a drop can be detected for alerts.
+    source.previous_mrr_cents = source.current_mrr_cents
     source.current_mrr_cents = sum(_subscription_mrr_cents(subscription) for subscription in active_subscriptions)
     source.new_customers_30d = len(customers)
     source.churned_customers_30d = churned_count
