@@ -27,6 +27,7 @@ from app.models import (
     Subscription,
 )
 from app.services.alerts import AlertPrefs, alert_settings_row
+from app.services.app_settings import apply_settings, effective_config, serialize_settings
 from app.routes.pipeline import (
     _fetch_issue_counts_for_cards,
     _fetch_posts_for_cards,
@@ -90,6 +91,12 @@ class MonitoredProductBody(BaseModel):
     # skipping the discovery pipeline entirely.
     name: str = Field(min_length=1, max_length=200)
     product_url: str = Field(min_length=1, max_length=2048)
+
+
+class AdminSettingsBody(BaseModel):
+    # Map of setting key -> new value. Validated against the whitelist in
+    # app/services/app_settings.py, so the UI only sends toggles/dropdown picks.
+    updates: dict[str, Any] = Field(default_factory=dict)
 
 
 class AlertSettingsBody(BaseModel):
@@ -506,6 +513,28 @@ async def create_monitored_product(
     }
 
 
+@router.get("/admin/settings")
+async def get_admin_settings(
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(require_admin_uid),
+):
+    return {"data": await serialize_settings(db)}
+
+
+@router.put("/admin/settings")
+async def update_admin_settings(
+    body: AdminSettingsBody,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(require_admin_uid),
+):
+    try:
+        await apply_settings(db, body.updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    await db.commit()
+    return {"data": await serialize_settings(db)}
+
+
 @router.post("/{pipeline_id}/usage-source")
 async def create_usage_source(
     pipeline_id: str,
@@ -596,6 +625,7 @@ async def create_revenue_connect_url(
         raise HTTPException(status_code=400, detail="Stripe Connect is not configured")
 
     product = await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
     source = await _revenue_source(product.id, db, body.provider)
     now = _now()
     if not source:
@@ -611,7 +641,7 @@ async def create_revenue_connect_url(
         db.add(source)
 
     source.oauth_state = secrets.token_urlsafe(32)
-    source.oauth_state_expires_at = now + timedelta(minutes=settings.stripe_oauth_state_ttl_minutes)
+    source.oauth_state_expires_at = now + timedelta(minutes=eff.stripe_oauth_state_ttl_minutes)
     source.updated_at = now
     await db.commit()
     await db.refresh(source)
@@ -661,6 +691,7 @@ async def get_revenue_metrics(
     uid: str = Depends(get_uid),
 ):
     await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
     source = await _revenue_source(pipeline_id, db)
     return {
         "data": {
@@ -671,7 +702,7 @@ async def get_revenue_metrics(
                 "newCustomers30d": source.new_customers_30d if source else None,
                 "churnedCustomers30d": source.churned_customers_30d if source else None,
                 "churnRate30d": source.churn_rate_30d if source else None,
-                "windowDays": settings.revenue_sync_window_days,
+                "windowDays": eff.revenue_sync_window_days,
             },
         }
     }
@@ -684,12 +715,13 @@ async def sync_revenue_metrics(
     uid: str = Depends(get_uid),
 ):
     await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
     source = await _revenue_source(pipeline_id, db)
     if not source or source.status != "connected" or not source.provider_account_id:
         raise HTTPException(status_code=400, detail="Stripe is not connected for this product")
 
     try:
-        await _perform_revenue_sync(source, db)
+        await _perform_revenue_sync(source, db, eff.revenue_sync_window_days)
     except Exception as exc:
         raise HTTPException(status_code=502, detail="Could not sync Stripe revenue") from exc
 
@@ -702,16 +734,17 @@ async def sync_revenue_metrics(
                 "newCustomers30d": source.new_customers_30d,
                 "churnedCustomers30d": source.churned_customers_30d,
                 "churnRate30d": source.churn_rate_30d,
-                "windowDays": settings.revenue_sync_window_days,
+                "windowDays": eff.revenue_sync_window_days,
             },
         }
     }
 
 
-async def _perform_revenue_sync(source: PortfolioRevenueSource, db: AsyncSession) -> None:
+async def _perform_revenue_sync(source: PortfolioRevenueSource, db: AsyncSession, window_days: int | None = None) -> None:
     """Pull fresh metrics from the connected Stripe account onto ``source`` and
     commit. Raises on Stripe failure; callers decide how to surface it."""
-    since = int((_now() - timedelta(days=settings.revenue_sync_window_days)).timestamp())
+    window = window_days if window_days is not None else settings.revenue_sync_window_days
+    since = int((_now() - timedelta(days=window)).timestamp())
     active_subscriptions = _stripe_items(stripe.Subscription.list(
         status="active",
         limit=100,
@@ -759,6 +792,7 @@ async def _sync_connected_revenue_sources(db: AsyncSession) -> int:
     """Re-sync every connected Stripe revenue source. Per-source failures are
     logged and skipped so one bad account can't stall the rest. Returns the
     number successfully synced."""
+    eff = await effective_config(db)
     sources = list((await db.execute(
         select(PortfolioRevenueSource).where(
             PortfolioRevenueSource.status == "connected",
@@ -769,7 +803,7 @@ async def _sync_connected_revenue_sources(db: AsyncSession) -> int:
     synced = 0
     for source in sources:
         try:
-            await _perform_revenue_sync(source, db)
+            await _perform_revenue_sync(source, db, eff.revenue_sync_window_days)
             synced += 1
         except Exception as exc:
             logger.warning("scheduled revenue sync failed for source %s: %s", source.id, exc)
@@ -862,10 +896,11 @@ async def get_usage_metrics(
     uid: str = Depends(get_uid),
 ):
     await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
     source = await _usage_source(pipeline_id, db)
     now = _now()
-    usage_window = settings.analytics_usage_window_days
-    growth_window = settings.analytics_growth_window_days
+    usage_window = eff.analytics_usage_window_days
+    growth_window = eff.analytics_growth_window_days
     since = now - timedelta(days=usage_window)
     week_start = now - timedelta(days=growth_window)
     prev_week_start = now - timedelta(days=2 * growth_window)
@@ -1003,7 +1038,7 @@ async def get_usage_metrics(
 
     # Retention: pull each visitor's first-seen day and their distinct active
     # days over a 30d window, then compute D1/D7 return in-process.
-    retention_window_days = settings.analytics_retention_window_days
+    retention_window_days = eff.analytics_retention_window_days
     retention_since = now - timedelta(days=retention_window_days)
     first_seen_rows = (await db.execute(
         select(PortfolioUsageEvent.visitor_id, func.min(func.date(PortfolioUsageEvent.occurred_at)))
@@ -1107,10 +1142,11 @@ async def get_correlation(
     uid: str = Depends(get_uid),
 ):
     await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
     now = _now()
-    correlation_window = settings.analytics_correlation_window_days
-    growth_window = settings.analytics_growth_window_days
-    usage_window = settings.analytics_usage_window_days
+    correlation_window = eff.analytics_correlation_window_days
+    growth_window = eff.analytics_growth_window_days
+    usage_window = eff.analytics_usage_window_days
     since = now - timedelta(days=correlation_window)
     week_start = now - timedelta(days=growth_window)
     prev_week_start = now - timedelta(days=2 * growth_window)
@@ -1245,8 +1281,9 @@ async def get_error_metrics(
     uid: str = Depends(get_uid),
 ):
     await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
     source = await _usage_source(pipeline_id, db)
-    usage_window = settings.analytics_usage_window_days
+    usage_window = eff.analytics_usage_window_days
     since = _now() - timedelta(days=usage_window)
 
     total_errors = await db.scalar(

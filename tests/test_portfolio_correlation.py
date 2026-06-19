@@ -46,6 +46,7 @@ async def test_get_correlation_endpoint(client, fake_db, auth_headers):
     fake_db.stub(
         execute=[
             FakeResult(rows=[product]),  # launched product lookup
+            FakeResult(rows=[]),         # app settings overlay
             FakeResult(rows=[(date(2026, 5, 31), "signup", 5, 5)]),  # usage daily
             FakeResult(rows=[(date(2026, 5, 31), 50)]),              # error daily
         ],

@@ -316,14 +316,17 @@ async def _monitored_products(db: AsyncSession) -> list[tuple[str, str]]:
 
 async def run_alert_checks() -> int:
     """Scheduler entrypoint: evaluate every monitored product and email owners."""
-    settings = get_settings()
-    if not settings.alerts_enabled:
-        return 0
-
     from app.db import AsyncSessionLocal
+    from app.services.app_settings import effective_config
 
+    settings = get_settings()
     sent = 0
     async with AsyncSessionLocal() as db:
+        # Overlay admin overrides (alerts switch, baseline days, new-issue cap)
+        # on top of the config defaults.
+        cfg = await effective_config(db, settings)
+        if not cfg.alerts_enabled:
+            return 0
         now = datetime.now(timezone.utc)
         products = await _monitored_products(db)
         # Map pipeline_id -> name for nicer subjects.
@@ -333,8 +336,8 @@ async def run_alert_checks() -> int:
 
         for pipeline_id, uid in products:
             try:
-                prefs = AlertPrefs.resolve(await alert_settings_row(db, pipeline_id), settings)
-                snapshot = await _gather_snapshot(pipeline_id, uid, names.get(pipeline_id, "Your product"), db, now, settings)
+                prefs = AlertPrefs.resolve(await alert_settings_row(db, pipeline_id), cfg)
+                snapshot = await _gather_snapshot(pipeline_id, uid, names.get(pipeline_id, "Your product"), db, now, cfg)
                 for alert in evaluate_alerts(snapshot, prefs):
                     if await already_alerted(db, pipeline_id, alert["type"], alert["dedupe_key"]):
                         continue

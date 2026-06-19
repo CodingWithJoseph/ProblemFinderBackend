@@ -120,6 +120,7 @@ async def test_get_usage_metrics(client, fake_db, auth_headers):
     fake_db.stub(
         execute=[
             FakeResult(rows=[product]),                 # launched product lookup
+            FakeResult(rows=[]),                        # app settings overlay
             FakeResult(rows=[source]),                  # usage source
             FakeResult(rows=[("pageview", 4), ("signup", 1)]),
             FakeResult(rows=[("2026-05-01", "pageview", 4, 2), ("2026-05-01", "signup", 1, 1)]),
@@ -149,6 +150,7 @@ async def test_get_usage_metrics_funnel_and_growth(client, fake_db, auth_headers
     fake_db.stub(
         execute=[
             FakeResult(rows=[product]),   # launched product lookup
+            FakeResult(rows=[]),          # app settings overlay
             FakeResult(rows=[source]),    # usage source
             FakeResult(rows=[("pageview", 100), ("signup", 20), ("activation", 8)]),  # window counts
             FakeResult(rows=[]),          # daily
@@ -271,6 +273,7 @@ async def test_create_revenue_connect_url_stores_oauth_state(client, fake_db, au
     source = make_revenue_source(pipeline_id=product.id)
     fake_db.stub(execute=[
         FakeResult(rows=[product]),  # launched product lookup
+        FakeResult(rows=[]),         # app settings overlay
         FakeResult(rows=[source]),   # existing revenue source
     ])
 
@@ -329,6 +332,7 @@ async def test_usage_window_is_config_driven(client, fake_db, auth_headers, monk
     fake_db.stub(
         execute=[
             FakeResult(rows=[product]),
+            FakeResult(rows=[]),  # app settings overlay
             FakeResult(rows=[source]),
             FakeResult(rows=[]),  # window counts
             FakeResult(rows=[]),  # daily
@@ -360,6 +364,7 @@ async def test_get_revenue_metrics_placeholder(client, fake_db, auth_headers):
     )
     fake_db.stub(execute=[
         FakeResult(rows=[product]),  # launched product lookup
+        FakeResult(rows=[]),         # app settings overlay
         FakeResult(rows=[source]),   # revenue source
     ])
 
@@ -415,6 +420,7 @@ async def test_sync_revenue_metrics_from_connected_stripe_account(client, fake_d
     )
     fake_db.stub(execute=[
         FakeResult(rows=[product]),  # launched product lookup
+        FakeResult(rows=[]),         # app settings overlay
         FakeResult(rows=[source]),   # revenue source
     ])
 
@@ -434,7 +440,10 @@ async def test_sync_revenue_metrics_from_connected_stripe_account(client, fake_d
 async def test_scheduled_sync_refreshes_connected_sources(fake_db, monkeypatch):
     source_a = make_revenue_source(status="connected", provider_account_id="acct_a")
     source_b = make_revenue_source(status="connected", provider_account_id="acct_b")
-    fake_db.stub(execute=[FakeResult(rows=[source_a, source_b])])
+    fake_db.stub(execute=[
+        FakeResult(rows=[]),  # app settings overlay
+        FakeResult(rows=[source_a, source_b]),
+    ])
 
     monkeypatch.setattr(
         portfolio_routes.stripe.Subscription,
@@ -458,7 +467,10 @@ async def test_scheduled_sync_refreshes_connected_sources(fake_db, monkeypatch):
 async def test_scheduled_sync_skips_failing_source(fake_db, monkeypatch):
     good = make_revenue_source(status="connected", provider_account_id="acct_good")
     bad = make_revenue_source(status="connected", provider_account_id="acct_bad")
-    fake_db.stub(execute=[FakeResult(rows=[bad, good])])
+    fake_db.stub(execute=[
+        FakeResult(rows=[]),  # app settings overlay
+        FakeResult(rows=[bad, good]),
+    ])
 
     def _subscription_list(**kwargs):
         if kwargs.get("stripe_account") == "acct_bad":
