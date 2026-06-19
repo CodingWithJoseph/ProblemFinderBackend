@@ -42,14 +42,24 @@ def _start_background_scheduler():
         logger.warning("apscheduler not installed; background jobs disabled")
         return None
 
+    from app.services.locks import ALERT_CHECKS_LOCK, REVENUE_SYNC_LOCK, run_with_advisory_lock
+
     scheduler = AsyncIOScheduler()
     if revenue_interval > 0:
         from app.routes.portfolio import run_scheduled_revenue_sync
-        scheduler.add_job(run_scheduled_revenue_sync, "interval", hours=revenue_interval, id="revenue_sync")
+
+        async def _locked_revenue_sync():
+            await run_with_advisory_lock(REVENUE_SYNC_LOCK, run_scheduled_revenue_sync, name="revenue_sync")
+
+        scheduler.add_job(_locked_revenue_sync, "interval", hours=revenue_interval, id="revenue_sync")
         logger.info("scheduled revenue sync every %s hour(s)", revenue_interval)
     if alert_interval > 0:
         from app.services.alerts import run_alert_checks
-        scheduler.add_job(run_alert_checks, "interval", hours=alert_interval, id="alert_checks")
+
+        async def _locked_alert_checks():
+            await run_with_advisory_lock(ALERT_CHECKS_LOCK, run_alert_checks, name="alert_checks")
+
+        scheduler.add_job(_locked_alert_checks, "interval", hours=alert_interval, id="alert_checks")
         logger.info("scheduled alert checks every %s hour(s)", alert_interval)
     scheduler.start()
     return scheduler
