@@ -1,19 +1,13 @@
 from types import SimpleNamespace
 
-import pytest
-
 from app.services.email import EmailService, render_team_invite
 
 
 def _settings(**kw):
     defaults = dict(
         email_transport="console",
-        email_from="Immensity <no-reply@useimmensity.com>",
-        smtp_host="",
-        smtp_port=587,
-        smtp_user="",
-        smtp_password="",
-        smtp_starttls=True,
+        email_from="invites@useimmensity.com",
+        resend_api_key="",
     )
     defaults.update(kw)
     return SimpleNamespace(**defaults)
@@ -34,7 +28,7 @@ async def test_console_transport_succeeds_without_credentials():
     assert ok is True
 
 
-async def test_smtp_transport_without_host_fails_gracefully():
-    service = EmailService(settings=_settings(email_transport="smtp", smtp_host=""))
+async def test_resend_transport_without_api_key_fails_gracefully():
+    service = EmailService(settings=_settings(email_transport="resend", resend_api_key=""))
     ok = await service.send(to="a@b.com", subject="Hi", text="body")
     assert ok is False

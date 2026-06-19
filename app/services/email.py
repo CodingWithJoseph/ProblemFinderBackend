@@ -3,17 +3,19 @@
 Two transports, chosen by ``settings.email_transport``:
 
 * ``console`` (default) — renders the message and writes it to the application
-  log. Needs no credentials, so dev and the test suite work out of the box.
-* ``smtp`` — relays through the configured SMTP server via ``aiosmtplib``.
+  log. Needs no credentials, so dev and the test suite work out of the box and
+  no real mail is sent unless a transport is explicitly configured.
+* ``resend`` — sends through `Resend <https://resend.com>`_ via its Python SDK,
+  authenticated with ``RESEND_API_KEY``.
 
 Sending is best-effort: callers (e.g. team invites) treat failures as
-non-fatal, so a relay outage never blocks the request that triggered the mail.
+non-fatal, so a provider outage never blocks the request that triggered the mail.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from email.message import EmailMessage
 
 from app.config import get_settings
 
@@ -34,19 +36,11 @@ class EmailService:
         Never raises — failures are logged and reported via the return value so
         callers can stay non-fatal.
         """
-        message = EmailMessage()
-        message["From"] = self._settings.email_from
-        message["To"] = to
-        message["Subject"] = subject
-        message.set_content(text)
-        if html:
-            message.add_alternative(html, subtype="html")
+        if self.transport == "resend":
+            return await self._send_resend(to=to, subject=subject, text=text, html=html)
+        return self._send_console(to=to, subject=subject, text=text)
 
-        if self.transport == "smtp":
-            return await self._send_smtp(message, to=to, subject=subject)
-        return self._send_console(message, to=to, subject=subject, text=text)
-
-    def _send_console(self, message: EmailMessage, *, to: str, subject: str, text: str) -> bool:
+    def _send_console(self, *, to: str, subject: str, text: str) -> bool:
         logger.info(
             "[email:console] to=%s from=%s subject=%s\n%s",
             to,
@@ -56,33 +50,37 @@ class EmailService:
         )
         return True
 
-    async def _send_smtp(self, message: EmailMessage, *, to: str, subject: str) -> bool:
-        # Imported lazily so the dependency is only required when SMTP is the
+    async def _send_resend(self, *, to: str, subject: str, text: str, html: str | None) -> bool:
+        # Imported lazily so the dependency is only required when Resend is the
         # active transport (the test suite runs on the console transport).
         try:
-            import aiosmtplib
+            import resend
         except ImportError:  # pragma: no cover - depends on deploy env
-            logger.error("EMAIL_TRANSPORT=smtp but aiosmtplib is not installed; dropping email to %s", to)
+            logger.error("EMAIL_TRANSPORT=resend but the resend package is not installed; dropping email to %s", to)
             return False
 
         s = self._settings
-        if not s.smtp_host:
-            logger.error("EMAIL_TRANSPORT=smtp but SMTP_HOST is unset; dropping email to %s", to)
+        if not s.resend_api_key:
+            logger.error("EMAIL_TRANSPORT=resend but RESEND_API_KEY is unset; dropping email to %s", to)
             return False
 
+        params: dict = {
+            "from": s.email_from,
+            "to": [to],
+            "subject": subject,
+            "text": text,
+        }
+        if html:
+            params["html"] = html
+
         try:
-            await aiosmtplib.send(
-                message,
-                hostname=s.smtp_host,
-                port=s.smtp_port,
-                username=s.smtp_user or None,
-                password=s.smtp_password or None,
-                start_tls=s.smtp_starttls,
-            )
-            logger.info("[email:smtp] sent to=%s subject=%s", to, subject)
+            resend.api_key = s.resend_api_key
+            # The SDK call is synchronous (blocking HTTP); run it off the event loop.
+            await asyncio.to_thread(resend.Emails.send, params)
+            logger.info("[email:resend] sent to=%s subject=%s", to, subject)
             return True
         except Exception as exc:  # pragma: no cover - network dependent
-            logger.error("[email:smtp] failed to send to=%s subject=%s: %s", to, subject, exc)
+            logger.error("[email:resend] failed to send to=%s subject=%s: %s", to, subject, exc)
             return False
 
 
