@@ -46,6 +46,7 @@ async def test_get_correlation_endpoint(client, fake_db, auth_headers):
     fake_db.stub(
         execute=[
             FakeResult(rows=[product]),  # launched product lookup
+            FakeResult(rows=[]),         # app settings overlay
             FakeResult(rows=[(date(2026, 5, 31), "signup", 5, 5)]),  # usage daily
             FakeResult(rows=[(date(2026, 5, 31), 50)]),              # error daily
         ],
@@ -63,6 +64,7 @@ async def test_get_correlation_endpoint(client, fake_db, auth_headers):
     assert resp.status_code == 200
     body = resp.json()["data"]
     assert len(body["days"]) == 30
+    assert body["windowDays"] == 30
     assert body["summary"]["mrrCents"] is None
     assert body["summary"]["signupsChangePct"] == -0.6   # (4 - 10) / 10
     assert body["summary"]["errorsPerSession14d"] == 0.5  # 60 / 120

@@ -17,14 +17,17 @@ from app.auth import get_uid
 from app.config import get_settings
 from app.models import (
     Pipeline,
+    PlanEnum,
     PortfolioAlertSettings,
     PortfolioErrorEvent,
     PortfolioErrorGroup,
     PortfolioRevenueSource,
     PortfolioUsageEvent,
     PortfolioUsageSource,
+    Subscription,
 )
 from app.services.alerts import AlertPrefs, alert_settings_row
+from app.services.app_settings import apply_settings, effective_config, serialize_settings
 from app.routes.pipeline import (
     _fetch_issue_counts_for_cards,
     _fetch_posts_for_cards,
@@ -81,6 +84,19 @@ class UsageSourceUpdateBody(BaseModel):
 
 class RevenueSourceBody(BaseModel):
     provider: RevenueProvider = "stripe"
+
+
+class MonitoredProductBody(BaseModel):
+    # Admin direct-add: register a product to monitor by hand (name + URL),
+    # skipping the discovery pipeline entirely.
+    name: str = Field(min_length=1, max_length=200)
+    product_url: str = Field(min_length=1, max_length=2048)
+
+
+class AdminSettingsBody(BaseModel):
+    # Map of setting key -> new value. Validated against the whitelist in
+    # app/services/app_settings.py, so the UI only sends toggles/dropdown picks.
+    updates: dict[str, Any] = Field(default_factory=dict)
 
 
 class AlertSettingsBody(BaseModel):
@@ -434,6 +450,91 @@ async def get_portfolio_product(
     }
 
 
+async def require_admin_uid(
+    uid: str = Depends(get_uid),
+    db: AsyncSession = Depends(get_db),
+) -> str:
+    """Gate: the caller must be on the admin plan. Returns their uid."""
+    sub = await db.scalar(select(Subscription).where(Subscription.uid == uid))
+    if not sub or sub.plan != PlanEnum.admin:
+        raise HTTPException(status_code=403, detail="Admin plan required")
+    return uid
+
+
+@router.post("/products")
+async def create_monitored_product(
+    body: MonitoredProductBody,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(require_admin_uid),
+):
+    """Admin direct-add: create a launched product plus its usage source so
+    monitoring is live immediately, without going through discovery."""
+    now = _now()
+    name = _clean_text(body.name) or "Untitled product"
+    url = _clean_text(body.product_url)
+
+    product = Pipeline(
+        id=str(uuid.uuid4()),
+        user_id=uid,
+        name=name,
+        url=url,
+        launched_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(product)
+
+    source = PortfolioUsageSource(
+        id=str(uuid.uuid4()),
+        pipeline_id=product.id,
+        user_id=uid,
+        public_key=secrets.token_urlsafe(24),
+        status="connected",
+        product_url=url,
+        allowed_domain=_domain_from_url(url),
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(source)
+
+    await db.commit()
+    await db.refresh(product)
+    await db.refresh(source)
+
+    posts_map = await _fetch_posts_for_cards([product], db)
+    teams_map = await _fetch_teams_for_cards([product], db)
+    counts_map = await _fetch_issue_counts_for_cards([product], db)
+    return {
+        "data": {
+            **_serialize_cards([product], posts_map, teams_map, counts_map)[0],
+            "usageSource": _serialize_usage_source(source),
+            "revenueSource": None,
+        }
+    }
+
+
+@router.get("/admin/settings")
+async def get_admin_settings(
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(require_admin_uid),
+):
+    return {"data": await serialize_settings(db)}
+
+
+@router.put("/admin/settings")
+async def update_admin_settings(
+    body: AdminSettingsBody,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(require_admin_uid),
+):
+    try:
+        await apply_settings(db, body.updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    await db.commit()
+    return {"data": await serialize_settings(db)}
+
+
 @router.post("/{pipeline_id}/usage-source")
 async def create_usage_source(
     pipeline_id: str,
@@ -524,6 +625,7 @@ async def create_revenue_connect_url(
         raise HTTPException(status_code=400, detail="Stripe Connect is not configured")
 
     product = await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
     source = await _revenue_source(product.id, db, body.provider)
     now = _now()
     if not source:
@@ -539,7 +641,7 @@ async def create_revenue_connect_url(
         db.add(source)
 
     source.oauth_state = secrets.token_urlsafe(32)
-    source.oauth_state_expires_at = now + timedelta(minutes=15)
+    source.oauth_state_expires_at = now + timedelta(minutes=eff.stripe_oauth_state_ttl_minutes)
     source.updated_at = now
     await db.commit()
     await db.refresh(source)
@@ -589,6 +691,7 @@ async def get_revenue_metrics(
     uid: str = Depends(get_uid),
 ):
     await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
     source = await _revenue_source(pipeline_id, db)
     return {
         "data": {
@@ -599,6 +702,7 @@ async def get_revenue_metrics(
                 "newCustomers30d": source.new_customers_30d if source else None,
                 "churnedCustomers30d": source.churned_customers_30d if source else None,
                 "churnRate30d": source.churn_rate_30d if source else None,
+                "windowDays": eff.revenue_sync_window_days,
             },
         }
     }
@@ -611,12 +715,13 @@ async def sync_revenue_metrics(
     uid: str = Depends(get_uid),
 ):
     await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
     source = await _revenue_source(pipeline_id, db)
     if not source or source.status != "connected" or not source.provider_account_id:
         raise HTTPException(status_code=400, detail="Stripe is not connected for this product")
 
     try:
-        await _perform_revenue_sync(source, db)
+        await _perform_revenue_sync(source, db, eff.revenue_sync_window_days)
     except Exception as exc:
         raise HTTPException(status_code=502, detail="Could not sync Stripe revenue") from exc
 
@@ -629,15 +734,17 @@ async def sync_revenue_metrics(
                 "newCustomers30d": source.new_customers_30d,
                 "churnedCustomers30d": source.churned_customers_30d,
                 "churnRate30d": source.churn_rate_30d,
+                "windowDays": eff.revenue_sync_window_days,
             },
         }
     }
 
 
-async def _perform_revenue_sync(source: PortfolioRevenueSource, db: AsyncSession) -> None:
+async def _perform_revenue_sync(source: PortfolioRevenueSource, db: AsyncSession, window_days: int | None = None) -> None:
     """Pull fresh metrics from the connected Stripe account onto ``source`` and
     commit. Raises on Stripe failure; callers decide how to surface it."""
-    since = int((_now() - timedelta(days=30)).timestamp())
+    window = window_days if window_days is not None else settings.revenue_sync_window_days
+    since = int((_now() - timedelta(days=window)).timestamp())
     active_subscriptions = _stripe_items(stripe.Subscription.list(
         status="active",
         limit=100,
@@ -685,6 +792,7 @@ async def _sync_connected_revenue_sources(db: AsyncSession) -> int:
     """Re-sync every connected Stripe revenue source. Per-source failures are
     logged and skipped so one bad account can't stall the rest. Returns the
     number successfully synced."""
+    eff = await effective_config(db)
     sources = list((await db.execute(
         select(PortfolioRevenueSource).where(
             PortfolioRevenueSource.status == "connected",
@@ -695,7 +803,7 @@ async def _sync_connected_revenue_sources(db: AsyncSession) -> int:
     synced = 0
     for source in sources:
         try:
-            await _perform_revenue_sync(source, db)
+            await _perform_revenue_sync(source, db, eff.revenue_sync_window_days)
             synced += 1
         except Exception as exc:
             logger.warning("scheduled revenue sync failed for source %s: %s", source.id, exc)
@@ -788,11 +896,14 @@ async def get_usage_metrics(
     uid: str = Depends(get_uid),
 ):
     await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
     source = await _usage_source(pipeline_id, db)
     now = _now()
-    since = now - timedelta(days=14)
-    week_start = now - timedelta(days=7)
-    prev_week_start = now - timedelta(days=14)
+    usage_window = eff.analytics_usage_window_days
+    growth_window = eff.analytics_growth_window_days
+    since = now - timedelta(days=usage_window)
+    week_start = now - timedelta(days=growth_window)
+    prev_week_start = now - timedelta(days=2 * growth_window)
 
     total_events = await db.scalar(
         select(func.count(PortfolioUsageEvent.id)).where(PortfolioUsageEvent.pipeline_id == pipeline_id)
@@ -822,7 +933,7 @@ async def get_usage_metrics(
         )
     ) or 0
 
-    daily = _empty_daily()
+    daily = _empty_daily(usage_window)
     daily_rows = (await db.execute(
         select(
             func.date(PortfolioUsageEvent.occurred_at),
@@ -927,7 +1038,7 @@ async def get_usage_metrics(
 
     # Retention: pull each visitor's first-seen day and their distinct active
     # days over a 30d window, then compute D1/D7 return in-process.
-    retention_window_days = 30
+    retention_window_days = eff.analytics_retention_window_days
     retention_since = now - timedelta(days=retention_window_days)
     first_seen_rows = (await db.execute(
         select(PortfolioUsageEvent.visitor_id, func.min(func.date(PortfolioUsageEvent.occurred_at)))
@@ -957,6 +1068,8 @@ async def get_usage_metrics(
             "connected": source is not None,
             "totalEvents": int(total_events),
             "lastSeenAt": _iso(source.last_seen_at if source else None),
+            "windowDays": usage_window,
+            "growthWindowDays": growth_window,
             "summary14d": {
                 "pageviews": counts.get("pageview", 0),
                 "visitors": int(visitors_14d),
@@ -1029,11 +1142,15 @@ async def get_correlation(
     uid: str = Depends(get_uid),
 ):
     await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
     now = _now()
-    since = now - timedelta(days=30)
-    week_start = now - timedelta(days=7)
-    prev_week_start = now - timedelta(days=14)
-    fourteen_ago = now - timedelta(days=14)
+    correlation_window = eff.analytics_correlation_window_days
+    growth_window = eff.analytics_growth_window_days
+    usage_window = eff.analytics_usage_window_days
+    since = now - timedelta(days=correlation_window)
+    week_start = now - timedelta(days=growth_window)
+    prev_week_start = now - timedelta(days=2 * growth_window)
+    usage_window_ago = now - timedelta(days=usage_window)
 
     usage_rows = (await db.execute(
         select(
@@ -1057,7 +1174,7 @@ async def get_correlation(
         .group_by(func.date(PortfolioErrorEvent.occurred_at))
     )).all()
 
-    days = _build_correlation_days(list(usage_rows), list(error_rows), today=now.date())
+    days = _build_correlation_days(list(usage_rows), list(error_rows), days=correlation_window, today=now.date())
     insights = _correlation_insights(days)
 
     revenue = await db.scalar(
@@ -1084,13 +1201,13 @@ async def get_correlation(
     errors_14d = int(await db.scalar(
         select(func.count(PortfolioErrorEvent.id)).where(
             PortfolioErrorEvent.pipeline_id == pipeline_id,
-            PortfolioErrorEvent.occurred_at >= fourteen_ago,
+            PortfolioErrorEvent.occurred_at >= usage_window_ago,
         )
     ) or 0)
     sessions_14d = int(await db.scalar(
         select(func.count(func.distinct(PortfolioUsageEvent.session_id))).where(
             PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.occurred_at >= fourteen_ago,
+            PortfolioUsageEvent.occurred_at >= usage_window_ago,
             PortfolioUsageEvent.session_id != None,
         )
     ) or 0)
@@ -1102,11 +1219,13 @@ async def get_correlation(
         "data": {
             "days": days,
             "insights": insights,
+            "windowDays": correlation_window,
             "summary": {
                 "mrrCents": mrr,
                 "mrrChangePct": _pct_change(mrr, prev_mrr) if (mrr is not None and prev_mrr) else None,
                 "signupsChangePct": _pct_change(this_week_signups, prev_week_signups),
                 "errorsPerSession14d": round(errors_14d / sessions_14d, 4) if sessions_14d else None,
+                "errorsPerSessionWindowDays": usage_window,
             },
         }
     }
@@ -1162,8 +1281,10 @@ async def get_error_metrics(
     uid: str = Depends(get_uid),
 ):
     await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
     source = await _usage_source(pipeline_id, db)
-    since = _now() - timedelta(days=14)
+    usage_window = eff.analytics_usage_window_days
+    since = _now() - timedelta(days=usage_window)
 
     total_errors = await db.scalar(
         select(func.count(PortfolioErrorEvent.id)).where(PortfolioErrorEvent.pipeline_id == pipeline_id)
@@ -1197,7 +1318,7 @@ async def get_error_metrics(
         )
     ) or 0
 
-    daily = _empty_error_daily()
+    daily = _empty_error_daily(usage_window)
     daily_rows = (await db.execute(
         select(func.date(PortfolioErrorEvent.occurred_at), func.count(PortfolioErrorEvent.id))
         .where(
@@ -1248,6 +1369,7 @@ async def get_error_metrics(
             "connected": source is not None,
             "totalErrors": int(total_errors),
             "lastSeenAt": _iso(source.last_seen_at if source else None),
+            "windowDays": usage_window,
             "summary14d": {
                 "errors": int(errors_14d),
                 "openIssues": int(open_issues),

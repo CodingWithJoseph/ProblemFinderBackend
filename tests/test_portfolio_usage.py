@@ -5,12 +5,19 @@ from conftest import (
     FakeResult,
     make_pipeline,
     make_revenue_source,
+    make_subscription,
     make_usage_event,
     make_usage_source,
 )
 from app.routes import portfolio as portfolio_routes
 from app.routes.portfolio import _compute_retention
-from app.models import PortfolioRevenueSource, PortfolioUsageEvent, PortfolioUsageSource
+from app.models import (
+    Pipeline,
+    PlanEnum,
+    PortfolioRevenueSource,
+    PortfolioUsageEvent,
+    PortfolioUsageSource,
+)
 
 
 def test_compute_retention_d1_d7():
@@ -113,6 +120,7 @@ async def test_get_usage_metrics(client, fake_db, auth_headers):
     fake_db.stub(
         execute=[
             FakeResult(rows=[product]),                 # launched product lookup
+            FakeResult(rows=[]),                        # app settings overlay
             FakeResult(rows=[source]),                  # usage source
             FakeResult(rows=[("pageview", 4), ("signup", 1)]),
             FakeResult(rows=[("2026-05-01", "pageview", 4, 2), ("2026-05-01", "signup", 1, 1)]),
@@ -127,6 +135,9 @@ async def test_get_usage_metrics(client, fake_db, auth_headers):
     body = resp.json()["data"]
     assert body["connected"] is True
     assert body["totalEvents"] == 5
+    # Window is echoed from config so the frontend renders labels from data.
+    assert body["windowDays"] == 14
+    assert body["growthWindowDays"] == 7
     assert body["summary14d"]["pageviews"] == 4
     assert body["summary14d"]["signups"] == 1
     assert body["summary14d"]["visitors"] == 2
@@ -139,6 +150,7 @@ async def test_get_usage_metrics_funnel_and_growth(client, fake_db, auth_headers
     fake_db.stub(
         execute=[
             FakeResult(rows=[product]),   # launched product lookup
+            FakeResult(rows=[]),          # app settings overlay
             FakeResult(rows=[source]),    # usage source
             FakeResult(rows=[("pageview", 100), ("signup", 20), ("activation", 8)]),  # window counts
             FakeResult(rows=[]),          # daily
@@ -182,6 +194,57 @@ async def test_get_usage_metrics_funnel_and_growth(client, fake_db, auth_headers
     assert retention["cohorts"] == []
 
 
+async def test_admin_can_create_monitored_product(client, fake_db, auth_headers):
+    fake_db.stub(
+        scalar=[make_subscription(plan=PlanEnum.admin)],  # admin gate
+        execute=[FakeResult(rows=[])],                    # issue counts for the new card
+    )
+
+    resp = await client.post(
+        "/portfolio/products",
+        headers=auth_headers,
+        json={"name": "Immensity", "product_url": "https://www.useimmensity.com/app"},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["name"] == "Immensity"
+    assert body["launchedAt"] is not None
+    # Usage source is auto-created and live, with the domain derived from the URL.
+    assert body["usageSource"]["publicKey"]
+    assert body["usageSource"]["allowedDomain"] == "useimmensity.com"
+    assert body["revenueSource"] is None
+    # A launched Pipeline and its usage source were persisted together.
+    product = next(o for o in fake_db.added if isinstance(o, Pipeline))
+    assert product.launched_at is not None
+    assert any(isinstance(o, PortfolioUsageSource) and o.pipeline_id == product.id for o in fake_db.added)
+
+
+async def test_non_admin_cannot_create_monitored_product(client, fake_db, auth_headers):
+    fake_db.stub(scalar=[make_subscription(plan=PlanEnum.pro)])
+
+    resp = await client.post(
+        "/portfolio/products",
+        headers=auth_headers,
+        json={"name": "X", "product_url": "https://x.com"},
+    )
+
+    assert resp.status_code == 403
+    assert not any(isinstance(o, Pipeline) for o in fake_db.added)
+
+
+async def test_create_monitored_product_requires_subscription(client, fake_db, auth_headers):
+    fake_db.stub(scalar=[None])  # no subscription row at all
+
+    resp = await client.post(
+        "/portfolio/products",
+        headers=auth_headers,
+        json={"name": "X", "product_url": "https://x.com"},
+    )
+
+    assert resp.status_code == 403
+
+
 async def test_create_revenue_source_for_launched_product(client, fake_db, auth_headers):
     product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
     fake_db.stub(execute=[
@@ -210,6 +273,7 @@ async def test_create_revenue_connect_url_stores_oauth_state(client, fake_db, au
     source = make_revenue_source(pipeline_id=product.id)
     fake_db.stub(execute=[
         FakeResult(rows=[product]),  # launched product lookup
+        FakeResult(rows=[]),         # app settings overlay
         FakeResult(rows=[source]),   # existing revenue source
     ])
 
@@ -259,6 +323,35 @@ async def test_complete_revenue_connect_marks_source_connected(client, fake_db, 
     assert source.connected_at is not None
 
 
+async def test_usage_window_is_config_driven(client, fake_db, auth_headers, monkeypatch):
+    # Changing the configured window flows straight through to the response.
+    monkeypatch.setattr(portfolio_routes.settings, "analytics_usage_window_days", 7)
+    monkeypatch.setattr(portfolio_routes.settings, "analytics_growth_window_days", 3)
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    source = make_usage_source(pipeline_id=product.id)
+    fake_db.stub(
+        execute=[
+            FakeResult(rows=[product]),
+            FakeResult(rows=[]),  # app settings overlay
+            FakeResult(rows=[source]),
+            FakeResult(rows=[]),  # window counts
+            FakeResult(rows=[]),  # daily
+            FakeResult(rows=[]),  # recent events
+            FakeResult(rows=[]),  # funnel
+            FakeResult(rows=[]),  # retention first-seen
+            FakeResult(rows=[]),  # retention active-days
+        ],
+        scalar=[0, 0, 0, 0, 0, 0, 0],
+    )
+
+    resp = await client.get(f"/portfolio/{product.id}/usage", headers=auth_headers)
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["windowDays"] == 7
+    assert body["growthWindowDays"] == 3
+
+
 async def test_get_revenue_metrics_placeholder(client, fake_db, auth_headers):
     product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
     source = make_revenue_source(
@@ -271,6 +364,7 @@ async def test_get_revenue_metrics_placeholder(client, fake_db, auth_headers):
     )
     fake_db.stub(execute=[
         FakeResult(rows=[product]),  # launched product lookup
+        FakeResult(rows=[]),         # app settings overlay
         FakeResult(rows=[source]),   # revenue source
     ])
 
@@ -326,6 +420,7 @@ async def test_sync_revenue_metrics_from_connected_stripe_account(client, fake_d
     )
     fake_db.stub(execute=[
         FakeResult(rows=[product]),  # launched product lookup
+        FakeResult(rows=[]),         # app settings overlay
         FakeResult(rows=[source]),   # revenue source
     ])
 
@@ -345,7 +440,10 @@ async def test_sync_revenue_metrics_from_connected_stripe_account(client, fake_d
 async def test_scheduled_sync_refreshes_connected_sources(fake_db, monkeypatch):
     source_a = make_revenue_source(status="connected", provider_account_id="acct_a")
     source_b = make_revenue_source(status="connected", provider_account_id="acct_b")
-    fake_db.stub(execute=[FakeResult(rows=[source_a, source_b])])
+    fake_db.stub(execute=[
+        FakeResult(rows=[]),  # app settings overlay
+        FakeResult(rows=[source_a, source_b]),
+    ])
 
     monkeypatch.setattr(
         portfolio_routes.stripe.Subscription,
@@ -369,7 +467,10 @@ async def test_scheduled_sync_refreshes_connected_sources(fake_db, monkeypatch):
 async def test_scheduled_sync_skips_failing_source(fake_db, monkeypatch):
     good = make_revenue_source(status="connected", provider_account_id="acct_good")
     bad = make_revenue_source(status="connected", provider_account_id="acct_bad")
-    fake_db.stub(execute=[FakeResult(rows=[bad, good])])
+    fake_db.stub(execute=[
+        FakeResult(rows=[]),  # app settings overlay
+        FakeResult(rows=[bad, good]),
+    ])
 
     def _subscription_list(**kwargs):
         if kwargs.get("stripe_account") == "acct_bad":

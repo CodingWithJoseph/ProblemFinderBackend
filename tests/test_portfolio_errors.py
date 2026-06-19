@@ -123,6 +123,7 @@ async def test_get_error_metrics(client, fake_db, auth_headers):
     fake_db.stub(
         execute=[
             FakeResult(rows=[product]),          # launched product lookup
+            FakeResult(rows=[]),                 # app settings overlay
             FakeResult(rows=[source]),           # usage source
             FakeResult(rows=[("2026-05-01", 5)]),  # daily error counts
             FakeResult(rows=[group]),            # top issues
