@@ -60,6 +60,7 @@ from app.models import (  # noqa: E402
     ClusterSnapshot,
     Pipeline,
     Problem,
+    Task,
     Team,
     TeamMember,
     Issue,
@@ -546,6 +547,24 @@ def make_problem(**kw):
     )
     defaults.update(kw)
     return Problem(**defaults)
+
+
+def make_task(**kw):
+    defaults = dict(
+        id=str(uuid.uuid4()),
+        pipeline_id=str(uuid.uuid4()),
+        problem_id=None,
+        user_id=TEST_UID,
+        title="Draft the onboarding email",
+        description=None,
+        status="todo",
+        position=0,
+        due_date=None,
+        created_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+    )
+    defaults.update(kw)
+    return Task(**defaults)
 
 
 def embedding_response(vector):
