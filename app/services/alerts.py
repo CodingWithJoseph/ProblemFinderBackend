@@ -318,6 +318,7 @@ async def run_alert_checks() -> int:
     """Scheduler entrypoint: evaluate every monitored product and email owners."""
     from app.db import AsyncSessionLocal
     from app.services.app_settings import effective_config
+    from app.services.preferences import NotificationPrefs, notification_prefs_for
 
     settings = get_settings()
     sent = 0
@@ -334,15 +335,22 @@ async def run_alert_checks() -> int:
             select(Pipeline.id, Pipeline.name)
         )).all())
 
+        prefs_cache: dict[str, NotificationPrefs] = {}
         for pipeline_id, uid in products:
             try:
-                prefs = AlertPrefs.resolve(await alert_settings_row(db, pipeline_id), cfg)
+                np = prefs_cache.get(uid)
+                if np is None:
+                    np = await notification_prefs_for(db, uid)
+                    prefs_cache[uid] = np
+                aprefs = AlertPrefs.resolve(await alert_settings_row(db, pipeline_id), cfg)
                 snapshot = await _gather_snapshot(pipeline_id, uid, names.get(pipeline_id, "Your product"), db, now, cfg)
-                for alert in evaluate_alerts(snapshot, prefs):
+                # Resolve the destination once; None when the user has turned alert
+                # emails off. Digest cadences record now and email from the digest job.
+                recipient = (np.alert_email or resolve_owner_email(uid)) if np.alerts_email_enabled else None
+                for alert in evaluate_alerts(snapshot, aprefs):
                     if await already_alerted(db, pipeline_id, alert["type"], alert["dedupe_key"]):
                         continue
-                    recipient = resolve_owner_email(uid)
-                    if recipient:
+                    if np.send_instantly and recipient:
                         subject, text, html = render_alert(alert["type"], alert["context"])
                         await email_service.send(to=recipient, subject=subject, text=text, html=html)
                         sent += 1
@@ -357,4 +365,90 @@ async def run_alert_checks() -> int:
                 logger.warning("alert check failed for product %s: %s", pipeline_id, exc)
 
     logger.info("alert checks complete: %s email(s) sent", sent)
+    return sent
+
+
+# ── Digest (daily/weekly summary) ────────────────────────────────────────────
+
+ALERT_LABELS = {
+    "new_issue": "New error issue",
+    "error_spike": "Error spike",
+    "signups_drop": "Signups dropped",
+    "revenue_drop": "MRR dropped",
+}
+
+
+def render_digest(items: list[dict], cadence: str) -> tuple[str, str, str]:
+    """Render a digest of recorded alerts. Pure: ``items`` is a list of
+    ``{"type", "product"}``. Returns (subject, text, html)."""
+    period = "daily" if cadence == "daily" else "weekly"
+    count = len(items)
+    subject = f"[Monitor] Your {period} alert digest — {count} alert{'s' if count != 1 else ''}"
+
+    by_product: dict[str, list[str]] = {}
+    for it in items:
+        by_product.setdefault(it.get("product") or "Your product", []).append(it.get("type", "alert"))
+
+    text_parts = [f"Your {period} summary of monitoring alerts:"]
+    html_parts = [f"<p>Your {period} summary of monitoring alerts:</p>"]
+    for product, types in by_product.items():
+        text_parts.append(f"\n{product}:")
+        html_parts.append(f"<p><strong>{product}</strong></p><ul>")
+        for t in types:
+            label = ALERT_LABELS.get(t, t)
+            text_parts.append(f"  - {label}")
+            html_parts.append(f"<li>{label}</li>")
+        html_parts.append("</ul>")
+    return subject, "\n".join(text_parts), "".join(html_parts)
+
+
+async def run_alert_digests() -> int:
+    """Scheduler entrypoint: email a summary to users on a daily/weekly cadence
+    whose digest interval has elapsed, covering alerts recorded since last time."""
+    from app.db import AsyncSessionLocal
+    from app.models import UserPreference
+    from app.services.app_settings import effective_config
+    from app.services.preferences import digest_interval
+
+    settings = get_settings()
+    sent = 0
+    async with AsyncSessionLocal() as db:
+        cfg = await effective_config(db, settings)
+        if not cfg.alerts_enabled:
+            return 0
+        now = datetime.now(timezone.utc)
+        prefs = list((await db.execute(
+            select(UserPreference).where(
+                UserPreference.digest_cadence.in_(("daily", "weekly")),
+                UserPreference.alerts_email_enabled == True,  # noqa: E712
+            )
+        )).scalars().all())
+
+        for pref in prefs:
+            try:
+                interval = digest_interval(pref.digest_cadence)
+                if interval is None:
+                    continue
+                if pref.last_digest_sent_at and (now - pref.last_digest_sent_at) < interval:
+                    continue
+                since = pref.last_digest_sent_at or (now - interval)
+                rows = (await db.execute(
+                    select(PortfolioAlert.alert_type, Pipeline.name, PortfolioAlert.created_at)
+                    .join(Pipeline, Pipeline.id == PortfolioAlert.pipeline_id)
+                    .where(Pipeline.user_id == pref.uid, PortfolioAlert.created_at >= since)
+                    .order_by(PortfolioAlert.created_at.asc())
+                )).all()
+                if rows:
+                    recipient = pref.alert_email or resolve_owner_email(pref.uid)
+                    if recipient:
+                        items = [{"type": r[0], "product": r[1]} for r in rows]
+                        subject, text, html = render_digest(items, pref.digest_cadence)
+                        await email_service.send(to=recipient, subject=subject, text=text, html=html)
+                        sent += 1
+                pref.last_digest_sent_at = now
+                await db.commit()
+            except Exception as exc:
+                logger.warning("alert digest failed for user %s: %s", pref.uid, exc)
+
+    logger.info("alert digests complete: %s email(s) sent", sent)
     return sent

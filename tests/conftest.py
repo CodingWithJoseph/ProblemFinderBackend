@@ -69,6 +69,7 @@ from app.models import (  # noqa: E402
     PortfolioErrorGroup,
     PortfolioErrorEvent,
     PortfolioRevenueSource,
+    UserPreference,
 )
 from app.routes.clusters import router as clusters_router  # noqa: E402
 from app.routes.problems import router as problems_router  # noqa: E402
@@ -82,6 +83,7 @@ from app.routes.issues import router as issues_router  # noqa: E402
 from app.routes.dashboard import router as dashboard_router  # noqa: E402
 from app.routes.homepage import router as homepage_router  # noqa: E402
 from app.routes.public import router as public_router  # noqa: E402
+from app.routes.preferences import router as preferences_router  # noqa: E402
 
 TEST_UID = "test-uid"
 
@@ -222,6 +224,21 @@ def make_subscription(**kw):
     defaults = dict(uid=TEST_UID, plan=PlanEnum.free)
     defaults.update(kw)
     return Subscription(**defaults)
+
+
+def make_user_preference(**kw):
+    defaults = dict(
+        uid=TEST_UID,
+        alerts_email_enabled=True,
+        digest_cadence="instant",
+        alert_email=None,
+        default_pipeline_id=None,
+        default_landing=None,
+        last_digest_sent_at=None,
+        updated_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+    )
+    defaults.update(kw)
+    return UserPreference(**defaults)
 
 
 def make_cluster(**kw):
@@ -559,6 +576,7 @@ def app(fake_db):
     application.include_router(dashboard_router)
     application.include_router(homepage_router)
     application.include_router(public_router)
+    application.include_router(preferences_router)
 
     async def _get_db_override():
         yield fake_db

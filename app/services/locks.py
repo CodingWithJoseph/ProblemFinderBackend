@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 # let an old and new worker run the same job concurrently during a rollout.
 REVENUE_SYNC_LOCK = 4820001
 ALERT_CHECKS_LOCK = 4820002
+ALERT_DIGEST_LOCK = 4820003
 
 T = TypeVar("T")
 
