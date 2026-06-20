@@ -18,6 +18,7 @@ from app.routes.issues import router as issues_router
 from app.routes.dashboard import router as dashboard_router
 from app.routes.homepage import router as homepage_router
 from app.routes.public import router as public_router
+from app.routes.preferences import router as preferences_router
 
 load_dotenv()
 
@@ -42,7 +43,7 @@ def _start_background_scheduler():
         logger.warning("apscheduler not installed; background jobs disabled")
         return None
 
-    from app.services.locks import ALERT_CHECKS_LOCK, REVENUE_SYNC_LOCK, run_with_advisory_lock
+    from app.services.locks import ALERT_CHECKS_LOCK, ALERT_DIGEST_LOCK, REVENUE_SYNC_LOCK, run_with_advisory_lock
 
     scheduler = AsyncIOScheduler()
     if revenue_interval > 0:
@@ -61,6 +62,16 @@ def _start_background_scheduler():
 
         scheduler.add_job(_locked_alert_checks, "interval", hours=alert_interval, id="alert_checks")
         logger.info("scheduled alert checks every %s hour(s)", alert_interval)
+
+        from app.services.alerts import run_alert_digests
+
+        async def _locked_alert_digests():
+            await run_with_advisory_lock(ALERT_DIGEST_LOCK, run_alert_digests, name="alert_digests")
+
+        # Ticks on the same cadence as checks; each user's digest self-gates on
+        # their daily/weekly interval, so this just decides "is it time yet?".
+        scheduler.add_job(_locked_alert_digests, "interval", hours=alert_interval, id="alert_digests")
+        logger.info("scheduled alert digests every %s hour(s)", alert_interval)
     scheduler.start()
     return scheduler
 
@@ -104,6 +115,7 @@ app.include_router(issues_router)
 app.include_router(dashboard_router)
 app.include_router(homepage_router)
 app.include_router(public_router)
+app.include_router(preferences_router)
 
 
 @app.get("/health")

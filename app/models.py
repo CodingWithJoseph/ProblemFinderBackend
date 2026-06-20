@@ -491,3 +491,19 @@ class AppSetting(Base):
     key: Mapped[str] = mapped_column(Text, primary_key=True)
     value: Mapped[dict] = mapped_column(JSONB, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class UserPreference(Base):
+    """Per-user preferences: notification delivery + workspace defaults. One row
+    per uid; absence means all defaults (see app/services/preferences.py)."""
+
+    __tablename__ = "user_preferences"
+
+    uid: Mapped[str] = mapped_column(Text, primary_key=True)
+    alerts_email_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    digest_cadence: Mapped[str] = mapped_column(Text, nullable=False, default="instant")  # instant | daily | weekly
+    alert_email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    default_pipeline_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    default_landing: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_digest_sent_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
