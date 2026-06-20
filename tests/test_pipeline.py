@@ -42,3 +42,75 @@ async def test_pipeline_team_change_updates_issues_and_clears_assignees(client, 
     assert card.team_id == new_team.id
     assert issue.team_id == new_team.id
     assert issue.assignee_id is None
+
+
+async def test_display_name_falls_back_to_cluster_name(client, fake_db, auth_headers):
+    card = make_pipeline(name="Cluster 42", project_name=None)
+    fake_db.stub(execute=[
+        FakeResult(rows=[card]),  # single-card lookup
+        FakeResult(rows=[]),      # issue counts
+    ])
+
+    resp = await client.get(f"/pipeline/{card.id}", headers=auth_headers)
+
+    assert resp.status_code == 200
+    row = resp.json()["data"]
+    assert row["projectName"] is None
+    assert row["displayName"] == "Cluster 42"
+
+
+async def test_patch_sets_project_name_and_timeline(client, fake_db, auth_headers):
+    card = make_pipeline(name="Cluster 42")
+    fake_db.stub(execute=[
+        FakeResult(rows=[card]),  # card lookup
+        FakeResult(rows=[]),      # issue counts
+    ])
+
+    resp = await client.patch(
+        f"/pipeline/{card.id}",
+        json={"project_name": "Invoice Ninja", "timeline_days": 30},
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 200
+    row = resp.json()["data"]
+    assert row["projectName"] == "Invoice Ninja"
+    assert row["displayName"] == "Invoice Ninja"
+    assert row["timelineDays"] == 30
+    assert row["timelineStart"] is not None
+    assert row["timelineTargetLaunch"] is not None
+    # target launch is start + 30 days
+    assert card.timeline_target_launch - card.timeline_start == __import__("datetime").timedelta(days=30)
+
+
+async def test_patch_skip_sets_project_name_only(client, fake_db, auth_headers):
+    card = make_pipeline(name="Cluster 42")
+    fake_db.stub(execute=[
+        FakeResult(rows=[card]),  # card lookup
+        FakeResult(rows=[]),      # issue counts
+    ])
+
+    resp = await client.patch(
+        f"/pipeline/{card.id}",
+        json={"project_name": "Just A Name"},
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 200
+    row = resp.json()["data"]
+    assert row["projectName"] == "Just A Name"
+    assert row["timelineDays"] is None
+    assert card.timeline_start is None
+
+
+async def test_patch_rejects_invalid_timeline_days(client, fake_db, auth_headers):
+    card = make_pipeline()
+    fake_db.stub(execute=[FakeResult(rows=[card])])
+
+    resp = await client.patch(
+        f"/pipeline/{card.id}",
+        json={"timeline_days": 45},
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 400

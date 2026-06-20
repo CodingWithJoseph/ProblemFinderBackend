@@ -11,7 +11,7 @@ import io
 import logging
 import math
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query, Response
@@ -38,13 +38,17 @@ router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 PATCHABLE_FIELDS = {
     "stage", "kill_criteria", "distribution_channels", "concept_angles",
     "exit_checklist", "notes", "url", "category", "revenue_model", "status", "name",
-    "outcome", "mrr", "team_id",
+    "outcome", "mrr", "team_id", "project_name",
 }
 
 # Canonical pipeline stages, in progression order. "watching" is the backlog;
 # terminal states (launched / archived) are tracked via launched_at / removed_at.
 PIPELINE_STAGES = ("watching", "discovery", "exploring", "validating", "building")
 VALID_STAGES = frozenset(PIPELINE_STAGES)
+
+# Allowed launch-timeline windows (Phase 1). The discovery/build split is a fixed
+# 30/70: discovery is the first 30% of days, build the remaining 70%.
+VALID_TIMELINE_DAYS = frozenset({14, 30, 60, 90})
 
 MAX_COHERENCE_POSTS = 50
 SIGNAL_BRIEF_SCAN = 500
@@ -92,6 +96,13 @@ def _serialize(
         "teamId": p.team_id,
         "team": team,
         "name": p.name,
+        "projectName": p.project_name,
+        # Effective title shown everywhere: the user-given name, falling back to
+        # the cluster name when the project hasn't been renamed.
+        "displayName": p.project_name or p.name,
+        "timelineDays": p.timeline_days,
+        "timelineStart": p.timeline_start.isoformat() if p.timeline_start else None,
+        "timelineTargetLaunch": p.timeline_target_launch.isoformat() if p.timeline_target_launch else None,
         "postIds": p.post_ids or [],
         "sourceClusterId": p.source_cluster_id,
         "stage": p.stage,
@@ -586,6 +597,8 @@ class PatchPipelineBody(BaseModel):
     mrr: Optional[float] = None
     post_ids: Optional[list[str]] = None
     team_id: Optional[str] = None
+    project_name: Optional[str] = None
+    timeline_days: Optional[int] = None
 
 
 class LaunchBody(BaseModel):
@@ -613,6 +626,30 @@ async def get_pipeline(
     teams_map = await _fetch_teams_for_cards(list(cards), db)
     counts_map = await _fetch_issue_counts_for_cards(list(cards), db)
     return {"data": _serialize_cards(list(cards), posts_map, teams_map, counts_map)}
+
+
+@router.get("/{pipeline_id}")
+async def get_pipeline_card(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """A single project card. Serves active *and* launched cards (only removed
+    cards are excluded) so the project header / timeline can render after launch."""
+    card = (await db.execute(
+        select(Pipeline).where(
+            Pipeline.id == pipeline_id,
+            Pipeline.user_id == uid,
+            Pipeline.removed_at == None,
+        )
+    )).scalar_one_or_none()
+    if not card:
+        raise HTTPException(status_code=404, detail="Pipeline card not found")
+
+    posts_map = await _fetch_posts_for_cards([card], db)
+    teams_map = await _fetch_teams_for_cards([card], db)
+    counts_map = await _fetch_issue_counts_for_cards([card], db)
+    return {"data": _serialize_cards([card], posts_map, teams_map, counts_map)[0]}
 
 
 async def _find_watch_card(uid: str, cluster_id: str, db: AsyncSession) -> Pipeline | None:
@@ -1059,6 +1096,13 @@ async def patch_pipeline(
     if "team_id" in updates and updates["team_id"] and not await _team_visible(updates["team_id"], db, uid):
         raise HTTPException(status_code=404, detail="Team not found")
 
+    timeline_chosen = "timeline_days" in updates
+    if timeline_chosen and updates["timeline_days"] not in VALID_TIMELINE_DAYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid timeline_days. Must be one of: {', '.join(str(d) for d in sorted(VALID_TIMELINE_DAYS))}",
+        )
+
     post_ids_changed = "post_ids" in updates
     team_changed = "team_id" in updates and updates["team_id"] != card.team_id
 
@@ -1069,6 +1113,12 @@ async def patch_pipeline(
         setattr(card, field, value)
     if "outcome" in updates or "mrr" in updates:
         card.outcome_noted_at = datetime.now(timezone.utc)
+    # When the timeline is chosen, the start is "now" (never asked of the user)
+    # and the target launch is computed and stored so it stays stable.
+    if timeline_chosen:
+        start = datetime.now(timezone.utc)
+        card.timeline_start = start
+        card.timeline_target_launch = start + timedelta(days=updates["timeline_days"])
     card.updated_at = datetime.now(timezone.utc)
 
     await db.commit()

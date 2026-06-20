@@ -221,6 +221,8 @@ class Pipeline(Base):
     user_id: Mapped[str] = mapped_column(String(128), nullable=False)
     team_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("teams.id", ondelete="SET NULL"), nullable=True, index=True)
     name: Mapped[str] = mapped_column(Text, nullable=False)
+    # User-given project name; falls back to ``name`` (the cluster name) when null.
+    project_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     post_ids: Mapped[list] = mapped_column(ARRAY(Text), nullable=False, default=list)
     source_cluster_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     stage: Mapped[str] = mapped_column(String(50), nullable=False, default="watching")
@@ -237,6 +239,11 @@ class Pipeline(Base):
     outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
     mrr: Mapped[float | None] = mapped_column(Float, nullable=True)
     outcome_noted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    # Optional launch timeline (Phase 1). ``timeline_start`` is set to "now" when
+    # the timeline is chosen; ``timeline_target_launch`` = start + timeline_days.
+    timeline_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    timeline_start: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    timeline_target_launch: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     launched_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     removed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
