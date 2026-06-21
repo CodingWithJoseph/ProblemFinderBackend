@@ -399,6 +399,10 @@ class PortfolioRevenueSource(Base):
     user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     provider: Mapped[str] = mapped_column(String(50), nullable=False, default="stripe")
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="not_connected")
+    # Credential path. "connected" reads a Connect account via stripe_account;
+    # "first_party" reads Immensity's own platform account via STRIPE_SECRET_KEY
+    # with no stripe_account param. The engine math is identical either way.
+    account_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="connected")
     provider_account_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     provider_account_label: Mapped[str | None] = mapped_column(Text, nullable=True)
     current_mrr_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)

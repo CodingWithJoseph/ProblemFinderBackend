@@ -215,6 +215,7 @@ def _serialize_revenue_source(source: PortfolioRevenueSource | None, engine: str
         "pipelineId": source.pipeline_id,
         "provider": source.provider,
         "status": source.status,
+        "accountMode": source.account_mode,
         "providerAccountId": source.provider_account_id,
         "providerAccountLabel": source.provider_account_label,
         # currentMrrCents reflects the selected engine; both raw figures are
@@ -385,6 +386,36 @@ def _subscription_item_mrr_cents(item: Any) -> int:
 def _subscription_mrr_cents(subscription: Any) -> int:
     items = _stripe_value(_stripe_value(subscription, "items", {}) or {}, "data", []) or []
     return sum(_subscription_item_mrr_cents(item) for item in items)
+
+
+def _stripe_account_kwargs(source: PortfolioRevenueSource) -> dict:
+    """Credential routing for every Stripe read. A ``first_party`` source reads
+    the platform's own account via the module-level ``STRIPE_SECRET_KEY`` (no
+    ``stripe_account``); a ``connected`` source scopes the call to its Connect
+    account. Spread into each ``stripe.*.list`` call so the engine stays
+    credential-agnostic."""
+    if source.account_mode == "first_party":
+        return {}
+    return {"stripe_account": source.provider_account_id}
+
+
+def _credential_path_label(source: PortfolioRevenueSource) -> str:
+    """Human-readable description of which account a sync pulled from, for the
+    Emit log."""
+    if source.account_mode == "first_party":
+        return "first_party (platform STRIPE_SECRET_KEY)"
+    return f"connected (stripe_account={source.provider_account_id})"
+
+
+def _source_is_syncable(source: PortfolioRevenueSource | None) -> bool:
+    """A source can be synced when it's a connected account with a provider id,
+    or a first-party (own-key) source. First-party sources have no
+    ``provider_account_id`` — they read the platform account directly."""
+    if not source or source.status != "connected":
+        return False
+    if source.account_mode == "first_party":
+        return True
+    return bool(source.provider_account_id)
 
 
 def _stripe_timestamp(value: Any) -> int | None:
@@ -642,6 +673,54 @@ async def create_revenue_source(
     return {"data": _serialize_revenue_source(source)}
 
 
+@router.post("/{pipeline_id}/revenue-source/first-party")
+async def create_first_party_revenue_source(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(require_admin_uid),
+):
+    """Admin-only: attach a first-party (own-key) revenue source to a product.
+    No Connect handshake — it reads Immensity's own platform account directly via
+    STRIPE_SECRET_KEY (whichever key is configured, so test mode reads the test
+    account). Admin-only is a hard requirement: first-party sources expose real
+    platform revenue."""
+    if not settings.stripe_secret_key:
+        raise HTTPException(status_code=400, detail="STRIPE_SECRET_KEY is not configured")
+
+    product = await _require_launched_product(pipeline_id, db, uid)
+    now = _now()
+    source = await _revenue_source(product.id, db)
+    if source and source.account_mode != "first_party":
+        raise HTTPException(
+            status_code=400,
+            detail="This product already has a connected revenue source; remove it before switching to first-party",
+        )
+    if not source:
+        source = PortfolioRevenueSource(
+            id=str(uuid.uuid4()),
+            pipeline_id=product.id,
+            user_id=uid,
+            provider="stripe",
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(source)
+
+    # First-party reads the platform account directly: no provider_account_id,
+    # no OAuth state. Mark connected so the scheduled sync picks it up.
+    source.account_mode = "first_party"
+    source.status = "connected"
+    source.provider_account_id = None
+    source.provider_account_label = "platform (STRIPE_SECRET_KEY)"
+    source.connected_at = source.connected_at or now
+    source.oauth_state = None
+    source.oauth_state_expires_at = None
+    source.updated_at = now
+    await db.commit()
+    await db.refresh(source)
+    return {"data": _serialize_revenue_source(source)}
+
+
 @router.post("/{pipeline_id}/revenue-source/connect")
 async def create_revenue_connect_url(
     pipeline_id: str,
@@ -748,7 +827,7 @@ async def sync_revenue_metrics(
     await _require_launched_product(pipeline_id, db, uid)
     eff = await effective_config(db)
     source = await _revenue_source(pipeline_id, db)
-    if not source or source.status != "connected" or not source.provider_account_id:
+    if not _source_is_syncable(source):
         raise HTTPException(status_code=400, detail="Stripe is not connected for this product")
 
     try:
@@ -1085,19 +1164,19 @@ async def _run_invoice_engine(source: PortfolioRevenueSource, db: AsyncSession, 
     rebuild the per-customer MRR series + movements, and store the invoice-engine
     totals on ``source`` alongside the legacy snapshot. Returns a small summary
     for the comparison log."""
-    account = source.provider_account_id
+    account_kwargs = _stripe_account_kwargs(source)
     base_currency = str(getattr(eff, "revenue_base_currency", "usd") or "usd")
     fx_rates = getattr(eff, "revenue_fx_rates", {}) or {}
 
     invoices = _stripe_items(stripe.Invoice.list(
         limit=100,
         expand=["data.lines"],
-        stripe_account=account,
+        **account_kwargs,
     ))
     active_subscriptions = _stripe_items(stripe.Subscription.list(
         status="active",
         limit=100,
-        stripe_account=account,
+        **account_kwargs,
     ))
 
     events = _billing_events_from_invoices(invoices, source.id, base_currency)
@@ -1141,9 +1220,9 @@ def _log_engine_comparison(source: PortfolioRevenueSource, invoice_result: dict)
     subscription_mrr = source.current_mrr_cents or 0
     invoice_mrr = invoice_result["current_total"]
     logger.info(
-        "revenue engine comparison for source %s: subscription=%s cents, invoice=%s cents, delta=%s cents "
+        "revenue engine comparison for source %s [%s]: subscription=%s cents, invoice=%s cents, delta=%s cents "
         "(invoice engine is more correct; deltas come from prorations/discounts/refunds and reconstructed history)",
-        source.id, subscription_mrr, invoice_mrr, invoice_mrr - subscription_mrr,
+        source.id, _credential_path_label(source), subscription_mrr, invoice_mrr, invoice_mrr - subscription_mrr,
     )
     if invoice_result.get("warnings"):
         logger.warning("revenue engine currency warnings for source %s: %s", source.id, invoice_result["warnings"])
@@ -1154,20 +1233,22 @@ async def _perform_revenue_sync(source: PortfolioRevenueSource, db: AsyncSession
     commit. Raises on Stripe failure; callers decide how to surface it."""
     window = window_days if window_days is not None else settings.revenue_sync_window_days
     since = int((_now() - timedelta(days=window)).timestamp())
+    account_kwargs = _stripe_account_kwargs(source)
+    logger.info("revenue sync for source %s via %s", source.id, _credential_path_label(source))
     active_subscriptions = _stripe_items(stripe.Subscription.list(
         status="active",
         limit=100,
-        stripe_account=source.provider_account_id,
+        **account_kwargs,
     ))
     customers = _stripe_items(stripe.Customer.list(
         created={"gte": since},
         limit=100,
-        stripe_account=source.provider_account_id,
+        **account_kwargs,
     ))
     canceled_subscriptions = _stripe_items(stripe.Subscription.list(
         status="canceled",
         limit=100,
-        stripe_account=source.provider_account_id,
+        **account_kwargs,
     ))
 
     churned = [
@@ -1215,10 +1296,15 @@ async def _sync_connected_revenue_sources(db: AsyncSession) -> int:
     logged and skipped so one bad account can't stall the rest. Returns the
     number successfully synced."""
     eff = await effective_config(db)
+    # Connected sources need a provider account id; first-party sources read the
+    # platform account directly and have none, so they're included unconditionally.
     sources = list((await db.execute(
         select(PortfolioRevenueSource).where(
             PortfolioRevenueSource.status == "connected",
-            PortfolioRevenueSource.provider_account_id != None,
+            (
+                (PortfolioRevenueSource.account_mode == "first_party")
+                | (PortfolioRevenueSource.provider_account_id != None)
+            ),
         )
     )).scalars().all())
 
