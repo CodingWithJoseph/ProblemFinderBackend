@@ -21,9 +21,11 @@ from app.models import (
     PlanEnum,
     PortfolioAlertSettings,
     PortfolioBillingEvent,
+    PortfolioCustomer,
     PortfolioCustomerMrr,
     PortfolioErrorEvent,
     PortfolioErrorGroup,
+    PortfolioIdentity,
     PortfolioMrrMovement,
     PortfolioRevenueSource,
     PortfolioUsageEvent,
@@ -79,6 +81,18 @@ class ErrorEventBody(BaseModel):
     user_id: str | None = Field(default=None, max_length=256)
     metadata: dict | None = None
     occurred_at: datetime | None = None
+
+
+class IdentifyBody(BaseModel):
+    product_id: str
+    key: str
+    user_id: str = Field(min_length=1, max_length=256)
+    # Optional join traits. stripe_customer_id gives a direct join; email is the
+    # fallback. group_id associates the actor with a company/account.
+    stripe_customer_id: str | None = Field(default=None, max_length=256)
+    email: str | None = Field(default=None, max_length=320)
+    group_id: str | None = Field(default=None, max_length=256)
+    traits: dict | None = None
 
 
 class UsageSourceUpdateBody(BaseModel):
@@ -895,6 +909,18 @@ async def update_revenue_economics(
     return {"data": _serialize_revenue_source(source, eff.revenue_engine)}
 
 
+@router.get("/{pipeline_id}/revenue/join-coverage")
+async def get_join_coverage(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Identity join-coverage report: of N identified actors, how many resolved
+    via explicit id vs email vs unresolved."""
+    await _require_launched_product(pipeline_id, db, uid)
+    return {"data": await _join_coverage(db, pipeline_id)}
+
+
 # ── Invoice/event-derived MRR engine (PR1) ────────────────────────────────────
 #
 # The legacy path below sums active subscriptions: it only sees current state,
@@ -1404,6 +1430,17 @@ async def _run_invoice_engine(source: PortfolioRevenueSource, db: AsyncSession, 
     events = _billing_events_from_invoices(invoices, source.id, base_currency)
     await _persist_billing_events(db, events)
 
+    # Populate the customer directory (id + email) so the identity email-fallback
+    # has something to match against, then re-resolve any pending email joins.
+    customers = _stripe_items(stripe.Customer.list(limit=100, **account_kwargs))
+    await _persist_customers(db, source.id, customers)
+    await _resolve_pending_identities(db, source)
+    coverage = await _join_coverage(db, source.pipeline_id)
+    logger.info(
+        "identity join coverage for pipeline %s: explicit=%s email=%s unresolved=%s (resolved rate %s)",
+        source.pipeline_id, coverage["explicit"], coverage["email"], coverage["unresolved"], coverage["resolvedRate"],
+    )
+
     now = _now()
     active_by_customer = _active_subs_by_customer(active_subscriptions, base_currency)
     series = _customer_mrr_series(events, active_by_customer, as_of=now)
@@ -1448,6 +1485,108 @@ def _log_engine_comparison(source: PortfolioRevenueSource, invoice_result: dict)
     )
     if invoice_result.get("warnings"):
         logger.warning("revenue engine currency warnings for source %s: %s", source.id, invoice_result["warnings"])
+
+
+# ── Identity join (PR3) ───────────────────────────────────────────────────────
+#
+# Connects a usage actor (user_ref, set via the tracker's identify()) to a paying
+# Stripe customer. Join key is an explicit stripe_customer_id trait; email is the
+# fallback, matched against the Stripe customer directory populated during sync.
+
+
+async def _persist_customers(db: AsyncSession, source_id: str, customers: list[Any]) -> int:
+    """Upsert the Stripe customer directory (id + email) for a source."""
+    now = _now()
+    table = PortfolioCustomer.__table__
+    written = 0
+    for customer in customers:
+        customer_id = _stripe_value(customer, "id")
+        if not customer_id:
+            continue
+        email = _stripe_value(customer, "email")
+        await db.execute(
+            pg_insert(table)
+            .values(
+                id=str(uuid.uuid4()), revenue_source_id=source_id, stripe_customer_id=customer_id,
+                email=email, name=_stripe_value(customer, "name"), created_at=now, updated_at=now,
+            )
+            .on_conflict_do_update(
+                index_elements=["revenue_source_id", "stripe_customer_id"],
+                set_={"email": email, "name": _stripe_value(customer, "name"), "updated_at": now},
+            )
+        )
+        written += 1
+    await db.flush()
+    return written
+
+
+def _resolve_identity(stripe_customer_id: str | None, email: str | None, customer_by_email: dict[str, str]) -> tuple[str | None, str]:
+    """Resolve a usage actor to a Stripe customer. Explicit id wins; otherwise
+    match email against the Stripe customer directory; otherwise unresolved.
+    Returns ``(stripe_customer_id, resolution_method)``."""
+    if stripe_customer_id:
+        return stripe_customer_id, "explicit"
+    if email:
+        matched = customer_by_email.get(email.strip().lower())
+        if matched:
+            return matched, "email"
+    return None, "unresolved"
+
+
+async def _customer_email_index(db: AsyncSession, source_id: str) -> dict[str, str]:
+    rows = (await db.execute(
+        select(PortfolioCustomer.stripe_customer_id, PortfolioCustomer.email)
+        .where(PortfolioCustomer.revenue_source_id == source_id)
+    )).all()
+    return {email.strip().lower(): cid for cid, email in rows if email}
+
+
+async def _resolve_pending_identities(db: AsyncSession, source: PortfolioRevenueSource) -> int:
+    """Re-resolve identities for this product that aren't explicitly joined yet,
+    now that the customer directory is fresh. Returns how many became resolved."""
+    email_index = await _customer_email_index(db, source.id)
+    pending = (await db.execute(
+        select(PortfolioIdentity).where(
+            PortfolioIdentity.pipeline_id == source.pipeline_id,
+            PortfolioIdentity.resolution_method != "explicit",
+        )
+    )).scalars().all()
+    newly_resolved = 0
+    now = _now()
+    for identity in pending:
+        customer_id, method = _resolve_identity(identity.stripe_customer_id, identity.email, email_index)
+        if method != identity.resolution_method or customer_id != identity.stripe_customer_id:
+            identity.stripe_customer_id = customer_id
+            identity.resolution_method = method
+            identity.resolved_at = now if method != "unresolved" else None
+            identity.updated_at = now
+            if method != "unresolved":
+                newly_resolved += 1
+    await db.flush()
+    return newly_resolved
+
+
+async def _join_coverage(db: AsyncSession, pipeline_id: str) -> dict:
+    """Join-coverage report: of N identified actors, how many resolved via
+    explicit id vs email vs unresolved. Validates the layer and predicts how
+    strong the correlation inputs will be."""
+    rows = (await db.execute(
+        select(PortfolioIdentity.resolution_method, func.count(PortfolioIdentity.id))
+        .where(PortfolioIdentity.pipeline_id == pipeline_id)
+        .group_by(PortfolioIdentity.resolution_method)
+    )).all()
+    counts = {method: int(count) for method, count in rows}
+    explicit = counts.get("explicit", 0)
+    email = counts.get("email", 0)
+    unresolved = counts.get("unresolved", 0)
+    total = explicit + email + unresolved
+    return {
+        "total": total,
+        "explicit": explicit,
+        "email": email,
+        "unresolved": unresolved,
+        "resolvedRate": round((explicit + email) / total, 4) if total else None,
+    }
 
 
 async def _perform_revenue_sync(source: PortfolioRevenueSource, db: AsyncSession, window_days: int | None = None) -> None:
@@ -2153,6 +2292,63 @@ async def ingest_usage_event(
     db.add(event)
     await db.commit()
     return {"success": True}
+
+
+@public_router.post("/identify")
+async def ingest_identify(
+    request: Request,
+    body: IdentifyBody,
+    db: AsyncSession = Depends(get_db),
+):
+    """Associate a usage actor (user_ref) with a Stripe customer. Server-side so
+    ad-blockers can't drop it. Upserts the identity and resolves it against the
+    customer directory: explicit stripe_customer_id trait → direct join; else
+    email match; else unresolved (resolved later when the directory has the
+    customer's email)."""
+    source = (await db.execute(
+        select(PortfolioUsageSource).where(
+            PortfolioUsageSource.pipeline_id == body.product_id,
+            PortfolioUsageSource.public_key == body.key,
+            PortfolioUsageSource.status == "connected",
+        )
+    )).scalar_one_or_none()
+    if not source:
+        raise HTTPException(status_code=404, detail="Usage source not found")
+    if not _origin_allowed(source.allowed_domain, request, None):
+        raise HTTPException(status_code=403, detail="Identify origin is not allowed")
+
+    now = _now()
+    email = _clean_text(body.email)
+    # Resolve against the revenue source's customer directory, if one exists.
+    revenue = await _revenue_source(source.pipeline_id, db)
+    email_index = await _customer_email_index(db, revenue.id) if revenue else {}
+    customer_id, method = _resolve_identity(_clean_text(body.stripe_customer_id), email, email_index)
+
+    existing = (await db.execute(
+        select(PortfolioIdentity).where(
+            PortfolioIdentity.pipeline_id == source.pipeline_id,
+            PortfolioIdentity.user_ref == body.user_id,
+        )
+    )).scalar_one_or_none()
+    if existing is None:
+        existing = PortfolioIdentity(
+            id=str(uuid.uuid4()),
+            pipeline_id=source.pipeline_id,
+            user_ref=body.user_id,
+            created_at=now,
+        )
+        db.add(existing)
+    existing.email = email or existing.email
+    existing.group_id = _clean_text(body.group_id) or existing.group_id
+    existing.traits = body.traits or existing.traits
+    # Never downgrade an explicit join to a weaker method on a later call.
+    if existing.resolution_method != "explicit" or method == "explicit":
+        existing.stripe_customer_id = customer_id or existing.stripe_customer_id
+        existing.resolution_method = method
+        existing.resolved_at = now if method != "unresolved" else existing.resolved_at
+    existing.updated_at = now
+    await db.commit()
+    return {"success": True, "resolution": existing.resolution_method}
 
 
 @public_router.post("/errors")

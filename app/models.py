@@ -491,6 +491,43 @@ class PortfolioMrrMovement(Base):
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
+class PortfolioCustomer(Base):
+    """A Stripe customer seen on a revenue source's account, keyed by
+    ``stripe_customer_id``. Populated from the Stripe customer object during sync
+    so the identity email-fallback has an email to match against."""
+
+    __tablename__ = "portfolio_customers"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    revenue_source_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("portfolio_revenue_sources.id", ondelete="CASCADE"), nullable=False, index=True)
+    stripe_customer_id: Mapped[str] = mapped_column(Text, nullable=False)
+    email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class PortfolioIdentity(Base):
+    """One identified usage actor per product. ``resolution_method`` records how
+    ``stripe_customer_id`` was determined: 'explicit' (id trait), 'email'
+    (matched a Stripe customer email), or 'unresolved'."""
+
+    __tablename__ = "portfolio_identities"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    stripe_customer_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    group_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    traits: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    resolution_method: Mapped[str] = mapped_column(Text, nullable=False, default="unresolved")
+    resolved_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
 class PortfolioAlert(Base):
     """A record that an alert was sent, used to dedupe so the same condition
     doesn't email repeatedly. ``dedupe_key`` is per alert type (e.g. the error
