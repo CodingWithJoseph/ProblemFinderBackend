@@ -1026,13 +1026,43 @@ def _line_recurring(line: Any) -> Any:
     return {}
 
 
+def _line_parent_details(line: Any) -> Any:
+    """The current Stripe API (2024+) moved the subscription association off the
+    invoice line itself onto ``line.parent.subscription_item_details``. Returns
+    that nested object (or ``{}``)."""
+    parent = _stripe_value(line, "parent", {}) or {}
+    return _stripe_value(parent, "subscription_item_details", {}) or {}
+
+
+def _line_subscription_id(line: Any) -> str | None:
+    """Subscription id for an invoice line, across API shapes. Checks, in order:
+    the deprecated top-level ``line.subscription``, then the current
+    ``line.parent.subscription_item_details.subscription``."""
+    direct = _stripe_value(line, "subscription")
+    if direct:
+        return direct
+    return _stripe_value(_line_parent_details(line), "subscription") or None
+
+
+def _line_subscription_item_id(line: Any) -> str | None:
+    """Subscription *item* id, top-level (deprecated) or nested under the current
+    ``line.parent.subscription_item_details.subscription_item``."""
+    direct = _stripe_value(line, "subscription_item")
+    if direct:
+        return direct
+    return _stripe_value(_line_parent_details(line), "subscription_item") or None
+
+
 def _is_subscription_line(line: Any) -> bool:
-    """Recurring-revenue line items only. Excludes one-off charges and setup
-    fees (no recurring price / no subscription association), which must never
-    reach the ledger."""
-    if not _line_recurring(line):
-        return False
-    return bool(_stripe_value(line, "subscription")) or _stripe_value(line, "type") == "subscription"
+    """Recurring-revenue line items only. True when the line is associated to a
+    subscription (top-level or via ``parent.subscription_item_details``), is
+    typed ``subscription``, or carries recurring price metadata. One-off charges
+    and setup fees — no subscription link and no recurring price — are excluded."""
+    if _line_subscription_id(line) or _line_subscription_item_id(line):
+        return True
+    if _stripe_value(line, "type") == "subscription":
+        return True
+    return bool(_line_recurring(line))
 
 
 def _invoice_line_mrr_cents(line: Any) -> int:
@@ -1084,7 +1114,7 @@ def _billing_events_from_invoices(invoices: list[Any], source_id: str, default_c
             events.append({
                 "revenue_source_id": source_id,
                 "stripe_customer_id": customer,
-                "stripe_subscription_id": _stripe_value(line, "subscription"),
+                "stripe_subscription_id": _line_subscription_id(line),
                 "stripe_invoice_id": invoice_id,
                 "stripe_line_item_id": line_id,
                 "mrr_cents": _invoice_line_mrr_cents(line),

@@ -14,6 +14,9 @@ from app.routes.portfolio import (
     _combine_currency_totals,
     _customer_mrr_series,
     _invoice_line_mrr_cents,
+    _is_subscription_line,
+    _line_subscription_id,
+    _line_subscription_item_id,
     _movements_from_series,
     _normalize_interval_cents,
     _subscription_mrr_cents,
@@ -259,3 +262,110 @@ def test_engine_comparison_print(capsys):
     assert invoice_total != subscription_total
     captured = capsys.readouterr()
     assert "new invoice-engine MRR" in captured.out
+
+
+# ── current Stripe API line shape (regression: live integration bug) ──────────
+#
+# The 2024+ Invoice line item moved the subscription association off the line
+# itself onto line.parent.subscription_item_details.subscription, and dropped the
+# top-level `subscription` / `type` fields. The old parser rejected every such
+# line, so nothing was persisted and the engine fell back to the active-sub
+# point (billingEvents=0). These fixtures match the live shape.
+
+
+def _live_line(line_id, sub_id, unit_amount, *, sub_item="si_live", period_start=None,
+               proration=False, interval="month", currency="usd"):
+    """An invoice line as the current Stripe API returns it: no top-level
+    `subscription`/`type`, association nested under `parent`."""
+    return {
+        "id": line_id,
+        "object": "line_item",
+        "parent": {
+            "type": "subscription_item_details",
+            "subscription_item_details": {"subscription": sub_id, "subscription_item": sub_item},
+        },
+        "quantity": 1,
+        "proration": proration,
+        "currency": currency,
+        "period": {"start": period_start if period_start is not None else _ts(2026, 1)},
+        "discount_amounts": [],
+        "amount": unit_amount,
+        "price": {"unit_amount": unit_amount, "recurring": {"interval": interval, "interval_count": 1}},
+    }
+
+
+def _live_invoice_item_line(line_id, unit_amount, period_start=None):
+    """A one-off invoice item (setup fee) in the current shape: parent is
+    invoice_item_details, no recurring price → must be excluded."""
+    return {
+        "id": line_id,
+        "object": "line_item",
+        "parent": {"type": "invoice_item_details", "invoice_item_details": {"invoice_item": "ii_1"}},
+        "quantity": 1,
+        "proration": False,
+        "currency": "usd",
+        "period": {"start": period_start if period_start is not None else _ts(2026, 1)},
+        "discount_amounts": [],
+        "amount": unit_amount,
+        "price": {"unit_amount": unit_amount, "recurring": None},
+    }
+
+
+def test_line_subscription_id_reads_nested_parent():
+    line = _live_line("il_live", "sub_live", 2900)
+    assert _line_subscription_id(line) == "sub_live"
+    assert _line_subscription_item_id(line) == "si_live"
+    assert _is_subscription_line(line) is True
+
+
+def test_live_invoice_lines_persist_as_billing_events():
+    # Regression for the live bug: 1 active sub at $29, invoice line in the new
+    # shape. Must yield a billing event (not 0) with the nested subscription id.
+    invoices = [_invoice("in_live", "cus_live", [_live_line("il_live", "sub_live", 2900)])]
+    events = _billing_events_from_invoices(invoices, "src_live")
+    assert len(events) == 1
+    event = events[0]
+    assert event["stripe_subscription_id"] == "sub_live"
+    assert event["stripe_customer_id"] == "cus_live"
+    assert event["mrr_cents"] == 2900
+    assert event["is_proration"] is False
+
+
+def test_live_setup_fee_still_excluded():
+    invoices = [_invoice("in_live", "cus_live", [
+        _live_invoice_item_line("il_fee", 5000),
+        _live_line("il_sub", "sub_live", 2900),
+    ])]
+    events = _billing_events_from_invoices(invoices, "src_live")
+    assert [e["stripe_line_item_id"] for e in events] == ["il_sub"]
+
+
+def test_live_proration_flagged_and_excluded_from_level():
+    invoices = [_invoice("in_live", "cus_live", [
+        _live_line("il_pror", "sub_live", 700, proration=True, period_start=_ts(2026, 3)),
+        _live_line("il_full", "sub_live", 5000, period_start=_ts(2026, 3)),
+    ])]
+    events = _billing_events_from_invoices(invoices, "src_live")
+    by_id = {e["stripe_line_item_id"]: e for e in events}
+    assert by_id["il_pror"]["is_proration"] is True
+    assert by_id["il_full"]["is_proration"] is False
+    # Level follows the full line, not the proration.
+    series = _customer_mrr_series(events, {}, as_of=datetime(2026, 4, 1, tzinfo=timezone.utc))
+    from datetime import date
+    assert {when: mrr for (_c, when, mrr, _cur) in series}[date(2026, 3, 1)] == 5000
+
+
+def test_live_invoice_full_pipeline_derives_movement_from_events():
+    # End to end: invoice line (new shape) + active sub → billing event persists,
+    # series + movement derived from the EVENT, not just the active-sub fallback.
+    invoices = [_invoice("in_live", "cus_live", [_live_line("il_live", "sub_live", 2900)])]
+    events = _billing_events_from_invoices(invoices, "src_live")
+    assert len(events) == 1  # billingEvents > 0
+    active = _active_subs_by_customer([_active_sub("cus_live", 2900)], "usd")
+    series = _customer_mrr_series(events, active, as_of=datetime(2026, 2, 1, tzinfo=timezone.utc))
+    movements = _movements_from_series(series)
+    assert [m["movement_type"] for m in movements] == ["new"]
+    # The 'new' movement is dated at the invoice period start (from the event),
+    # not only at the as_of fallback point.
+    from datetime import date
+    assert movements[0]["effective_date"] == date(2026, 1, 1)
