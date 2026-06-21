@@ -399,6 +399,10 @@ class PortfolioRevenueSource(Base):
     user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     provider: Mapped[str] = mapped_column(String(50), nullable=False, default="stripe")
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="not_connected")
+    # Credential path. "connected" reads a Connect account via stripe_account;
+    # "first_party" reads Immensity's own platform account via STRIPE_SECRET_KEY
+    # with no stripe_account param. The engine math is identical either way.
+    account_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="connected")
     provider_account_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     provider_account_label: Mapped[str | None] = mapped_column(Text, nullable=True)
     current_mrr_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -414,6 +418,11 @@ class PortfolioRevenueSource(Base):
     invoice_mrr_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
     previous_invoice_mrr_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
     invoice_revenue_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Unit-economics inputs (PR2). Null → fall back to config defaults and badge
+    # the dependent metric "estimated".
+    gross_margin_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cac_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    profit_margin_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
     connected_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     last_synced_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     oauth_state: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -478,6 +487,43 @@ class PortfolioMrrMovement(Base):
     mrr_delta_cents: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     mrr_after_cents: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     currency: Mapped[str] = mapped_column(Text, nullable=False, default="usd")
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class PortfolioCustomer(Base):
+    """A Stripe customer seen on a revenue source's account, keyed by
+    ``stripe_customer_id``. Populated from the Stripe customer object during sync
+    so the identity email-fallback has an email to match against."""
+
+    __tablename__ = "portfolio_customers"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    revenue_source_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("portfolio_revenue_sources.id", ondelete="CASCADE"), nullable=False, index=True)
+    stripe_customer_id: Mapped[str] = mapped_column(Text, nullable=False)
+    email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class PortfolioIdentity(Base):
+    """One identified usage actor per product. ``resolution_method`` records how
+    ``stripe_customer_id`` was determined: 'explicit' (id trait), 'email'
+    (matched a Stripe customer email), or 'unresolved'."""
+
+    __tablename__ = "portfolio_identities"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    stripe_customer_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    group_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    traits: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    resolution_method: Mapped[str] = mapped_column(Text, nullable=False, default="unresolved")
+    resolved_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 

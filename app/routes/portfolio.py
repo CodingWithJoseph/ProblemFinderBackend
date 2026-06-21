@@ -21,9 +21,11 @@ from app.models import (
     PlanEnum,
     PortfolioAlertSettings,
     PortfolioBillingEvent,
+    PortfolioCustomer,
     PortfolioCustomerMrr,
     PortfolioErrorEvent,
     PortfolioErrorGroup,
+    PortfolioIdentity,
     PortfolioMrrMovement,
     PortfolioRevenueSource,
     PortfolioUsageEvent,
@@ -79,6 +81,18 @@ class ErrorEventBody(BaseModel):
     user_id: str | None = Field(default=None, max_length=256)
     metadata: dict | None = None
     occurred_at: datetime | None = None
+
+
+class IdentifyBody(BaseModel):
+    product_id: str
+    key: str
+    user_id: str = Field(min_length=1, max_length=256)
+    # Optional join traits. stripe_customer_id gives a direct join; email is the
+    # fallback. group_id associates the actor with a company/account.
+    stripe_customer_id: str | None = Field(default=None, max_length=256)
+    email: str | None = Field(default=None, max_length=320)
+    group_id: str | None = Field(default=None, max_length=256)
+    traits: dict | None = None
 
 
 class UsageSourceUpdateBody(BaseModel):
@@ -215,6 +229,7 @@ def _serialize_revenue_source(source: PortfolioRevenueSource | None, engine: str
         "pipelineId": source.pipeline_id,
         "provider": source.provider,
         "status": source.status,
+        "accountMode": source.account_mode,
         "providerAccountId": source.provider_account_id,
         "providerAccountLabel": source.provider_account_label,
         # currentMrrCents reflects the selected engine; both raw figures are
@@ -228,6 +243,9 @@ def _serialize_revenue_source(source: PortfolioRevenueSource | None, engine: str
         "churnRate30d": source.churn_rate_30d,
         "revenueSnapshot": source.revenue_snapshot or {},
         "invoiceRevenueSnapshot": source.invoice_revenue_snapshot or {},
+        "grossMarginPct": source.gross_margin_pct,
+        "cacCents": source.cac_cents,
+        "profitMarginPct": source.profit_margin_pct,
         "connectedAt": _iso(source.connected_at),
         "lastSyncedAt": _iso(source.last_synced_at),
         "createdAt": _iso(source.created_at),
@@ -385,6 +403,36 @@ def _subscription_item_mrr_cents(item: Any) -> int:
 def _subscription_mrr_cents(subscription: Any) -> int:
     items = _stripe_value(_stripe_value(subscription, "items", {}) or {}, "data", []) or []
     return sum(_subscription_item_mrr_cents(item) for item in items)
+
+
+def _stripe_account_kwargs(source: PortfolioRevenueSource) -> dict:
+    """Credential routing for every Stripe read. A ``first_party`` source reads
+    the platform's own account via the module-level ``STRIPE_SECRET_KEY`` (no
+    ``stripe_account``); a ``connected`` source scopes the call to its Connect
+    account. Spread into each ``stripe.*.list`` call so the engine stays
+    credential-agnostic."""
+    if source.account_mode == "first_party":
+        return {}
+    return {"stripe_account": source.provider_account_id}
+
+
+def _credential_path_label(source: PortfolioRevenueSource) -> str:
+    """Human-readable description of which account a sync pulled from, for the
+    Emit log."""
+    if source.account_mode == "first_party":
+        return "first_party (platform STRIPE_SECRET_KEY)"
+    return f"connected (stripe_account={source.provider_account_id})"
+
+
+def _source_is_syncable(source: PortfolioRevenueSource | None) -> bool:
+    """A source can be synced when it's a connected account with a provider id,
+    or a first-party (own-key) source. First-party sources have no
+    ``provider_account_id`` — they read the platform account directly."""
+    if not source or source.status != "connected":
+        return False
+    if source.account_mode == "first_party":
+        return True
+    return bool(source.provider_account_id)
 
 
 def _stripe_timestamp(value: Any) -> int | None:
@@ -642,6 +690,54 @@ async def create_revenue_source(
     return {"data": _serialize_revenue_source(source)}
 
 
+@router.post("/{pipeline_id}/revenue-source/first-party")
+async def create_first_party_revenue_source(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(require_admin_uid),
+):
+    """Admin-only: attach a first-party (own-key) revenue source to a product.
+    No Connect handshake — it reads Immensity's own platform account directly via
+    STRIPE_SECRET_KEY (whichever key is configured, so test mode reads the test
+    account). Admin-only is a hard requirement: first-party sources expose real
+    platform revenue."""
+    if not settings.stripe_secret_key:
+        raise HTTPException(status_code=400, detail="STRIPE_SECRET_KEY is not configured")
+
+    product = await _require_launched_product(pipeline_id, db, uid)
+    now = _now()
+    source = await _revenue_source(product.id, db)
+    if source and source.account_mode != "first_party":
+        raise HTTPException(
+            status_code=400,
+            detail="This product already has a connected revenue source; remove it before switching to first-party",
+        )
+    if not source:
+        source = PortfolioRevenueSource(
+            id=str(uuid.uuid4()),
+            pipeline_id=product.id,
+            user_id=uid,
+            provider="stripe",
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(source)
+
+    # First-party reads the platform account directly: no provider_account_id,
+    # no OAuth state. Mark connected so the scheduled sync picks it up.
+    source.account_mode = "first_party"
+    source.status = "connected"
+    source.provider_account_id = None
+    source.provider_account_label = "platform (STRIPE_SECRET_KEY)"
+    source.connected_at = source.connected_at or now
+    source.oauth_state = None
+    source.oauth_state_expires_at = None
+    source.updated_at = now
+    await db.commit()
+    await db.refresh(source)
+    return {"data": _serialize_revenue_source(source)}
+
+
 @router.post("/{pipeline_id}/revenue-source/connect")
 async def create_revenue_connect_url(
     pipeline_id: str,
@@ -724,17 +820,22 @@ async def get_revenue_metrics(
     eff = await effective_config(db)
     source = await _revenue_source(pipeline_id, db)
     selected_mrr, _previous = _selected_mrr(source, eff.revenue_engine)
+    metrics = await _compute_revenue_metrics(source, db, eff, eff.revenue_sync_window_days) if source else None
     return {
         "data": {
             "source": _serialize_revenue_source(source, eff.revenue_engine),
             "connected": bool(source and source.status == "connected"),
             "summary": {
                 "mrrCents": selected_mrr,
+                "subscriptionMrrCents": source.current_mrr_cents if source else None,
+                "invoiceMrrCents": source.invoice_mrr_cents if source else None,
+                "revenueEngine": eff.revenue_engine,
                 "newCustomers30d": source.new_customers_30d if source else None,
                 "churnedCustomers30d": source.churned_customers_30d if source else None,
                 "churnRate30d": source.churn_rate_30d if source else None,
                 "windowDays": eff.revenue_sync_window_days,
             },
+            "metrics": metrics,
         }
     }
 
@@ -748,7 +849,7 @@ async def sync_revenue_metrics(
     await _require_launched_product(pipeline_id, db, uid)
     eff = await effective_config(db)
     source = await _revenue_source(pipeline_id, db)
-    if not source or source.status != "connected" or not source.provider_account_id:
+    if not _source_is_syncable(source):
         raise HTTPException(status_code=400, detail="Stripe is not connected for this product")
 
     try:
@@ -757,17 +858,142 @@ async def sync_revenue_metrics(
         raise HTTPException(status_code=502, detail="Could not sync Stripe revenue") from exc
 
     selected_mrr, _previous = _selected_mrr(source, eff.revenue_engine)
+    metrics = await _compute_revenue_metrics(source, db, eff, eff.revenue_sync_window_days)
     return {
         "data": {
             "source": _serialize_revenue_source(source, eff.revenue_engine),
             "connected": True,
             "summary": {
                 "mrrCents": selected_mrr,
+                "subscriptionMrrCents": source.current_mrr_cents,
+                "invoiceMrrCents": source.invoice_mrr_cents,
+                "revenueEngine": eff.revenue_engine,
                 "newCustomers30d": source.new_customers_30d,
                 "churnedCustomers30d": source.churned_customers_30d,
                 "churnRate30d": source.churn_rate_30d,
                 "windowDays": eff.revenue_sync_window_days,
             },
+            "metrics": metrics,
+        }
+    }
+
+
+class RevenueEconomicsBody(BaseModel):
+    # All optional: only fields present in the request are applied. A null value
+    # clears the override and reverts the dependent metric to its default
+    # (badged "estimated"). Fractions are 0..1; profit margin may be negative.
+    gross_margin_pct: float | None = Field(default=None, ge=0.0, le=1.0)
+    cac_cents: int | None = Field(default=None, ge=0)
+    profit_margin_pct: float | None = Field(default=None, ge=-1.0, le=1.0)
+
+
+@router.patch("/{pipeline_id}/revenue/economics")
+async def update_revenue_economics(
+    pipeline_id: str,
+    body: RevenueEconomicsBody,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Set the per-source unit-economics inputs (gross margin, CAC, profit
+    margin) that LTV / CAC payback / Rule of 40 depend on."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    source = await _revenue_source(pipeline_id, db)
+    if not source:
+        raise HTTPException(status_code=404, detail="Revenue source not found")
+    for field, value in body.model_dump(exclude_unset=True).items():
+        setattr(source, field, value)
+    source.updated_at = _now()
+    await db.commit()
+    await db.refresh(source)
+    return {"data": _serialize_revenue_source(source, eff.revenue_engine)}
+
+
+@router.get("/{pipeline_id}/revenue/join-coverage")
+async def get_join_coverage(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Identity join-coverage report: of N identified actors, how many resolved
+    via explicit id vs email vs unresolved."""
+    await _require_launched_product(pipeline_id, db, uid)
+    return {"data": await _join_coverage(db, pipeline_id)}
+
+
+@router.get("/{pipeline_id}/insights/revenue-correlation")
+async def get_revenue_correlation(
+    pipeline_id: str,
+    outcomeWindowDays: int = 90,
+    observationWindowDays: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Usage↔revenue correlation: which behaviors predict expansion vs churn.
+    Labels each joined customer by net MRR movement over the outcome window, then
+    scores candidate behaviors with a Laplace-smoothed odds ratio on a 2×2.
+
+    Note: this is the new revenue-correlation insight. The existing usage-vs-
+    errors ``/correlation`` endpoint is unrelated and slated for a later rename
+    to ``error-correlation``; it is intentionally left untouched here."""
+    await _require_launched_product(pipeline_id, db, uid)
+    source = await _revenue_source(pipeline_id, db)
+    now = _now()
+    outcome_start = (now - timedelta(days=outcomeWindowDays)).date()
+    observation_days = observationWindowDays or outcomeWindowDays
+    observation_since = now - timedelta(days=observation_days)
+
+    # Resolved identities: user_ref → stripe_customer_id.
+    customer_by_ref = {
+        ref: cid
+        for ref, cid in (await db.execute(
+            select(PortfolioIdentity.user_ref, PortfolioIdentity.stripe_customer_id).where(
+                PortfolioIdentity.pipeline_id == pipeline_id,
+                PortfolioIdentity.stripe_customer_id != None,
+            )
+        )).all()
+    }
+
+    # Behaviors: event types each joined customer fired in the observation window.
+    behaviors_by_customer: dict[str, set] = {}
+    for ref, event_type in (await db.execute(
+        select(PortfolioUsageEvent.user_ref, PortfolioUsageEvent.event_type).where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.occurred_at >= observation_since,
+            PortfolioUsageEvent.user_ref != None,
+        )
+    )).all():
+        customer_id = customer_by_ref.get(ref)
+        if customer_id:
+            behaviors_by_customer.setdefault(customer_id, set()).add(event_type)
+
+    # Label the cohort: customers active at the window start, positive if their
+    # net MRR movement over the window is ≥ 0 (retained/expanded), else negative.
+    labeled: dict[str, bool] = {}
+    if source:
+        customer_rows = [
+            (row.stripe_customer_id, row.as_of_date, row.mrr_cents, row.currency)
+            for row in (await db.execute(
+                select(PortfolioCustomerMrr).where(PortfolioCustomerMrr.revenue_source_id == source.id)
+            )).scalars().all()
+        ]
+        net_by_customer: dict[str, int] = {}
+        for row in (await db.execute(
+            select(PortfolioMrrMovement).where(PortfolioMrrMovement.revenue_source_id == source.id)
+        )).scalars().all():
+            if outcome_start < row.effective_date <= now.date():
+                net_by_customer[row.stripe_customer_id] = net_by_customer.get(row.stripe_customer_id, 0) + row.mrr_delta_cents
+        for customer_id in _active_customer_set(customer_rows, outcome_start):
+            labeled[customer_id] = net_by_customer.get(customer_id, 0) >= 0
+
+    result = _revenue_correlation(labeled, behaviors_by_customer)
+    return {
+        "data": {
+            "outcomeWindowDays": outcomeWindowDays,
+            "observationWindowDays": observation_days,
+            "resolvedCustomers": len(set(customer_by_ref.values())),
+            "method": "Laplace-smoothed odds ratio on a 2x2 (behavior x net-MRR outcome)",
+            **result,
         }
     }
 
@@ -1009,6 +1235,310 @@ def _total_mrr_at(rows: list[tuple], as_of_date: date, base_currency: str, fx_ra
     return total, by_currency, warnings
 
 
+# ── Derived revenue metrics (PR2) ─────────────────────────────────────────────
+#
+# Churn / NRR / GRR / quick ratio / ARPA / unit economics, computed purely from
+# the movement + customer-MRR tables the invoice engine writes. Every ratio is
+# returned with its components (starting MRR + summed movement amounts) so a
+# wrong figure is traceable to the input that's off without re-deriving by hand.
+
+FIVE_MOVEMENTS = ("new", "expansion", "contraction", "churn", "reactivation")
+LTV_CAP_MONTHS = 60  # 5-year lifetime cap; LTV diverges under non-positive churn
+
+
+def _safe_ratio(numerator: float, denominator: float) -> float | None:
+    if not denominator:
+        return None
+    return round(numerator / denominator, 4)
+
+
+def _movement_sums_by_type(movements: list[tuple], base_currency: str, fx_rates: dict[str, float]) -> tuple[dict[str, int], dict[str, int], list[str]]:
+    """Sum signed movement deltas per type into the base currency (returned as
+    positive magnitudes), plus the distinct customer count per type."""
+    by_type_currency: dict[str, dict[str, int]] = {t: {} for t in FIVE_MOVEMENTS}
+    customers_by_type: dict[str, set] = {t: set() for t in FIVE_MOVEMENTS}
+    for customer, _when, mtype, delta, currency in movements:
+        if mtype not in by_type_currency:
+            continue
+        bucket = by_type_currency[mtype]
+        bucket[currency] = bucket.get(currency, 0) + delta
+        customers_by_type[mtype].add(customer)
+    sums: dict[str, int] = {}
+    warnings: list[str] = []
+    for mtype, by_currency in by_type_currency.items():
+        total, warns = _combine_currency_totals(by_currency, base_currency, fx_rates)
+        sums[mtype] = abs(total)  # contraction/churn are negative; report magnitude
+        warnings.extend(warns)
+    counts = {mtype: len(customers) for mtype, customers in customers_by_type.items()}
+    return sums, counts, warnings
+
+
+def _active_customer_set(customer_rows: list[tuple], as_of_date: date) -> set:
+    """Customers whose latest MRR on/before a date is positive."""
+    latest: dict[str, tuple] = {}
+    for customer, when, mrr, _currency in customer_rows:
+        if when <= as_of_date:
+            existing = latest.get(customer)
+            if existing is None or when >= existing[0]:
+                latest[customer] = (when, mrr)
+    return {customer for customer, (_w, mrr) in latest.items() if mrr > 0}
+
+
+def _count_active_customers(customer_rows: list[tuple], as_of_date: date) -> int:
+    """Count of customers whose latest MRR on/before a date is positive."""
+    return len(_active_customer_set(customer_rows, as_of_date))
+
+
+def _revenue_metrics(
+    customer_rows: list[tuple],
+    movements: list[tuple],
+    window_start: date,
+    as_of: date,
+    base_currency: str,
+    fx_rates: dict[str, float],
+    gross_margin: float | None,
+    cac_cents: int | None,
+    profit_margin: float | None,
+    default_margin: float,
+    window_days: int,
+) -> dict:
+    """All PR2 ratios + unit economics, each shipped with its components."""
+    starting_mrr, _sbc, _sw = _total_mrr_at(customer_rows, window_start, base_currency, fx_rates)
+    current_mrr, _cbc, _cw = _total_mrr_at(customer_rows, as_of, base_currency, fx_rates)
+
+    window_movements = [m for m in movements if window_start < m[1] <= as_of]
+    sums, counts, warnings = _movement_sums_by_type(window_movements, base_currency, fx_rates)
+    new_mrr, expansion = sums["new"], sums["expansion"]
+    contraction, churn, reactivation = sums["contraction"], sums["churn"], sums["reactivation"]
+
+    customers_at_start = _count_active_customers(customer_rows, window_start)
+    active_accounts = _count_active_customers(customer_rows, as_of)
+    churned_customers, new_customers = counts["churn"], counts["new"]
+
+    gross_mrr_churn = _safe_ratio(churn + contraction, starting_mrr)
+    net_mrr_churn = _safe_ratio(churn + contraction - expansion - reactivation, starting_mrr)
+    nrr = _safe_ratio(starting_mrr + expansion - contraction - churn, starting_mrr)
+    grr = _safe_ratio(starting_mrr - contraction - churn, starting_mrr)
+    logo_churn = _safe_ratio(churned_customers, customers_at_start)
+    quick_ratio = _safe_ratio(new_mrr + expansion, contraction + churn)
+    arpa_cents = round(current_mrr / active_accounts) if active_accounts else None
+    mrr_growth_rate = _safe_ratio(current_mrr - starting_mrr, starting_mrr)
+
+    # ── unit economics (badged "estimated" when an input is defaulted) ──
+    margin_estimated = gross_margin is None
+    margin = gross_margin if gross_margin is not None else default_margin
+    monthly_margin_per_account = round(arpa_cents * margin) if arpa_cents is not None else None
+
+    ltv_cents = None
+    if monthly_margin_per_account is not None:
+        cap = monthly_margin_per_account * LTV_CAP_MONTHS
+        if gross_mrr_churn and gross_mrr_churn > 0:
+            ltv_cents = round(min(monthly_margin_per_account / gross_mrr_churn, cap))
+        else:
+            ltv_cents = round(cap)  # zero/negative churn → formula diverges → cap
+
+    cac_payback_months = None
+    ltv_cac = None
+    if cac_cents and monthly_margin_per_account:
+        cac_payback_months = round(cac_cents / monthly_margin_per_account, 2)
+        if ltv_cents is not None:
+            ltv_cac = round(ltv_cents / cac_cents, 2)
+
+    rule_of_40 = None
+    rule_of_40_estimated = profit_margin is None
+    if profit_margin is not None and mrr_growth_rate is not None:
+        rule_of_40 = round((mrr_growth_rate + profit_margin) * 100, 1)  # percentage points
+
+    return {
+        "windowDays": window_days,
+        "components": {
+            "startingMrrCents": starting_mrr,
+            "currentMrrCents": current_mrr,
+            "newMrrCents": new_mrr,
+            "expansionMrrCents": expansion,
+            "contractionMrrCents": contraction,
+            "churnMrrCents": churn,
+            "reactivationMrrCents": reactivation,
+            "customersAtStart": customers_at_start,
+            "activeAccounts": active_accounts,
+            "newCustomers": new_customers,
+            "churnedCustomers": churned_customers,
+            "movementCounts": counts,
+        },
+        "ratios": {
+            "grossMrrChurn": gross_mrr_churn,
+            "netMrrChurn": net_mrr_churn,
+            "nrr": nrr,
+            "grr": grr,
+            "logoChurn": logo_churn,
+            "quickRatio": quick_ratio,
+            "arpaCents": arpa_cents,
+            "mrrGrowthRate": mrr_growth_rate,
+        },
+        "unitEconomics": {
+            "grossMarginPct": margin,
+            "grossMarginEstimated": margin_estimated,
+            "ltvCents": ltv_cents,
+            "ltvCapMonths": LTV_CAP_MONTHS,
+            "cacCents": cac_cents,
+            "cacPaybackMonths": cac_payback_months,
+            "ltvCac": ltv_cac,
+            "profitMarginPct": profit_margin,
+            "ruleOf40": rule_of_40,
+            "ruleOf40Estimated": rule_of_40_estimated,
+        },
+        "warnings": warnings,
+    }
+
+
+async def _compute_revenue_metrics(source: PortfolioRevenueSource, db: AsyncSession, eff: Any, window_days: int) -> dict:
+    """Load the source's movement + customer-MRR rows and derive the PR2 metrics."""
+    customer_rows = [
+        (row.stripe_customer_id, row.as_of_date, row.mrr_cents, row.currency)
+        for row in (await db.execute(
+            select(PortfolioCustomerMrr).where(PortfolioCustomerMrr.revenue_source_id == source.id)
+        )).scalars().all()
+    ]
+    movements = [
+        (row.stripe_customer_id, row.effective_date, row.movement_type, row.mrr_delta_cents, row.currency)
+        for row in (await db.execute(
+            select(PortfolioMrrMovement).where(PortfolioMrrMovement.revenue_source_id == source.id)
+        )).scalars().all()
+    ]
+    now = _now()
+    base_currency = str(getattr(eff, "revenue_base_currency", "usd") or "usd")
+    fx_rates = getattr(eff, "revenue_fx_rates", {}) or {}
+    default_margin = float(getattr(eff, "revenue_default_gross_margin_pct", 0.80))
+    return _revenue_metrics(
+        customer_rows, movements,
+        (now - timedelta(days=window_days)).date(), now.date(),
+        base_currency, fx_rates,
+        source.gross_margin_pct, source.cac_cents, source.profit_margin_pct,
+        default_margin, window_days,
+    )
+
+
+# ── Usage↔revenue correlation (D1) ────────────────────────────────────────────
+#
+# Which behaviors predict expansion vs churn. PostHog method: label each joined
+# customer by their net MRR movement over an outcome window, then for each
+# candidate behavior build a 2×2 (behavior present/absent × outcome positive/
+# negative) and rank by a Laplace-smoothed odds ratio. Every candidate returns
+# its raw (a,b,c,d) alongside the OR, and dropped candidates name the guardrail
+# that dropped them, so both the math and the sample-size honesty are inspectable.
+
+# Guardrail defaults (practitioner floors).
+CORR_MIN_BEHAVIOR_PERSONS = 5      # a+b must clear this
+CORR_MIN_BEHAVIOR_PCT = 0.05       # ...and this share of the cohort
+CORR_MIN_OUTCOME_PER_CLASS = 3     # need both positives and negatives to compare
+CORR_OR_NEUTRAL_BAND = 1.1         # discard OR within ~1.1× of 1.0 (no signal)
+CORR_SAMPLE_FLOOR = 50             # caveat below this many labeled outcomes
+
+
+def _two_by_two(behavior_customers: set, positives: set, negatives: set) -> tuple[int, int, int, int]:
+    """(a,b,c,d) = behavior×outcome contingency over the labeled cohort."""
+    a = len(behavior_customers & positives)
+    b = len(behavior_customers & negatives)
+    c = len(positives - behavior_customers)
+    d = len(negatives - behavior_customers)
+    return a, b, c, d
+
+
+def _laplace_odds_ratio(a: int, b: int, c: int, d: int) -> float:
+    """Laplace-smoothed odds ratio; +1 in every cell avoids divide-by-zero and
+    tempers tiny-cell blowups."""
+    return ((a + 1) * (d + 1)) / ((c + 1) * (b + 1))
+
+
+def _fisher_exact_two_sided(a: int, b: int, c: int, d: int) -> float | None:
+    """Two-sided Fisher's exact p-value for the 2×2, via the hypergeometric
+    distribution (no scipy dependency)."""
+    from math import comb
+    row1, col1, col2 = a + b, a + c, b + d
+    n = a + b + c + d
+    if n == 0 or row1 == 0 or col1 == 0 or col2 == 0:
+        return None
+
+    def hyp(k: int) -> float:
+        return comb(col1, k) * comb(col2, row1 - k) / comb(n, row1)
+
+    p_obs = hyp(a)
+    total = 0.0
+    for k in range(max(0, row1 - col2), min(row1, col1) + 1):
+        pk = hyp(k)
+        if pk <= p_obs * (1 + 1e-9):
+            total += pk
+    return round(min(total, 1.0), 6)
+
+
+def _revenue_correlation(
+    labeled: dict[str, bool],
+    behaviors_by_customer: dict[str, set],
+) -> dict:
+    """Score candidate behaviors against the labeled cohort. ``labeled`` maps a
+    customer to True (positive: expanded/retained) or False (negative: churned/
+    contracted). ``behaviors_by_customer`` maps a customer to the set of event
+    types they fired in the observation window."""
+    positives = {c for c, ok in labeled.items() if ok}
+    negatives = {c for c, ok in labeled.items() if not ok}
+    total = len(labeled)
+    caveats: list[str] = []
+    if total < CORR_SAMPLE_FLOOR:
+        caveats.append(
+            f"only {total} labeled outcomes (practitioner floor ~{CORR_SAMPLE_FLOOR}); treat results as directional"
+        )
+
+    # Heavily-skewed success:failure totals → can't compare; bail with a caveat.
+    if min(len(positives), len(negatives)) < CORR_MIN_OUTCOME_PER_CLASS:
+        caveats.append(
+            f"need ≥{CORR_MIN_OUTCOME_PER_CLASS} customers in each outcome class "
+            f"(have {len(positives)} positive / {len(negatives)} negative)"
+        )
+        return {"candidates": [], "dropped": [], "caveats": caveats,
+                "cohort": {"labeled": total, "positive": len(positives), "negative": len(negatives)}}
+
+    candidate_events: set = set()
+    for events in behaviors_by_customer.values():
+        candidate_events |= events
+
+    kept: list[dict] = []
+    dropped: list[dict] = []
+    for behavior in sorted(candidate_events):
+        behavior_customers = {c for c, events in behaviors_by_customer.items() if behavior in events and c in labeled}
+        a, b, c, d = _two_by_two(behavior_customers, positives, negatives)
+        odds = _laplace_odds_ratio(a, b, c, d)
+        record = {
+            "behavior": behavior,
+            "a": a, "b": b, "c": c, "d": d,
+            "oddsRatio": round(odds, 3),
+        }
+        present = a + b
+        if present < CORR_MIN_BEHAVIOR_PERSONS:
+            dropped.append({**record, "reason": f"too few people did it ({present} < {CORR_MIN_BEHAVIOR_PERSONS})"})
+            continue
+        if total and present / total < CORR_MIN_BEHAVIOR_PCT:
+            dropped.append({**record, "reason": f"below {int(CORR_MIN_BEHAVIOR_PCT * 100)}% of cohort"})
+            continue
+        if (1 / CORR_OR_NEUTRAL_BAND) <= odds <= CORR_OR_NEUTRAL_BAND:
+            dropped.append({**record, "reason": f"odds ratio within ~{CORR_OR_NEUTRAL_BAND}× of 1.0 (no signal)"})
+            continue
+        record["direction"] = "expansion" if odds > 1 else "churn"
+        record["expandLikelihood"] = round(odds, 2)
+        record["churnLikelihood"] = round(1 / odds, 2)
+        record["pValue"] = _fisher_exact_two_sided(a, b, c, d)
+        kept.append(record)
+
+    # Rank by distance from 1.0 in both directions.
+    import math
+    kept.sort(key=lambda r: abs(math.log(r["oddsRatio"])) if r["oddsRatio"] > 0 else 0, reverse=True)
+    return {
+        "candidates": kept,
+        "dropped": dropped,
+        "caveats": caveats,
+        "cohort": {"labeled": total, "positive": len(positives), "negative": len(negatives)},
+    }
+
+
 async def _persist_billing_events(db: AsyncSession, events: list[dict]) -> int:
     """Append billing events, idempotent on ``stripe_line_item_id`` so re-running
     the backfill never duplicates a row."""
@@ -1085,23 +1615,34 @@ async def _run_invoice_engine(source: PortfolioRevenueSource, db: AsyncSession, 
     rebuild the per-customer MRR series + movements, and store the invoice-engine
     totals on ``source`` alongside the legacy snapshot. Returns a small summary
     for the comparison log."""
-    account = source.provider_account_id
+    account_kwargs = _stripe_account_kwargs(source)
     base_currency = str(getattr(eff, "revenue_base_currency", "usd") or "usd")
     fx_rates = getattr(eff, "revenue_fx_rates", {}) or {}
 
     invoices = _stripe_items(stripe.Invoice.list(
         limit=100,
         expand=["data.lines"],
-        stripe_account=account,
+        **account_kwargs,
     ))
     active_subscriptions = _stripe_items(stripe.Subscription.list(
         status="active",
         limit=100,
-        stripe_account=account,
+        **account_kwargs,
     ))
 
     events = _billing_events_from_invoices(invoices, source.id, base_currency)
     await _persist_billing_events(db, events)
+
+    # Populate the customer directory (id + email) so the identity email-fallback
+    # has something to match against, then re-resolve any pending email joins.
+    customers = _stripe_items(stripe.Customer.list(limit=100, **account_kwargs))
+    await _persist_customers(db, source.id, customers)
+    await _resolve_pending_identities(db, source)
+    coverage = await _join_coverage(db, source.pipeline_id)
+    logger.info(
+        "identity join coverage for pipeline %s: explicit=%s email=%s unresolved=%s (resolved rate %s)",
+        source.pipeline_id, coverage["explicit"], coverage["email"], coverage["unresolved"], coverage["resolvedRate"],
+    )
 
     now = _now()
     active_by_customer = _active_subs_by_customer(active_subscriptions, base_currency)
@@ -1141,12 +1682,114 @@ def _log_engine_comparison(source: PortfolioRevenueSource, invoice_result: dict)
     subscription_mrr = source.current_mrr_cents or 0
     invoice_mrr = invoice_result["current_total"]
     logger.info(
-        "revenue engine comparison for source %s: subscription=%s cents, invoice=%s cents, delta=%s cents "
+        "revenue engine comparison for source %s [%s]: subscription=%s cents, invoice=%s cents, delta=%s cents "
         "(invoice engine is more correct; deltas come from prorations/discounts/refunds and reconstructed history)",
-        source.id, subscription_mrr, invoice_mrr, invoice_mrr - subscription_mrr,
+        source.id, _credential_path_label(source), subscription_mrr, invoice_mrr, invoice_mrr - subscription_mrr,
     )
     if invoice_result.get("warnings"):
         logger.warning("revenue engine currency warnings for source %s: %s", source.id, invoice_result["warnings"])
+
+
+# ── Identity join (PR3) ───────────────────────────────────────────────────────
+#
+# Connects a usage actor (user_ref, set via the tracker's identify()) to a paying
+# Stripe customer. Join key is an explicit stripe_customer_id trait; email is the
+# fallback, matched against the Stripe customer directory populated during sync.
+
+
+async def _persist_customers(db: AsyncSession, source_id: str, customers: list[Any]) -> int:
+    """Upsert the Stripe customer directory (id + email) for a source."""
+    now = _now()
+    table = PortfolioCustomer.__table__
+    written = 0
+    for customer in customers:
+        customer_id = _stripe_value(customer, "id")
+        if not customer_id:
+            continue
+        email = _stripe_value(customer, "email")
+        await db.execute(
+            pg_insert(table)
+            .values(
+                id=str(uuid.uuid4()), revenue_source_id=source_id, stripe_customer_id=customer_id,
+                email=email, name=_stripe_value(customer, "name"), created_at=now, updated_at=now,
+            )
+            .on_conflict_do_update(
+                index_elements=["revenue_source_id", "stripe_customer_id"],
+                set_={"email": email, "name": _stripe_value(customer, "name"), "updated_at": now},
+            )
+        )
+        written += 1
+    await db.flush()
+    return written
+
+
+def _resolve_identity(stripe_customer_id: str | None, email: str | None, customer_by_email: dict[str, str]) -> tuple[str | None, str]:
+    """Resolve a usage actor to a Stripe customer. Explicit id wins; otherwise
+    match email against the Stripe customer directory; otherwise unresolved.
+    Returns ``(stripe_customer_id, resolution_method)``."""
+    if stripe_customer_id:
+        return stripe_customer_id, "explicit"
+    if email:
+        matched = customer_by_email.get(email.strip().lower())
+        if matched:
+            return matched, "email"
+    return None, "unresolved"
+
+
+async def _customer_email_index(db: AsyncSession, source_id: str) -> dict[str, str]:
+    rows = (await db.execute(
+        select(PortfolioCustomer.stripe_customer_id, PortfolioCustomer.email)
+        .where(PortfolioCustomer.revenue_source_id == source_id)
+    )).all()
+    return {email.strip().lower(): cid for cid, email in rows if email}
+
+
+async def _resolve_pending_identities(db: AsyncSession, source: PortfolioRevenueSource) -> int:
+    """Re-resolve identities for this product that aren't explicitly joined yet,
+    now that the customer directory is fresh. Returns how many became resolved."""
+    email_index = await _customer_email_index(db, source.id)
+    pending = (await db.execute(
+        select(PortfolioIdentity).where(
+            PortfolioIdentity.pipeline_id == source.pipeline_id,
+            PortfolioIdentity.resolution_method != "explicit",
+        )
+    )).scalars().all()
+    newly_resolved = 0
+    now = _now()
+    for identity in pending:
+        customer_id, method = _resolve_identity(identity.stripe_customer_id, identity.email, email_index)
+        if method != identity.resolution_method or customer_id != identity.stripe_customer_id:
+            identity.stripe_customer_id = customer_id
+            identity.resolution_method = method
+            identity.resolved_at = now if method != "unresolved" else None
+            identity.updated_at = now
+            if method != "unresolved":
+                newly_resolved += 1
+    await db.flush()
+    return newly_resolved
+
+
+async def _join_coverage(db: AsyncSession, pipeline_id: str) -> dict:
+    """Join-coverage report: of N identified actors, how many resolved via
+    explicit id vs email vs unresolved. Validates the layer and predicts how
+    strong the correlation inputs will be."""
+    rows = (await db.execute(
+        select(PortfolioIdentity.resolution_method, func.count(PortfolioIdentity.id))
+        .where(PortfolioIdentity.pipeline_id == pipeline_id)
+        .group_by(PortfolioIdentity.resolution_method)
+    )).all()
+    counts = {method: int(count) for method, count in rows}
+    explicit = counts.get("explicit", 0)
+    email = counts.get("email", 0)
+    unresolved = counts.get("unresolved", 0)
+    total = explicit + email + unresolved
+    return {
+        "total": total,
+        "explicit": explicit,
+        "email": email,
+        "unresolved": unresolved,
+        "resolvedRate": round((explicit + email) / total, 4) if total else None,
+    }
 
 
 async def _perform_revenue_sync(source: PortfolioRevenueSource, db: AsyncSession, window_days: int | None = None) -> None:
@@ -1154,20 +1797,22 @@ async def _perform_revenue_sync(source: PortfolioRevenueSource, db: AsyncSession
     commit. Raises on Stripe failure; callers decide how to surface it."""
     window = window_days if window_days is not None else settings.revenue_sync_window_days
     since = int((_now() - timedelta(days=window)).timestamp())
+    account_kwargs = _stripe_account_kwargs(source)
+    logger.info("revenue sync for source %s via %s", source.id, _credential_path_label(source))
     active_subscriptions = _stripe_items(stripe.Subscription.list(
         status="active",
         limit=100,
-        stripe_account=source.provider_account_id,
+        **account_kwargs,
     ))
     customers = _stripe_items(stripe.Customer.list(
         created={"gte": since},
         limit=100,
-        stripe_account=source.provider_account_id,
+        **account_kwargs,
     ))
     canceled_subscriptions = _stripe_items(stripe.Subscription.list(
         status="canceled",
         limit=100,
-        stripe_account=source.provider_account_id,
+        **account_kwargs,
     ))
 
     churned = [
@@ -1215,10 +1860,15 @@ async def _sync_connected_revenue_sources(db: AsyncSession) -> int:
     logged and skipped so one bad account can't stall the rest. Returns the
     number successfully synced."""
     eff = await effective_config(db)
+    # Connected sources need a provider account id; first-party sources read the
+    # platform account directly and have none, so they're included unconditionally.
     sources = list((await db.execute(
         select(PortfolioRevenueSource).where(
             PortfolioRevenueSource.status == "connected",
-            PortfolioRevenueSource.provider_account_id != None,
+            (
+                (PortfolioRevenueSource.account_mode == "first_party")
+                | (PortfolioRevenueSource.provider_account_id != None)
+            ),
         )
     )).scalars().all())
 
@@ -1557,6 +2207,10 @@ def _correlation_insights(days: list[dict]) -> list[str]:
     return insights
 
 
+# NOTE: this is the usage-vs-errors correlation. It is slated for a later rename
+# to `/insights/error-correlation` to disambiguate from the new usage↔revenue
+# correlation (`/insights/revenue-correlation`). Left at its current path here to
+# keep this build non-breaking.
 @router.get("/{pipeline_id}/correlation")
 async def get_correlation(
     pipeline_id: str,
@@ -1845,6 +2499,63 @@ async def ingest_usage_event(
     db.add(event)
     await db.commit()
     return {"success": True}
+
+
+@public_router.post("/identify")
+async def ingest_identify(
+    request: Request,
+    body: IdentifyBody,
+    db: AsyncSession = Depends(get_db),
+):
+    """Associate a usage actor (user_ref) with a Stripe customer. Server-side so
+    ad-blockers can't drop it. Upserts the identity and resolves it against the
+    customer directory: explicit stripe_customer_id trait → direct join; else
+    email match; else unresolved (resolved later when the directory has the
+    customer's email)."""
+    source = (await db.execute(
+        select(PortfolioUsageSource).where(
+            PortfolioUsageSource.pipeline_id == body.product_id,
+            PortfolioUsageSource.public_key == body.key,
+            PortfolioUsageSource.status == "connected",
+        )
+    )).scalar_one_or_none()
+    if not source:
+        raise HTTPException(status_code=404, detail="Usage source not found")
+    if not _origin_allowed(source.allowed_domain, request, None):
+        raise HTTPException(status_code=403, detail="Identify origin is not allowed")
+
+    now = _now()
+    email = _clean_text(body.email)
+    # Resolve against the revenue source's customer directory, if one exists.
+    revenue = await _revenue_source(source.pipeline_id, db)
+    email_index = await _customer_email_index(db, revenue.id) if revenue else {}
+    customer_id, method = _resolve_identity(_clean_text(body.stripe_customer_id), email, email_index)
+
+    existing = (await db.execute(
+        select(PortfolioIdentity).where(
+            PortfolioIdentity.pipeline_id == source.pipeline_id,
+            PortfolioIdentity.user_ref == body.user_id,
+        )
+    )).scalar_one_or_none()
+    if existing is None:
+        existing = PortfolioIdentity(
+            id=str(uuid.uuid4()),
+            pipeline_id=source.pipeline_id,
+            user_ref=body.user_id,
+            created_at=now,
+        )
+        db.add(existing)
+    existing.email = email or existing.email
+    existing.group_id = _clean_text(body.group_id) or existing.group_id
+    existing.traits = body.traits or existing.traits
+    # Never downgrade an explicit join to a weaker method on a later call.
+    if existing.resolution_method != "explicit" or method == "explicit":
+        existing.stripe_customer_id = customer_id or existing.stripe_customer_id
+        existing.resolution_method = method
+        existing.resolved_at = now if method != "unresolved" else existing.resolved_at
+    existing.updated_at = now
+    await db.commit()
+    return {"success": True, "resolution": existing.resolution_method}
 
 
 @public_router.post("/errors")

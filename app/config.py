@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     # a warning rather than silently mixing currencies.
     revenue_base_currency: str = "usd"
     revenue_fx_rates: dict[str, float] = {}
+    # Default gross margin (0..1) for unit economics when a source hasn't set its
+    # own; metrics computed with this default are badged "estimated".
+    revenue_default_gross_margin_pct: float = 0.80
 
     # Analytics windows (days). These are the single source of truth for the
     # monitoring readouts; each API response echoes the window it used so the
