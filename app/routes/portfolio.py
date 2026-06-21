@@ -921,6 +921,83 @@ async def get_join_coverage(
     return {"data": await _join_coverage(db, pipeline_id)}
 
 
+@router.get("/{pipeline_id}/insights/revenue-correlation")
+async def get_revenue_correlation(
+    pipeline_id: str,
+    outcomeWindowDays: int = 90,
+    observationWindowDays: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Usage↔revenue correlation: which behaviors predict expansion vs churn.
+    Labels each joined customer by net MRR movement over the outcome window, then
+    scores candidate behaviors with a Laplace-smoothed odds ratio on a 2×2.
+
+    Note: this is the new revenue-correlation insight. The existing usage-vs-
+    errors ``/correlation`` endpoint is unrelated and slated for a later rename
+    to ``error-correlation``; it is intentionally left untouched here."""
+    await _require_launched_product(pipeline_id, db, uid)
+    source = await _revenue_source(pipeline_id, db)
+    now = _now()
+    outcome_start = (now - timedelta(days=outcomeWindowDays)).date()
+    observation_days = observationWindowDays or outcomeWindowDays
+    observation_since = now - timedelta(days=observation_days)
+
+    # Resolved identities: user_ref → stripe_customer_id.
+    customer_by_ref = {
+        ref: cid
+        for ref, cid in (await db.execute(
+            select(PortfolioIdentity.user_ref, PortfolioIdentity.stripe_customer_id).where(
+                PortfolioIdentity.pipeline_id == pipeline_id,
+                PortfolioIdentity.stripe_customer_id != None,
+            )
+        )).all()
+    }
+
+    # Behaviors: event types each joined customer fired in the observation window.
+    behaviors_by_customer: dict[str, set] = {}
+    for ref, event_type in (await db.execute(
+        select(PortfolioUsageEvent.user_ref, PortfolioUsageEvent.event_type).where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.occurred_at >= observation_since,
+            PortfolioUsageEvent.user_ref != None,
+        )
+    )).all():
+        customer_id = customer_by_ref.get(ref)
+        if customer_id:
+            behaviors_by_customer.setdefault(customer_id, set()).add(event_type)
+
+    # Label the cohort: customers active at the window start, positive if their
+    # net MRR movement over the window is ≥ 0 (retained/expanded), else negative.
+    labeled: dict[str, bool] = {}
+    if source:
+        customer_rows = [
+            (row.stripe_customer_id, row.as_of_date, row.mrr_cents, row.currency)
+            for row in (await db.execute(
+                select(PortfolioCustomerMrr).where(PortfolioCustomerMrr.revenue_source_id == source.id)
+            )).scalars().all()
+        ]
+        net_by_customer: dict[str, int] = {}
+        for row in (await db.execute(
+            select(PortfolioMrrMovement).where(PortfolioMrrMovement.revenue_source_id == source.id)
+        )).scalars().all():
+            if outcome_start < row.effective_date <= now.date():
+                net_by_customer[row.stripe_customer_id] = net_by_customer.get(row.stripe_customer_id, 0) + row.mrr_delta_cents
+        for customer_id in _active_customer_set(customer_rows, outcome_start):
+            labeled[customer_id] = net_by_customer.get(customer_id, 0) >= 0
+
+    result = _revenue_correlation(labeled, behaviors_by_customer)
+    return {
+        "data": {
+            "outcomeWindowDays": outcomeWindowDays,
+            "observationWindowDays": observation_days,
+            "resolvedCustomers": len(set(customer_by_ref.values())),
+            "method": "Laplace-smoothed odds ratio on a 2x2 (behavior x net-MRR outcome)",
+            **result,
+        }
+    }
+
+
 # ── Invoice/event-derived MRR engine (PR1) ────────────────────────────────────
 #
 # The legacy path below sums active subscriptions: it only sees current state,
@@ -1196,7 +1273,7 @@ def _movement_sums_by_type(movements: list[tuple], base_currency: str, fx_rates:
     return sums, counts, warnings
 
 
-def _count_active_customers(customer_rows: list[tuple], as_of_date: date) -> int:
+def _active_customer_set(customer_rows: list[tuple], as_of_date: date) -> set:
     """Customers whose latest MRR on/before a date is positive."""
     latest: dict[str, tuple] = {}
     for customer, when, mrr, _currency in customer_rows:
@@ -1204,7 +1281,12 @@ def _count_active_customers(customer_rows: list[tuple], as_of_date: date) -> int
             existing = latest.get(customer)
             if existing is None or when >= existing[0]:
                 latest[customer] = (when, mrr)
-    return sum(1 for (_w, mrr) in latest.values() if mrr > 0)
+    return {customer for customer, (_w, mrr) in latest.items() if mrr > 0}
+
+
+def _count_active_customers(customer_rows: list[tuple], as_of_date: date) -> int:
+    """Count of customers whose latest MRR on/before a date is positive."""
+    return len(_active_customer_set(customer_rows, as_of_date))
 
 
 def _revenue_metrics(
@@ -1334,6 +1416,127 @@ async def _compute_revenue_metrics(source: PortfolioRevenueSource, db: AsyncSess
         source.gross_margin_pct, source.cac_cents, source.profit_margin_pct,
         default_margin, window_days,
     )
+
+
+# ── Usage↔revenue correlation (D1) ────────────────────────────────────────────
+#
+# Which behaviors predict expansion vs churn. PostHog method: label each joined
+# customer by their net MRR movement over an outcome window, then for each
+# candidate behavior build a 2×2 (behavior present/absent × outcome positive/
+# negative) and rank by a Laplace-smoothed odds ratio. Every candidate returns
+# its raw (a,b,c,d) alongside the OR, and dropped candidates name the guardrail
+# that dropped them, so both the math and the sample-size honesty are inspectable.
+
+# Guardrail defaults (practitioner floors).
+CORR_MIN_BEHAVIOR_PERSONS = 5      # a+b must clear this
+CORR_MIN_BEHAVIOR_PCT = 0.05       # ...and this share of the cohort
+CORR_MIN_OUTCOME_PER_CLASS = 3     # need both positives and negatives to compare
+CORR_OR_NEUTRAL_BAND = 1.1         # discard OR within ~1.1× of 1.0 (no signal)
+CORR_SAMPLE_FLOOR = 50             # caveat below this many labeled outcomes
+
+
+def _two_by_two(behavior_customers: set, positives: set, negatives: set) -> tuple[int, int, int, int]:
+    """(a,b,c,d) = behavior×outcome contingency over the labeled cohort."""
+    a = len(behavior_customers & positives)
+    b = len(behavior_customers & negatives)
+    c = len(positives - behavior_customers)
+    d = len(negatives - behavior_customers)
+    return a, b, c, d
+
+
+def _laplace_odds_ratio(a: int, b: int, c: int, d: int) -> float:
+    """Laplace-smoothed odds ratio; +1 in every cell avoids divide-by-zero and
+    tempers tiny-cell blowups."""
+    return ((a + 1) * (d + 1)) / ((c + 1) * (b + 1))
+
+
+def _fisher_exact_two_sided(a: int, b: int, c: int, d: int) -> float | None:
+    """Two-sided Fisher's exact p-value for the 2×2, via the hypergeometric
+    distribution (no scipy dependency)."""
+    from math import comb
+    row1, col1, col2 = a + b, a + c, b + d
+    n = a + b + c + d
+    if n == 0 or row1 == 0 or col1 == 0 or col2 == 0:
+        return None
+
+    def hyp(k: int) -> float:
+        return comb(col1, k) * comb(col2, row1 - k) / comb(n, row1)
+
+    p_obs = hyp(a)
+    total = 0.0
+    for k in range(max(0, row1 - col2), min(row1, col1) + 1):
+        pk = hyp(k)
+        if pk <= p_obs * (1 + 1e-9):
+            total += pk
+    return round(min(total, 1.0), 6)
+
+
+def _revenue_correlation(
+    labeled: dict[str, bool],
+    behaviors_by_customer: dict[str, set],
+) -> dict:
+    """Score candidate behaviors against the labeled cohort. ``labeled`` maps a
+    customer to True (positive: expanded/retained) or False (negative: churned/
+    contracted). ``behaviors_by_customer`` maps a customer to the set of event
+    types they fired in the observation window."""
+    positives = {c for c, ok in labeled.items() if ok}
+    negatives = {c for c, ok in labeled.items() if not ok}
+    total = len(labeled)
+    caveats: list[str] = []
+    if total < CORR_SAMPLE_FLOOR:
+        caveats.append(
+            f"only {total} labeled outcomes (practitioner floor ~{CORR_SAMPLE_FLOOR}); treat results as directional"
+        )
+
+    # Heavily-skewed success:failure totals → can't compare; bail with a caveat.
+    if min(len(positives), len(negatives)) < CORR_MIN_OUTCOME_PER_CLASS:
+        caveats.append(
+            f"need ≥{CORR_MIN_OUTCOME_PER_CLASS} customers in each outcome class "
+            f"(have {len(positives)} positive / {len(negatives)} negative)"
+        )
+        return {"candidates": [], "dropped": [], "caveats": caveats,
+                "cohort": {"labeled": total, "positive": len(positives), "negative": len(negatives)}}
+
+    candidate_events: set = set()
+    for events in behaviors_by_customer.values():
+        candidate_events |= events
+
+    kept: list[dict] = []
+    dropped: list[dict] = []
+    for behavior in sorted(candidate_events):
+        behavior_customers = {c for c, events in behaviors_by_customer.items() if behavior in events and c in labeled}
+        a, b, c, d = _two_by_two(behavior_customers, positives, negatives)
+        odds = _laplace_odds_ratio(a, b, c, d)
+        record = {
+            "behavior": behavior,
+            "a": a, "b": b, "c": c, "d": d,
+            "oddsRatio": round(odds, 3),
+        }
+        present = a + b
+        if present < CORR_MIN_BEHAVIOR_PERSONS:
+            dropped.append({**record, "reason": f"too few people did it ({present} < {CORR_MIN_BEHAVIOR_PERSONS})"})
+            continue
+        if total and present / total < CORR_MIN_BEHAVIOR_PCT:
+            dropped.append({**record, "reason": f"below {int(CORR_MIN_BEHAVIOR_PCT * 100)}% of cohort"})
+            continue
+        if (1 / CORR_OR_NEUTRAL_BAND) <= odds <= CORR_OR_NEUTRAL_BAND:
+            dropped.append({**record, "reason": f"odds ratio within ~{CORR_OR_NEUTRAL_BAND}× of 1.0 (no signal)"})
+            continue
+        record["direction"] = "expansion" if odds > 1 else "churn"
+        record["expandLikelihood"] = round(odds, 2)
+        record["churnLikelihood"] = round(1 / odds, 2)
+        record["pValue"] = _fisher_exact_two_sided(a, b, c, d)
+        kept.append(record)
+
+    # Rank by distance from 1.0 in both directions.
+    import math
+    kept.sort(key=lambda r: abs(math.log(r["oddsRatio"])) if r["oddsRatio"] > 0 else 0, reverse=True)
+    return {
+        "candidates": kept,
+        "dropped": dropped,
+        "caveats": caveats,
+        "cohort": {"labeled": total, "positive": len(positives), "negative": len(negatives)},
+    }
 
 
 async def _persist_billing_events(db: AsyncSession, events: list[dict]) -> int:
@@ -2004,6 +2207,10 @@ def _correlation_insights(days: list[dict]) -> list[str]:
     return insights
 
 
+# NOTE: this is the usage-vs-errors correlation. It is slated for a later rename
+# to `/insights/error-correlation` to disambiguate from the new usage↔revenue
+# correlation (`/insights/revenue-correlation`). Left at its current path here to
+# keep this build non-breaking.
 @router.get("/{pipeline_id}/correlation")
 async def get_correlation(
     pipeline_id: str,
