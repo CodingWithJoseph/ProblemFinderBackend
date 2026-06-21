@@ -60,6 +60,18 @@ class Settings(BaseSettings):
     revenue_sync_interval_hours: int = 6
     # Lookback span for new-customer / churn revenue stats, in days.
     revenue_sync_window_days: int = 30
+    # Which MRR engine the revenue serializer reads from. "subscription" is the
+    # legacy "sum active subscriptions" snapshot; "invoice" is the invoice/event
+    # ledger engine. Both are computed and stored every sync so totals can be
+    # compared; this flag only decides which one is surfaced. Default stays on
+    # the legacy path until the new engine is validated and the default flipped.
+    revenue_engine: str = "subscription"
+    # Base currency for cross-currency MRR totals, and a static rate table
+    # (units of base per 1 unit of the keyed currency) used when an account
+    # bills in more than one currency. No live FX in this PR; missing rates emit
+    # a warning rather than silently mixing currencies.
+    revenue_base_currency: str = "usd"
+    revenue_fx_rates: dict[str, float] = {}
 
     # Analytics windows (days). These are the single source of truth for the
     # monitoring readouts; each API response echoes the window it used so the

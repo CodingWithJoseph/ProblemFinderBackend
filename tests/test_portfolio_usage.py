@@ -58,6 +58,7 @@ async def test_portfolio_product_includes_usage_source(client, fake_db, auth_hea
     source = make_usage_source(pipeline_id=product.id)
     fake_db.stub(execute=[
         FakeResult(rows=[product]),  # launched product lookup
+        FakeResult(rows=[]),         # app settings overlay (revenue engine flag)
         FakeResult(rows=[]),         # issue counts
         FakeResult(rows=[source]),   # usage source
         FakeResult(rows=[]),         # revenue source

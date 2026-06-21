@@ -408,10 +408,76 @@ class PortfolioRevenueSource(Base):
     churned_customers_30d: Mapped[int | None] = mapped_column(Integer, nullable=True)
     churn_rate_30d: Mapped[float | None] = mapped_column(Float, nullable=True)
     revenue_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Parallel invoice-engine totals (PR1). Computed alongside the old snapshot
+    # above so the two can be compared before the revenue_engine flag is flipped;
+    # the serializer reads whichever the flag selects.
+    invoice_mrr_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    previous_invoice_mrr_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    invoice_revenue_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     connected_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     last_synced_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     oauth_state: Mapped[str | None] = mapped_column(Text, nullable=True)
     oauth_state_expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class PortfolioBillingEvent(Base):
+    """Immutable, append-only ledger row derived from a Stripe invoice line item.
+    One row per recurring-revenue-affecting fact. ``stripe_line_item_id`` is the
+    natural idempotency key, so re-running the backfill never duplicates a row.
+    Non-subscription line items (one-off charges, setup fees) are excluded at
+    ingestion and never reach this table."""
+
+    __tablename__ = "portfolio_billing_events"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    revenue_source_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("portfolio_revenue_sources.id", ondelete="CASCADE"), nullable=False, index=True)
+    stripe_customer_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stripe_subscription_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stripe_invoice_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stripe_line_item_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    # This line's normalized monthly amount, after discounts, in cents.
+    mrr_cents: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    currency: Mapped[str] = mapped_column(Text, nullable=False, default="usd")
+    # Line item period.start — when this recurring level takes effect.
+    effective_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    is_proration: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    raw: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class PortfolioCustomerMrr(Base):
+    """Per-customer normalized MRR time series. Summing each customer's latest
+    row on/before a date gives total MRR at that date."""
+
+    __tablename__ = "portfolio_customer_mrr"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    revenue_source_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("portfolio_revenue_sources.id", ondelete="CASCADE"), nullable=False, index=True)
+    stripe_customer_id: Mapped[str] = mapped_column(Text, nullable=False)
+    as_of_date: Mapped[date] = mapped_column(Date, nullable=False)
+    mrr_cents: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    currency: Mapped[str] = mapped_column(Text, nullable=False, default="usd")
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class PortfolioMrrMovement(Base):
+    """A single MRR movement for a customer, derived by diffing consecutive
+    ``portfolio_customer_mrr`` rows. At most one movement per customer per
+    ``effective_date``."""
+
+    __tablename__ = "portfolio_mrr_movements"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    revenue_source_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("portfolio_revenue_sources.id", ondelete="CASCADE"), nullable=False, index=True)
+    stripe_customer_id: Mapped[str] = mapped_column(Text, nullable=False)
+    effective_date: Mapped[date] = mapped_column(Date, nullable=False)
+    movement_type: Mapped[str] = mapped_column(Text, nullable=False)
+    mrr_delta_cents: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    mrr_after_cents: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    currency: Mapped[str] = mapped_column(Text, nullable=False, default="usd")
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
