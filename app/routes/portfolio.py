@@ -10,6 +10,7 @@ from urllib.parse import urlencode, urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
@@ -19,8 +20,11 @@ from app.models import (
     Pipeline,
     PlanEnum,
     PortfolioAlertSettings,
+    PortfolioBillingEvent,
+    PortfolioCustomerMrr,
     PortfolioErrorEvent,
     PortfolioErrorGroup,
+    PortfolioMrrMovement,
     PortfolioRevenueSource,
     PortfolioUsageEvent,
     PortfolioUsageSource,
@@ -192,9 +196,20 @@ def _serialize_error_event(event: PortfolioErrorEvent) -> dict:
     }
 
 
-def _serialize_revenue_source(source: PortfolioRevenueSource | None) -> dict | None:
+def _selected_mrr(source: PortfolioRevenueSource | None, engine: str) -> tuple[int | None, int | None]:
+    """The (current, previous) MRR for the engine the flag selects. ``invoice``
+    reads the new engine's totals; anything else stays on the legacy snapshot."""
+    if not source:
+        return None, None
+    if engine == "invoice":
+        return source.invoice_mrr_cents, source.previous_invoice_mrr_cents
+    return source.current_mrr_cents, source.previous_mrr_cents
+
+
+def _serialize_revenue_source(source: PortfolioRevenueSource | None, engine: str = "subscription") -> dict | None:
     if not source:
         return None
+    current_mrr, _previous_mrr = _selected_mrr(source, engine)
     return {
         "id": source.id,
         "pipelineId": source.pipeline_id,
@@ -202,11 +217,17 @@ def _serialize_revenue_source(source: PortfolioRevenueSource | None) -> dict | N
         "status": source.status,
         "providerAccountId": source.provider_account_id,
         "providerAccountLabel": source.provider_account_label,
-        "currentMrrCents": source.current_mrr_cents,
+        # currentMrrCents reflects the selected engine; both raw figures are
+        # exposed alongside so the two can be compared during cutover.
+        "currentMrrCents": current_mrr,
+        "revenueEngine": engine,
+        "subscriptionMrrCents": source.current_mrr_cents,
+        "invoiceMrrCents": source.invoice_mrr_cents,
         "newCustomers30d": source.new_customers_30d,
         "churnedCustomers30d": source.churned_customers_30d,
         "churnRate30d": source.churn_rate_30d,
         "revenueSnapshot": source.revenue_snapshot or {},
+        "invoiceRevenueSnapshot": source.invoice_revenue_snapshot or {},
         "connectedAt": _iso(source.connected_at),
         "lastSyncedAt": _iso(source.last_synced_at),
         "createdAt": _iso(source.created_at),
@@ -335,6 +356,20 @@ def _stripe_items(response: Any) -> list[Any]:
     return list(_stripe_value(response, "data", []) or [])
 
 
+def _normalize_interval_cents(amount: int, interval: str, interval_count: int = 1) -> int:
+    """Normalize a per-period amount (cents) to a monthly run-rate. Single source
+    of truth for annual/weekly/daily → monthly conversion, shared by the
+    subscription-object path and the invoice-line path."""
+    interval_count = int(interval_count or 1)
+    if interval == "year":
+        return round(amount / (12 * interval_count))
+    if interval == "week":
+        return round(amount * 52 / (12 * interval_count))
+    if interval == "day":
+        return round(amount * 365 / (12 * interval_count))
+    return round(amount / interval_count)
+
+
 def _subscription_item_mrr_cents(item: Any) -> int:
     price = _stripe_value(item, "price", {}) or {}
     quantity = _stripe_value(item, "quantity", 1) or 1
@@ -344,13 +379,7 @@ def _subscription_item_mrr_cents(item: Any) -> int:
     interval_count = _stripe_value(recurring, "interval_count", 1) or 1
 
     amount = int(unit_amount) * int(quantity)
-    if interval == "year":
-        return round(amount / (12 * interval_count))
-    if interval == "week":
-        return round(amount * 52 / (12 * interval_count))
-    if interval == "day":
-        return round(amount * 365 / (12 * interval_count))
-    return round(amount / interval_count)
+    return _normalize_interval_cents(amount, interval, interval_count)
 
 
 def _subscription_mrr_cents(subscription: Any) -> int:
@@ -438,6 +467,7 @@ async def get_portfolio_product(
     uid: str = Depends(get_uid),
 ):
     product = await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
     posts_map = await _fetch_posts_for_cards([product], db)
     teams_map = await _fetch_teams_for_cards([product], db)
     counts_map = await _fetch_issue_counts_for_cards([product], db)
@@ -445,7 +475,7 @@ async def get_portfolio_product(
         "data": {
             **_serialize_cards([product], posts_map, teams_map, counts_map)[0],
             "usageSource": _serialize_usage_source(await _usage_source(pipeline_id, db)),
-            "revenueSource": _serialize_revenue_source(await _revenue_source(pipeline_id, db)),
+            "revenueSource": _serialize_revenue_source(await _revenue_source(pipeline_id, db), eff.revenue_engine),
         }
     }
 
@@ -693,12 +723,13 @@ async def get_revenue_metrics(
     await _require_launched_product(pipeline_id, db, uid)
     eff = await effective_config(db)
     source = await _revenue_source(pipeline_id, db)
+    selected_mrr, _previous = _selected_mrr(source, eff.revenue_engine)
     return {
         "data": {
-            "source": _serialize_revenue_source(source),
+            "source": _serialize_revenue_source(source, eff.revenue_engine),
             "connected": bool(source and source.status == "connected"),
             "summary": {
-                "mrrCents": source.current_mrr_cents if source else None,
+                "mrrCents": selected_mrr,
                 "newCustomers30d": source.new_customers_30d if source else None,
                 "churnedCustomers30d": source.churned_customers_30d if source else None,
                 "churnRate30d": source.churn_rate_30d if source else None,
@@ -725,12 +756,13 @@ async def sync_revenue_metrics(
     except Exception as exc:
         raise HTTPException(status_code=502, detail="Could not sync Stripe revenue") from exc
 
+    selected_mrr, _previous = _selected_mrr(source, eff.revenue_engine)
     return {
         "data": {
-            "source": _serialize_revenue_source(source),
+            "source": _serialize_revenue_source(source, eff.revenue_engine),
             "connected": True,
             "summary": {
-                "mrrCents": source.current_mrr_cents,
+                "mrrCents": selected_mrr,
                 "newCustomers30d": source.new_customers_30d,
                 "churnedCustomers30d": source.churned_customers_30d,
                 "churnRate30d": source.churn_rate_30d,
@@ -738,6 +770,383 @@ async def sync_revenue_metrics(
             },
         }
     }
+
+
+# ── Invoice/event-derived MRR engine (PR1) ────────────────────────────────────
+#
+# The legacy path below sums active subscriptions: it only sees current state,
+# so it can't reconstruct history and misses prorations/discounts/refunds. This
+# engine derives MRR *history* and *movements* from invoices + invoice line
+# items. It runs alongside the legacy snapshot; the ``revenue_engine`` flag
+# selects which total the API surfaces. All the heavy lifting below is pure
+# (Stripe objects in, plain rows out) so it's unit-testable without a DB.
+
+MovementType = Literal["new", "expansion", "contraction", "churn", "reactivation"]
+
+
+def _line_price(line: Any) -> Any:
+    # Newer Stripe exposes `price`; older invoice lines carry `plan` directly.
+    return _stripe_value(line, "price", None) or (_stripe_value(line, "plan", {}) or {})
+
+
+def _line_recurring(line: Any) -> Any:
+    price = _line_price(line)
+    recurring = _stripe_value(price, "recurring", None)
+    if recurring:
+        return recurring
+    # `plan` objects carry interval/interval_count on the object itself.
+    if _stripe_value(price, "interval", None):
+        return price
+    return {}
+
+
+def _is_subscription_line(line: Any) -> bool:
+    """Recurring-revenue line items only. Excludes one-off charges and setup
+    fees (no recurring price / no subscription association), which must never
+    reach the ledger."""
+    if not _line_recurring(line):
+        return False
+    return bool(_stripe_value(line, "subscription")) or _stripe_value(line, "type") == "subscription"
+
+
+def _invoice_line_mrr_cents(line: Any) -> int:
+    """This invoice line's normalized monthly amount, after discounts, in cents.
+    Reuses :func:`_normalize_interval_cents` for annual/weekly/daily → monthly so
+    normalization lives in exactly one place."""
+    price = _line_price(line)
+    recurring = _line_recurring(line)
+    interval = _stripe_value(recurring, "interval", "month")
+    interval_count = _stripe_value(recurring, "interval_count", 1) or 1
+    quantity = _stripe_value(line, "quantity", 1) or 1
+    unit_amount = _stripe_value(price, "unit_amount", None)
+    if unit_amount is not None:
+        gross = int(unit_amount) * int(quantity)
+    else:
+        # Metered/tiered prices expose no unit_amount: fall back to the charged
+        # line amount (already the per-period total).
+        gross = int(_stripe_value(line, "amount", 0) or 0)
+    discounts = sum(
+        int(_stripe_value(da, "amount", 0) or 0)
+        for da in (_stripe_value(line, "discount_amounts", []) or [])
+    )
+    return _normalize_interval_cents(gross - discounts, interval, interval_count)
+
+
+def _line_period_start(line: Any) -> int | None:
+    period = _stripe_value(line, "period", {}) or {}
+    return _stripe_timestamp(_stripe_value(period, "start"))
+
+
+def _billing_events_from_invoices(invoices: list[Any], source_id: str, default_currency: str = "usd") -> list[dict]:
+    """Flatten invoices into ledger rows, one per recurring subscription line.
+    Non-subscription lines (one-off / setup fees) are dropped here so they never
+    enter the ledger."""
+    events: list[dict] = []
+    for invoice in invoices:
+        invoice_id = _stripe_value(invoice, "id")
+        customer = _stripe_value(invoice, "customer")
+        invoice_currency = (_stripe_value(invoice, "currency") or default_currency)
+        lines = _stripe_value(_stripe_value(invoice, "lines", {}) or {}, "data", []) or []
+        for line in lines:
+            if not _is_subscription_line(line):
+                continue
+            line_id = _stripe_value(line, "id")
+            if not line_id:
+                continue
+            start = _line_period_start(line)
+            currency = (_stripe_value(line, "currency") or invoice_currency or default_currency)
+            events.append({
+                "revenue_source_id": source_id,
+                "stripe_customer_id": customer,
+                "stripe_subscription_id": _stripe_value(line, "subscription"),
+                "stripe_invoice_id": invoice_id,
+                "stripe_line_item_id": line_id,
+                "mrr_cents": _invoice_line_mrr_cents(line),
+                "currency": str(currency).lower(),
+                "effective_at": datetime.fromtimestamp(start, tz=timezone.utc) if start else None,
+                "is_proration": bool(_stripe_value(line, "proration", False)),
+            })
+    return events
+
+
+def _customer_mrr_series(
+    events: list[dict],
+    active_by_customer: dict[str, dict] | None = None,
+    as_of: datetime | None = None,
+) -> list[tuple]:
+    """Per-customer MRR time series from billing events.
+
+    For each customer we track each subscription's latest non-proration monthly
+    level; at every invoice period boundary the customer's MRR is the sum of
+    those levels. Prorations are skipped so a mid-cycle change counts the new
+    plan's full-period line, not the proration delta. A final ``as_of`` point is
+    appended from current active subscriptions, which is how a churn (a sub that
+    simply stopped invoicing) shows up.
+
+    Returns ``(customer, date, mrr_cents, currency)`` sorted by customer, date.
+    """
+    active_by_customer = active_by_customer or {}
+    as_of_date = (as_of or _now()).date()
+
+    by_customer: dict[str, list] = {}
+    for event in events:
+        customer = event["stripe_customer_id"]
+        if not customer or event["effective_at"] is None or event["is_proration"]:
+            continue
+        by_customer.setdefault(customer, []).append((
+            event["effective_at"].date(),
+            event["stripe_subscription_id"] or "_",
+            event["mrr_cents"],
+            event["currency"],
+        ))
+
+    rows_by_key: dict[tuple, tuple] = {}
+    for customer in set(by_customer) | set(active_by_customer):
+        sub_mrr: dict[str, int] = {}
+        currency = "usd"
+        # Sorted by date so later same-day entries accumulate before we read the
+        # level; the dict keeps the fully-accumulated value per date.
+        per_date: dict[date, tuple] = {}
+        for (when, sub, mrr, cur) in sorted(by_customer.get(customer, []), key=lambda e: e[0]):
+            sub_mrr[sub] = mrr
+            currency = cur or currency
+            per_date[when] = (sum(sub_mrr.values()), currency)
+        for when, (mrr, cur) in per_date.items():
+            rows_by_key[(customer, when)] = (customer, when, mrr, cur)
+        active = active_by_customer.get(customer)
+        has_history = bool(by_customer.get(customer))
+        if active is not None:
+            # Still subscribed. The MRR amount is the last *invoiced* level —
+            # discounts and prorations are already baked into it — so the active
+            # subscription's list price never overrides the more-correct invoiced
+            # figure. The active sub is used only to confirm the customer is live
+            # (and as a fallback amount when there's no invoice yet, e.g. a sub
+            # created but not yet billed).
+            amount = sum(sub_mrr.values()) if has_history else int(active.get("mrr_cents", 0))
+            rows_by_key[(customer, as_of_date)] = (
+                customer, as_of_date, amount, active.get("currency") or currency,
+            )
+        elif has_history:
+            # Had billing history but no active subscription now → 0 MRR as of
+            # now, which surfaces as a churn when diffed (a no-op if the last
+            # level was already 0, e.g. a trial that never converted). The exact
+            # cancellation date arrives with the webhook PR; backfill dates it at
+            # sync time.
+            rows_by_key[(customer, as_of_date)] = (customer, as_of_date, 0, currency)
+    return sorted(rows_by_key.values(), key=lambda r: (r[0], r[1]))
+
+
+def _movements_from_series(rows: list[tuple]) -> list[dict]:
+    """Diff consecutive per-customer MRR rows into the five movement types."""
+    by_customer: dict[str, list] = {}
+    for customer, when, mrr, currency in rows:
+        by_customer.setdefault(customer, []).append((when, mrr, currency))
+
+    movements: list[dict] = []
+    for customer, series in by_customer.items():
+        series.sort(key=lambda r: r[0])
+        prior = 0
+        seen_nonzero = False
+        for (when, mrr, currency) in series:
+            delta = mrr - prior
+            movement_type: MovementType | None = None
+            if delta != 0:
+                if prior == 0 and mrr > 0:
+                    movement_type = "reactivation" if seen_nonzero else "new"
+                elif mrr > prior > 0:
+                    movement_type = "expansion"
+                elif 0 < mrr < prior:
+                    movement_type = "contraction"
+                elif mrr == 0 and prior > 0:
+                    movement_type = "churn"
+            if movement_type:
+                movements.append({
+                    "stripe_customer_id": customer,
+                    "effective_date": when,
+                    "movement_type": movement_type,
+                    "mrr_delta_cents": delta,
+                    "mrr_after_cents": mrr,
+                    "currency": currency,
+                })
+            if mrr > 0:
+                seen_nonzero = True
+            prior = mrr
+    return movements
+
+
+def _combine_currency_totals(by_currency: dict[str, int], base_currency: str, fx_rates: dict[str, float]) -> tuple[int, list[str]]:
+    """Combine per-currency totals into the base currency using static rates.
+    Currencies without a rate are excluded and warned about — never silently
+    mixed in at a 1:1 rate."""
+    base = (base_currency or "usd").lower()
+    rates = {str(k).lower(): v for k, v in (fx_rates or {}).items()}
+    total = 0
+    warnings: list[str] = []
+    for currency, amount in by_currency.items():
+        currency = str(currency).lower()
+        if currency == base:
+            total += amount
+        elif currency in rates:
+            total += round(amount * rates[currency])
+        else:
+            warnings.append(f"no FX rate for {currency}->{base}; {amount} cents excluded from total")
+    return total, warnings
+
+
+def _total_mrr_at(rows: list[tuple], as_of_date: date, base_currency: str, fx_rates: dict[str, float]) -> tuple[int, dict[str, int], list[str]]:
+    """Total MRR at a date: sum each customer's latest row on/before that date,
+    grouped by currency, then combined into the base currency."""
+    latest: dict[str, tuple] = {}
+    for customer, when, mrr, currency in rows:
+        if when <= as_of_date:
+            existing = latest.get(customer)
+            if existing is None or when >= existing[0]:
+                latest[customer] = (when, mrr, currency)
+    by_currency: dict[str, int] = {}
+    for (_when, mrr, currency) in latest.values():
+        by_currency[currency] = by_currency.get(currency, 0) + mrr
+    total, warnings = _combine_currency_totals(by_currency, base_currency, fx_rates)
+    return total, by_currency, warnings
+
+
+async def _persist_billing_events(db: AsyncSession, events: list[dict]) -> int:
+    """Append billing events, idempotent on ``stripe_line_item_id`` so re-running
+    the backfill never duplicates a row."""
+    if not events:
+        return 0
+    now = _now()
+    table = PortfolioBillingEvent.__table__
+    for event in events:
+        await db.execute(
+            pg_insert(table)
+            .values(id=str(uuid.uuid4()), created_at=now, **event)
+            .on_conflict_do_nothing(index_elements=["stripe_line_item_id"])
+        )
+    await db.flush()
+    return len(events)
+
+
+async def _persist_customer_mrr(db: AsyncSession, source_id: str, rows: list[tuple]) -> None:
+    now = _now()
+    table = PortfolioCustomerMrr.__table__
+    for customer, when, mrr, currency in rows:
+        await db.execute(
+            pg_insert(table)
+            .values(
+                id=str(uuid.uuid4()), revenue_source_id=source_id, stripe_customer_id=customer,
+                as_of_date=when, mrr_cents=mrr, currency=currency, created_at=now, updated_at=now,
+            )
+            .on_conflict_do_update(
+                index_elements=["revenue_source_id", "stripe_customer_id", "as_of_date"],
+                set_={"mrr_cents": mrr, "currency": currency, "updated_at": now},
+            )
+        )
+    await db.flush()
+
+
+async def _persist_movements(db: AsyncSession, source_id: str, movements: list[dict]) -> None:
+    now = _now()
+    table = PortfolioMrrMovement.__table__
+    for movement in movements:
+        await db.execute(
+            pg_insert(table)
+            .values(id=str(uuid.uuid4()), revenue_source_id=source_id, created_at=now, updated_at=now, **movement)
+            .on_conflict_do_update(
+                index_elements=["revenue_source_id", "stripe_customer_id", "effective_date"],
+                set_={
+                    "movement_type": movement["movement_type"],
+                    "mrr_delta_cents": movement["mrr_delta_cents"],
+                    "mrr_after_cents": movement["mrr_after_cents"],
+                    "currency": movement["currency"],
+                    "updated_at": now,
+                },
+            )
+        )
+    await db.flush()
+
+
+def _active_subs_by_customer(active_subscriptions: list[Any], base_currency: str) -> dict[str, dict]:
+    """Collapse current active subscriptions into per-customer monthly MRR, the
+    authoritative 'now' point of the series."""
+    by_customer: dict[str, dict] = {}
+    for subscription in active_subscriptions:
+        customer = _stripe_value(subscription, "customer")
+        if not customer:
+            continue
+        currency = str(_stripe_value(subscription, "currency") or base_currency).lower()
+        entry = by_customer.setdefault(customer, {"mrr_cents": 0, "currency": currency})
+        entry["mrr_cents"] += _subscription_mrr_cents(subscription)
+        entry["currency"] = currency
+    return by_customer
+
+
+async def _run_invoice_engine(source: PortfolioRevenueSource, db: AsyncSession, eff: Any) -> dict:
+    """Backfill billing events from the connected account's full invoice history,
+    rebuild the per-customer MRR series + movements, and store the invoice-engine
+    totals on ``source`` alongside the legacy snapshot. Returns a small summary
+    for the comparison log."""
+    account = source.provider_account_id
+    base_currency = str(getattr(eff, "revenue_base_currency", "usd") or "usd")
+    fx_rates = getattr(eff, "revenue_fx_rates", {}) or {}
+
+    invoices = _stripe_items(stripe.Invoice.list(
+        limit=100,
+        expand=["data.lines"],
+        stripe_account=account,
+    ))
+    active_subscriptions = _stripe_items(stripe.Subscription.list(
+        status="active",
+        limit=100,
+        stripe_account=account,
+    ))
+
+    events = _billing_events_from_invoices(invoices, source.id, base_currency)
+    await _persist_billing_events(db, events)
+
+    now = _now()
+    active_by_customer = _active_subs_by_customer(active_subscriptions, base_currency)
+    series = _customer_mrr_series(events, active_by_customer, as_of=now)
+    await _persist_customer_mrr(db, source.id, series)
+
+    movements = _movements_from_series(series)
+    await _persist_movements(db, source.id, movements)
+
+    today = now.date()
+    current_total, by_currency, warnings = _total_mrr_at(series, today, base_currency, fx_rates)
+    previous_total, _prev_by_currency, _prev_warnings = _total_mrr_at(
+        series, (now - timedelta(days=30)).date(), base_currency, fx_rates
+    )
+
+    source.previous_invoice_mrr_cents = source.invoice_mrr_cents
+    source.invoice_mrr_cents = current_total
+    source.invoice_revenue_snapshot = {
+        "engine": "invoice",
+        "baseCurrency": base_currency.lower(),
+        "byCurrency": by_currency,
+        "mrrCents": current_total,
+        "mrrCents30dAgo": previous_total,
+        "billingEvents": len(events),
+        "customers": len({row[0] for row in series}),
+        "movements": len(movements),
+        "warnings": warnings,
+        "computedAt": now.isoformat(),
+    }
+    return {"current_total": current_total, "previous_total": previous_total, "warnings": warnings}
+
+
+def _log_engine_comparison(source: PortfolioRevenueSource, invoice_result: dict) -> None:
+    """Validation log: invoice-engine MRR vs the legacy subscription snapshot.
+    The invoice figure is the more correct one; deltas come from prorations,
+    discounts/refunds, and reconstructed history rather than current state only."""
+    subscription_mrr = source.current_mrr_cents or 0
+    invoice_mrr = invoice_result["current_total"]
+    logger.info(
+        "revenue engine comparison for source %s: subscription=%s cents, invoice=%s cents, delta=%s cents "
+        "(invoice engine is more correct; deltas come from prorations/discounts/refunds and reconstructed history)",
+        source.id, subscription_mrr, invoice_mrr, invoice_mrr - subscription_mrr,
+    )
+    if invoice_result.get("warnings"):
+        logger.warning("revenue engine currency warnings for source %s: %s", source.id, invoice_result["warnings"])
 
 
 async def _perform_revenue_sync(source: PortfolioRevenueSource, db: AsyncSession, window_days: int | None = None) -> None:
@@ -784,6 +1193,19 @@ async def _perform_revenue_sync(source: PortfolioRevenueSource, db: AsyncSession
     }
     source.last_synced_at = now
     source.updated_at = now
+
+    # New invoice/event engine, computed in parallel. Wrapped in a savepoint and
+    # guarded so a failure here can never break the legacy snapshot above: the
+    # nested rollback discards only the engine's writes, the outer commit still
+    # persists the snapshot.
+    try:
+        eff = await effective_config(db)
+        async with db.begin_nested():
+            invoice_result = await _run_invoice_engine(source, db, eff)
+        _log_engine_comparison(source, invoice_result)
+    except Exception as exc:
+        logger.warning("invoice revenue engine failed for source %s: %s", source.id, exc)
+
     await db.commit()
     await db.refresh(source)
 
@@ -1212,8 +1634,7 @@ async def get_correlation(
         )
     ) or 0)
 
-    mrr = revenue.current_mrr_cents if revenue else None
-    prev_mrr = revenue.previous_mrr_cents if revenue else None
+    mrr, prev_mrr = _selected_mrr(revenue, eff.revenue_engine)
 
     return {
         "data": {

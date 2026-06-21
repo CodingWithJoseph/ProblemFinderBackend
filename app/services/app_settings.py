@@ -27,10 +27,11 @@ from app.models import AppSetting
 @dataclass(frozen=True)
 class SettingDef:
     key: str
-    kind: str  # "choice" | "toggle"
+    kind: str  # "choice" | "toggle" | "string_choice"
     label: str
     group: str
     options: tuple[int, ...] = ()
+    str_options: tuple[str, ...] = ()
     unit: str | None = None
 
     def coerce(self, value: Any) -> Any:
@@ -38,6 +39,12 @@ class SettingDef:
         if self.kind == "toggle":
             if not isinstance(value, bool):
                 raise ValueError(f"{self.key} expects a boolean")
+            return value
+        if self.kind == "string_choice":
+            if not isinstance(value, str):
+                raise ValueError(f"{self.key} expects a string")
+            if value not in self.str_options:
+                raise ValueError(f"{self.key} must be one of {list(self.str_options)}")
             return value
         # choice (integer from a fixed option set)
         if isinstance(value, bool):  # bool is an int subclass — reject explicitly
@@ -53,14 +60,15 @@ class SettingDef:
 
 # The whitelist. Each key matches an attribute on Settings (its default).
 SETTING_DEFS: tuple[SettingDef, ...] = (
-    SettingDef("analytics_usage_window_days", "choice", "Usage window", "Analytics", (7, 14, 30), "days"),
-    SettingDef("analytics_correlation_window_days", "choice", "Correlation window", "Analytics", (14, 30, 60, 90), "days"),
-    SettingDef("analytics_retention_window_days", "choice", "Retention window", "Analytics", (14, 30, 60, 90), "days"),
-    SettingDef("analytics_growth_window_days", "choice", "Growth comparison window", "Analytics", (7, 14, 30), "days"),
-    SettingDef("revenue_sync_window_days", "choice", "Revenue sync window", "Revenue", (7, 30, 90), "days"),
-    SettingDef("alert_error_baseline_days", "choice", "Error-spike baseline", "Alerts", (3, 7, 14), "days"),
-    SettingDef("alert_new_issue_cap", "choice", "New-issue email cap", "Alerts", tuple(range(1, 11)), "per run"),
-    SettingDef("stripe_oauth_state_ttl_minutes", "choice", "Stripe link lifetime", "Integrations", (5, 15, 30, 60), "minutes"),
+    SettingDef("analytics_usage_window_days", "choice", "Usage window", "Analytics", (7, 14, 30), unit="days"),
+    SettingDef("analytics_correlation_window_days", "choice", "Correlation window", "Analytics", (14, 30, 60, 90), unit="days"),
+    SettingDef("analytics_retention_window_days", "choice", "Retention window", "Analytics", (14, 30, 60, 90), unit="days"),
+    SettingDef("analytics_growth_window_days", "choice", "Growth comparison window", "Analytics", (7, 14, 30), unit="days"),
+    SettingDef("revenue_sync_window_days", "choice", "Revenue sync window", "Revenue", (7, 30, 90), unit="days"),
+    SettingDef("revenue_engine", "string_choice", "Revenue engine", "Revenue", str_options=("subscription", "invoice")),
+    SettingDef("alert_error_baseline_days", "choice", "Error-spike baseline", "Alerts", (3, 7, 14), unit="days"),
+    SettingDef("alert_new_issue_cap", "choice", "New-issue email cap", "Alerts", tuple(range(1, 11)), unit="per run"),
+    SettingDef("stripe_oauth_state_ttl_minutes", "choice", "Stripe link lifetime", "Integrations", (5, 15, 30, 60), unit="minutes"),
     SettingDef("alerts_enabled", "toggle", "Monitoring alerts", "Alerts"),
 )
 
@@ -114,6 +122,7 @@ async def serialize_settings(db: AsyncSession, settings=None) -> list[dict]:
             "label": d.label,
             "group": d.group,
             "options": list(d.options),
+            "strOptions": list(d.str_options),
             "unit": d.unit,
             "value": overrides[d.key] if d.key in overrides else getattr(s, d.key),
             "isDefault": d.key not in overrides,
