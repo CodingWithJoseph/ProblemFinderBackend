@@ -418,6 +418,11 @@ class PortfolioRevenueSource(Base):
     invoice_mrr_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
     previous_invoice_mrr_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
     invoice_revenue_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Unit-economics inputs (PR2). Null → fall back to config defaults and badge
+    # the dependent metric "estimated".
+    gross_margin_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cac_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    profit_margin_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
     connected_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     last_synced_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     oauth_state: Mapped[str | None] = mapped_column(Text, nullable=True)

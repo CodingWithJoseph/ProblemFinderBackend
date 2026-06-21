@@ -229,6 +229,9 @@ def _serialize_revenue_source(source: PortfolioRevenueSource | None, engine: str
         "churnRate30d": source.churn_rate_30d,
         "revenueSnapshot": source.revenue_snapshot or {},
         "invoiceRevenueSnapshot": source.invoice_revenue_snapshot or {},
+        "grossMarginPct": source.gross_margin_pct,
+        "cacCents": source.cac_cents,
+        "profitMarginPct": source.profit_margin_pct,
         "connectedAt": _iso(source.connected_at),
         "lastSyncedAt": _iso(source.last_synced_at),
         "createdAt": _iso(source.created_at),
@@ -803,17 +806,22 @@ async def get_revenue_metrics(
     eff = await effective_config(db)
     source = await _revenue_source(pipeline_id, db)
     selected_mrr, _previous = _selected_mrr(source, eff.revenue_engine)
+    metrics = await _compute_revenue_metrics(source, db, eff, eff.revenue_sync_window_days) if source else None
     return {
         "data": {
             "source": _serialize_revenue_source(source, eff.revenue_engine),
             "connected": bool(source and source.status == "connected"),
             "summary": {
                 "mrrCents": selected_mrr,
+                "subscriptionMrrCents": source.current_mrr_cents if source else None,
+                "invoiceMrrCents": source.invoice_mrr_cents if source else None,
+                "revenueEngine": eff.revenue_engine,
                 "newCustomers30d": source.new_customers_30d if source else None,
                 "churnedCustomers30d": source.churned_customers_30d if source else None,
                 "churnRate30d": source.churn_rate_30d if source else None,
                 "windowDays": eff.revenue_sync_window_days,
             },
+            "metrics": metrics,
         }
     }
 
@@ -836,19 +844,55 @@ async def sync_revenue_metrics(
         raise HTTPException(status_code=502, detail="Could not sync Stripe revenue") from exc
 
     selected_mrr, _previous = _selected_mrr(source, eff.revenue_engine)
+    metrics = await _compute_revenue_metrics(source, db, eff, eff.revenue_sync_window_days)
     return {
         "data": {
             "source": _serialize_revenue_source(source, eff.revenue_engine),
             "connected": True,
             "summary": {
                 "mrrCents": selected_mrr,
+                "subscriptionMrrCents": source.current_mrr_cents,
+                "invoiceMrrCents": source.invoice_mrr_cents,
+                "revenueEngine": eff.revenue_engine,
                 "newCustomers30d": source.new_customers_30d,
                 "churnedCustomers30d": source.churned_customers_30d,
                 "churnRate30d": source.churn_rate_30d,
                 "windowDays": eff.revenue_sync_window_days,
             },
+            "metrics": metrics,
         }
     }
+
+
+class RevenueEconomicsBody(BaseModel):
+    # All optional: only fields present in the request are applied. A null value
+    # clears the override and reverts the dependent metric to its default
+    # (badged "estimated"). Fractions are 0..1; profit margin may be negative.
+    gross_margin_pct: float | None = Field(default=None, ge=0.0, le=1.0)
+    cac_cents: int | None = Field(default=None, ge=0)
+    profit_margin_pct: float | None = Field(default=None, ge=-1.0, le=1.0)
+
+
+@router.patch("/{pipeline_id}/revenue/economics")
+async def update_revenue_economics(
+    pipeline_id: str,
+    body: RevenueEconomicsBody,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Set the per-source unit-economics inputs (gross margin, CAC, profit
+    margin) that LTV / CAC payback / Rule of 40 depend on."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    source = await _revenue_source(pipeline_id, db)
+    if not source:
+        raise HTTPException(status_code=404, detail="Revenue source not found")
+    for field, value in body.model_dump(exclude_unset=True).items():
+        setattr(source, field, value)
+    source.updated_at = _now()
+    await db.commit()
+    await db.refresh(source)
+    return {"data": _serialize_revenue_source(source, eff.revenue_engine)}
 
 
 # ── Invoice/event-derived MRR engine (PR1) ────────────────────────────────────
@@ -1086,6 +1130,184 @@ def _total_mrr_at(rows: list[tuple], as_of_date: date, base_currency: str, fx_ra
         by_currency[currency] = by_currency.get(currency, 0) + mrr
     total, warnings = _combine_currency_totals(by_currency, base_currency, fx_rates)
     return total, by_currency, warnings
+
+
+# ── Derived revenue metrics (PR2) ─────────────────────────────────────────────
+#
+# Churn / NRR / GRR / quick ratio / ARPA / unit economics, computed purely from
+# the movement + customer-MRR tables the invoice engine writes. Every ratio is
+# returned with its components (starting MRR + summed movement amounts) so a
+# wrong figure is traceable to the input that's off without re-deriving by hand.
+
+FIVE_MOVEMENTS = ("new", "expansion", "contraction", "churn", "reactivation")
+LTV_CAP_MONTHS = 60  # 5-year lifetime cap; LTV diverges under non-positive churn
+
+
+def _safe_ratio(numerator: float, denominator: float) -> float | None:
+    if not denominator:
+        return None
+    return round(numerator / denominator, 4)
+
+
+def _movement_sums_by_type(movements: list[tuple], base_currency: str, fx_rates: dict[str, float]) -> tuple[dict[str, int], dict[str, int], list[str]]:
+    """Sum signed movement deltas per type into the base currency (returned as
+    positive magnitudes), plus the distinct customer count per type."""
+    by_type_currency: dict[str, dict[str, int]] = {t: {} for t in FIVE_MOVEMENTS}
+    customers_by_type: dict[str, set] = {t: set() for t in FIVE_MOVEMENTS}
+    for customer, _when, mtype, delta, currency in movements:
+        if mtype not in by_type_currency:
+            continue
+        bucket = by_type_currency[mtype]
+        bucket[currency] = bucket.get(currency, 0) + delta
+        customers_by_type[mtype].add(customer)
+    sums: dict[str, int] = {}
+    warnings: list[str] = []
+    for mtype, by_currency in by_type_currency.items():
+        total, warns = _combine_currency_totals(by_currency, base_currency, fx_rates)
+        sums[mtype] = abs(total)  # contraction/churn are negative; report magnitude
+        warnings.extend(warns)
+    counts = {mtype: len(customers) for mtype, customers in customers_by_type.items()}
+    return sums, counts, warnings
+
+
+def _count_active_customers(customer_rows: list[tuple], as_of_date: date) -> int:
+    """Customers whose latest MRR on/before a date is positive."""
+    latest: dict[str, tuple] = {}
+    for customer, when, mrr, _currency in customer_rows:
+        if when <= as_of_date:
+            existing = latest.get(customer)
+            if existing is None or when >= existing[0]:
+                latest[customer] = (when, mrr)
+    return sum(1 for (_w, mrr) in latest.values() if mrr > 0)
+
+
+def _revenue_metrics(
+    customer_rows: list[tuple],
+    movements: list[tuple],
+    window_start: date,
+    as_of: date,
+    base_currency: str,
+    fx_rates: dict[str, float],
+    gross_margin: float | None,
+    cac_cents: int | None,
+    profit_margin: float | None,
+    default_margin: float,
+    window_days: int,
+) -> dict:
+    """All PR2 ratios + unit economics, each shipped with its components."""
+    starting_mrr, _sbc, _sw = _total_mrr_at(customer_rows, window_start, base_currency, fx_rates)
+    current_mrr, _cbc, _cw = _total_mrr_at(customer_rows, as_of, base_currency, fx_rates)
+
+    window_movements = [m for m in movements if window_start < m[1] <= as_of]
+    sums, counts, warnings = _movement_sums_by_type(window_movements, base_currency, fx_rates)
+    new_mrr, expansion = sums["new"], sums["expansion"]
+    contraction, churn, reactivation = sums["contraction"], sums["churn"], sums["reactivation"]
+
+    customers_at_start = _count_active_customers(customer_rows, window_start)
+    active_accounts = _count_active_customers(customer_rows, as_of)
+    churned_customers, new_customers = counts["churn"], counts["new"]
+
+    gross_mrr_churn = _safe_ratio(churn + contraction, starting_mrr)
+    net_mrr_churn = _safe_ratio(churn + contraction - expansion - reactivation, starting_mrr)
+    nrr = _safe_ratio(starting_mrr + expansion - contraction - churn, starting_mrr)
+    grr = _safe_ratio(starting_mrr - contraction - churn, starting_mrr)
+    logo_churn = _safe_ratio(churned_customers, customers_at_start)
+    quick_ratio = _safe_ratio(new_mrr + expansion, contraction + churn)
+    arpa_cents = round(current_mrr / active_accounts) if active_accounts else None
+    mrr_growth_rate = _safe_ratio(current_mrr - starting_mrr, starting_mrr)
+
+    # ── unit economics (badged "estimated" when an input is defaulted) ──
+    margin_estimated = gross_margin is None
+    margin = gross_margin if gross_margin is not None else default_margin
+    monthly_margin_per_account = round(arpa_cents * margin) if arpa_cents is not None else None
+
+    ltv_cents = None
+    if monthly_margin_per_account is not None:
+        cap = monthly_margin_per_account * LTV_CAP_MONTHS
+        if gross_mrr_churn and gross_mrr_churn > 0:
+            ltv_cents = round(min(monthly_margin_per_account / gross_mrr_churn, cap))
+        else:
+            ltv_cents = round(cap)  # zero/negative churn → formula diverges → cap
+
+    cac_payback_months = None
+    ltv_cac = None
+    if cac_cents and monthly_margin_per_account:
+        cac_payback_months = round(cac_cents / monthly_margin_per_account, 2)
+        if ltv_cents is not None:
+            ltv_cac = round(ltv_cents / cac_cents, 2)
+
+    rule_of_40 = None
+    rule_of_40_estimated = profit_margin is None
+    if profit_margin is not None and mrr_growth_rate is not None:
+        rule_of_40 = round((mrr_growth_rate + profit_margin) * 100, 1)  # percentage points
+
+    return {
+        "windowDays": window_days,
+        "components": {
+            "startingMrrCents": starting_mrr,
+            "currentMrrCents": current_mrr,
+            "newMrrCents": new_mrr,
+            "expansionMrrCents": expansion,
+            "contractionMrrCents": contraction,
+            "churnMrrCents": churn,
+            "reactivationMrrCents": reactivation,
+            "customersAtStart": customers_at_start,
+            "activeAccounts": active_accounts,
+            "newCustomers": new_customers,
+            "churnedCustomers": churned_customers,
+            "movementCounts": counts,
+        },
+        "ratios": {
+            "grossMrrChurn": gross_mrr_churn,
+            "netMrrChurn": net_mrr_churn,
+            "nrr": nrr,
+            "grr": grr,
+            "logoChurn": logo_churn,
+            "quickRatio": quick_ratio,
+            "arpaCents": arpa_cents,
+            "mrrGrowthRate": mrr_growth_rate,
+        },
+        "unitEconomics": {
+            "grossMarginPct": margin,
+            "grossMarginEstimated": margin_estimated,
+            "ltvCents": ltv_cents,
+            "ltvCapMonths": LTV_CAP_MONTHS,
+            "cacCents": cac_cents,
+            "cacPaybackMonths": cac_payback_months,
+            "ltvCac": ltv_cac,
+            "profitMarginPct": profit_margin,
+            "ruleOf40": rule_of_40,
+            "ruleOf40Estimated": rule_of_40_estimated,
+        },
+        "warnings": warnings,
+    }
+
+
+async def _compute_revenue_metrics(source: PortfolioRevenueSource, db: AsyncSession, eff: Any, window_days: int) -> dict:
+    """Load the source's movement + customer-MRR rows and derive the PR2 metrics."""
+    customer_rows = [
+        (row.stripe_customer_id, row.as_of_date, row.mrr_cents, row.currency)
+        for row in (await db.execute(
+            select(PortfolioCustomerMrr).where(PortfolioCustomerMrr.revenue_source_id == source.id)
+        )).scalars().all()
+    ]
+    movements = [
+        (row.stripe_customer_id, row.effective_date, row.movement_type, row.mrr_delta_cents, row.currency)
+        for row in (await db.execute(
+            select(PortfolioMrrMovement).where(PortfolioMrrMovement.revenue_source_id == source.id)
+        )).scalars().all()
+    ]
+    now = _now()
+    base_currency = str(getattr(eff, "revenue_base_currency", "usd") or "usd")
+    fx_rates = getattr(eff, "revenue_fx_rates", {}) or {}
+    default_margin = float(getattr(eff, "revenue_default_gross_margin_pct", 0.80))
+    return _revenue_metrics(
+        customer_rows, movements,
+        (now - timedelta(days=window_days)).date(), now.date(),
+        base_currency, fx_rates,
+        source.gross_margin_pct, source.cac_cents, source.profit_margin_pct,
+        default_margin, window_days,
+    )
 
 
 async def _persist_billing_events(db: AsyncSession, events: list[dict]) -> int:
