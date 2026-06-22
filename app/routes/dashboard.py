@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, func
 from sqlalchemy.exc import SQLAlchemyError
@@ -9,6 +11,11 @@ from app.config import PIPELINE_VERSION
 from app.models import Pipeline, Problem, Task, Cluster, ClusterItem, ClusterSignal
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
 
 
 @router.get("/summary")
@@ -165,4 +172,119 @@ async def dashboard_signals(
             {"domain": domain, "postCount": post_count, "clusterCount": cluster_count}
             for domain, post_count, cluster_count in domain_rows.all()
         ],
+    }
+
+
+@router.get("/movers")
+async def dashboard_movers(
+    limit: int = Query(5, ge=1, le=20),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Momentum movers — the "what needs my attention" module. Top risers and
+    fallers by 30-day momentum from ``cluster_signals``. Global (not project-
+    scoped), matching the rest of the intelligence feed. Returns empty lists if
+    ``cluster_signals`` is unavailable rather than failing the dashboard."""
+    try:
+        rows = list((await db.execute(
+            select(Cluster, ClusterSignal)
+            .join(ClusterSignal, ClusterSignal.cluster_id == Cluster.id)
+            .where(
+                Cluster.pipeline_version == PIPELINE_VERSION,
+                ClusterSignal.momentum_30d.isnot(None),
+            )
+        )).all())
+    except SQLAlchemyError:
+        await db.rollback()
+        return {"risers": [], "fallers": [], "available": False}
+
+    def _row(cluster: Cluster, signal: ClusterSignal) -> dict:
+        return {
+            "id": cluster.id,
+            "name": cluster.name,
+            "momentum30d": signal.momentum_30d,
+            "momentum7d": signal.momentum_7d,
+            "signalScore": signal.signal_score if signal.signal_score is not None else cluster.signal_score,
+            "postCount": signal.total_posts or 0,
+            "trending": cluster.trending,
+        }
+
+    ranked = sorted(rows, key=lambda r: r[1].momentum_30d, reverse=True)
+    risers = [_row(c, s) for c, s in ranked if s.momentum_30d > 0][:limit]
+    # Fallers: most negative momentum first.
+    fallers = [_row(c, s) for c, s in reversed(ranked) if s.momentum_30d < 0][:limit]
+    return {"risers": risers, "fallers": fallers, "available": True}
+
+
+@router.get("/activity")
+async def dashboard_activity(
+    weeks: int = Query(26, ge=4, le=53),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Discovery-activity heatmap + pipeline-health stats.
+
+    There is no ``pipeline_runs`` table, so daily discovery volume is derived
+    from ``cluster_items`` post timestamps (``posted_at``, falling back to
+    ``scraped_at``) — the closest real signal of when discovery happened. Also
+    returns last-activity / clusters-refreshed times and a 7-day-vs-prior trend
+    for the data-health module.
+    """
+    now = _now()
+    since = now - timedelta(weeks=weeks)
+    activity_at = func.coalesce(ClusterItem.posted_at, ClusterItem.scraped_at)
+
+    daily_rows = (await db.execute(
+        select(func.date(activity_at), func.count())
+        .where(
+            ClusterItem.pipeline_version == PIPELINE_VERSION,
+            activity_at.isnot(None),
+            activity_at >= since,
+        )
+        .group_by(func.date(activity_at))
+        .order_by(func.date(activity_at).asc())
+    )).all()
+    days = [
+        {"date": d.isoformat() if hasattr(d, "isoformat") else str(d), "count": int(count)}
+        for d, count in daily_rows
+    ]
+
+    by_date = {row["date"]: row["count"] for row in days}
+
+    def _window_sum(start_offset: int, end_offset: int) -> int:
+        total = 0
+        for n in range(start_offset, end_offset):
+            key = (now - timedelta(days=n)).date().isoformat()
+            total += by_date.get(key, 0)
+        return total
+
+    current_7d = _window_sum(0, 7)
+    previous_7d = _window_sum(7, 14)
+    change_pct = round((current_7d - previous_7d) / previous_7d, 4) if previous_7d else None
+
+    total_posts = int(await db.scalar(
+        select(func.count()).select_from(ClusterItem).where(ClusterItem.pipeline_version == PIPELINE_VERSION)
+    ) or 0)
+    last_activity_at = await db.scalar(
+        select(func.max(activity_at)).where(ClusterItem.pipeline_version == PIPELINE_VERSION)
+    )
+
+    clusters_refreshed_at = None
+    try:
+        clusters_refreshed_at = await db.scalar(select(func.max(ClusterSignal.generated_at)))
+    except SQLAlchemyError:
+        await db.rollback()
+
+    return {
+        "weeks": weeks,
+        "days": days,
+        "totalPosts": total_posts,
+        "windowPosts": sum(by_date.values()),
+        "lastActivityAt": last_activity_at.isoformat() if last_activity_at else None,
+        "clustersRefreshedAt": clusters_refreshed_at.isoformat() if clusters_refreshed_at else None,
+        "trend": {
+            "current7d": current_7d,
+            "previous7d": previous_7d,
+            "changePct": change_pct,
+        },
     }
