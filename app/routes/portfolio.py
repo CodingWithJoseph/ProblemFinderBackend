@@ -570,6 +570,111 @@ def _health_verdict(*, connected: bool, last_seen_at, total_events: int, eff, no
             "lastSeenAt": _iso(last_seen_at), "ageHours": round(age_hours, 1)}
 
 
+def _health_verdict_v2(*, connected, last_seen_at, total_events, error_rate, lcp_rating, eff, now) -> dict:
+    """Health verdict engine v2: freshness + error rate + vitals → a richer
+    operational state. Precedence is severity-ordered: nothing to judge, then
+    gone silent, then failing/noisy on live data, then merely stale, else live."""
+    def verdict(state, label, reason, age_hours):
+        return {"state": state, "label": label, "reason": reason,
+                "lastSeenAt": _iso(last_seen_at), "ageHours": round(age_hours, 1) if age_hours is not None else None}
+
+    if not connected or last_seen_at is None or total_events <= 0:
+        return verdict("no-data", "No data", "No events received yet", None)
+
+    seen = last_seen_at if last_seen_at.tzinfo else last_seen_at.replace(tzinfo=timezone.utc)
+    age_hours = max(0.0, (now - seen).total_seconds() / 3600.0)
+
+    if age_hours > eff.health_unhealthy_hours:
+        return verdict("silent", "Silent", f"No events for {int(age_hours)}h", age_hours)
+
+    rate_pct = f"{round(error_rate * 100)}%" if error_rate is not None else None
+    if (error_rate is not None and error_rate >= eff.health_error_rate_failing):
+        return verdict("failing", "Failing", f"Error rate {rate_pct}", age_hours)
+    if lcp_rating == "poor":
+        return verdict("failing", "Failing", "Poor experience (LCP)", age_hours)
+    if (error_rate is not None and error_rate >= eff.health_error_rate_noisy):
+        return verdict("noisy", "Noisy", f"Error rate {rate_pct}", age_hours)
+    if lcp_rating == "needs-improvement":
+        return verdict("noisy", "Noisy", "Experience needs improvement (LCP)", age_hours)
+    if age_hours > eff.health_warning_hours:
+        return verdict("stale", "Stale", f"No events for {int(age_hours)}h", age_hours)
+    return verdict("live", "Live", "Healthy and current", age_hours)
+
+
+async def _source_health(pipeline_id: str, source, eff, now, db) -> tuple[dict, dict]:
+    """Gather the signals the v2 verdict needs (freshness, error rate, LCP p75)
+    and compute it. Returns (verdict, signals)."""
+    last_seen = source.last_seen_at if source else None
+    since = now - timedelta(days=eff.analytics_usage_window_days)
+
+    total_events = int(await db.scalar(
+        select(func.count(PortfolioUsageEvent.id)).where(PortfolioUsageEvent.pipeline_id == pipeline_id)
+    ) or 0)
+    errors = int(await db.scalar(
+        select(func.count(PortfolioErrorEvent.id)).where(
+            PortfolioErrorEvent.pipeline_id == pipeline_id,
+            PortfolioErrorEvent.occurred_at >= since,
+        )
+    ) or 0)
+    sessions = int(await db.scalar(
+        select(func.count(func.distinct(PortfolioUsageEvent.session_id))).where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.occurred_at >= since,
+            PortfolioUsageEvent.session_id != None,
+        )
+    ) or 0)
+    lcp_p75 = await db.scalar(
+        select(func.percentile_cont(0.75).within_group(PortfolioWebVital.value.asc())).where(
+            PortfolioWebVital.pipeline_id == pipeline_id,
+            PortfolioWebVital.occurred_at >= since,
+            PortfolioWebVital.metric == "LCP",
+        )
+    )
+    error_rate = round(errors / sessions, 4) if sessions else None
+    lcp_rating = _rate_vital("LCP", lcp_p75) if lcp_p75 is not None else None
+
+    verdict = _health_verdict_v2(
+        connected=source is not None,
+        last_seen_at=last_seen,
+        total_events=total_events,
+        error_rate=error_rate,
+        lcp_rating=lcp_rating,
+        eff=eff,
+        now=now,
+    )
+    signals = {
+        "errors": errors,
+        "sessions": sessions,
+        "errorRate": error_rate,
+        "lcpP75": _round_vital("LCP", lcp_p75),
+        "lcpRating": lcp_rating,
+    }
+    return verdict, signals
+
+
+@router.get("/{pipeline_id}/health")
+async def get_source_health(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """The v2 health verdict for a source, with the signals behind it."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    source = await _usage_source(pipeline_id, db)
+    now = _now()
+    verdict, signals = await _source_health(pipeline_id, source, eff, now, db)
+    return {
+        "data": {
+            "source": _serialize_usage_source(source),
+            "connected": source is not None,
+            "windowDays": eff.analytics_usage_window_days,
+            "health": verdict,
+            "signals": signals,
+        }
+    }
+
+
 def _empty_error_daily(days: int = 14) -> dict[str, dict]:
     today = _now().date()
     rows: dict[str, dict] = {}

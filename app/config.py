@@ -111,6 +111,12 @@ class Settings(BaseSettings):
     health_warning_hours: int = 24
     health_unhealthy_hours: int = 72
 
+    # Health verdict engine (v2): error rate (errors / sessions) thresholds that
+    # tip a source into "noisy" then "failing". Vitals (poor LCP p75) and
+    # freshness fold into the same verdict.
+    health_error_rate_noisy: float = 0.1
+    health_error_rate_failing: float = 0.3
+
     # CORS
     allowed_origins: str = "http://localhost:3000"
 

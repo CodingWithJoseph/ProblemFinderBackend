@@ -743,6 +743,55 @@ async def test_get_logs_faceted(client, fake_db, auth_headers):
     assert body["logs"][0]["level"] == "warn"
 
 
+def test_health_verdict_v2_states():
+    from app.config import get_settings
+    from app.routes.portfolio import _health_verdict_v2
+
+    eff = get_settings()  # warn=24h, unhealthy=72h, noisy=0.1, failing=0.3
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+
+    def at(hours):
+        return now - timedelta(hours=hours)
+
+    def state(**kw):
+        base = dict(connected=True, total_events=10, error_rate=0.0, lcp_rating="good", eff=eff, now=now)
+        base.update(kw)
+        return _health_verdict_v2(**base)["state"]
+
+    assert state(connected=False, last_seen_at=None) == "no-data"
+    assert state(last_seen_at=None, total_events=0) == "no-data"
+    assert state(last_seen_at=at(100)) == "silent"             # past unhealthy hours
+    assert state(last_seen_at=at(1), error_rate=0.5) == "failing"   # rate >= 0.3
+    assert state(last_seen_at=at(1), error_rate=0.0, lcp_rating="poor") == "failing"
+    assert state(last_seen_at=at(1), error_rate=0.15) == "noisy"    # rate >= 0.1
+    assert state(last_seen_at=at(1), error_rate=0.0, lcp_rating="needs-improvement") == "noisy"
+    assert state(last_seen_at=at(36)) == "stale"               # warn < age < unhealthy, clean
+    assert state(last_seen_at=at(1)) == "live"                 # fresh + clean
+
+
+async def test_get_source_health_failing(client, fake_db, auth_headers):
+    from datetime import datetime as _dt, timezone as _tz
+
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    source = make_usage_source(pipeline_id=product.id, last_seen_at=_dt.now(_tz.utc))
+    fake_db.stub(
+        execute=[
+            FakeResult(rows=[product]),   # launched product lookup
+            FakeResult(rows=[]),          # app settings overlay
+            FakeResult(rows=[source]),    # usage source
+        ],
+        scalar=[100, 50, 100, None],  # total_events, errors, sessions, lcp_p75
+    )
+
+    resp = await client.get(f"/portfolio/{product.id}/health", headers=auth_headers)
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["health"]["state"] == "failing"   # 50/100 = 0.5 error rate
+    assert body["signals"]["errorRate"] == 0.5
+    assert body["signals"]["lcpRating"] is None
+
+
 def test_health_verdict_states():
     from app.config import get_settings
     from app.routes.portfolio import _health_verdict
