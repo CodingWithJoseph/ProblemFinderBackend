@@ -30,6 +30,7 @@ from app.models import (
     PortfolioRevenueSource,
     PortfolioUsageEvent,
     PortfolioUsageSource,
+    PortfolioWebVital,
     Subscription,
 )
 from app.services.alerts import AlertPrefs, alert_settings_row
@@ -52,6 +53,8 @@ stripe.api_key = settings.stripe_secret_key
 UsageEventType = Literal["pageview", "signup", "login", "activation", "custom"]
 RevenueProvider = Literal["stripe"]
 ErrorLevel = Literal["error", "warning"]
+WebVitalMetric = Literal["LCP", "CLS", "INP", "FCP", "TTFB"]
+WebVitalRating = Literal["good", "needs-improvement", "poor"]
 
 
 class UsageEventBody(BaseModel):
@@ -103,11 +106,27 @@ class IdentifyBody(BaseModel):
     visitor_id: str | None = None
 
 
+class VitalBody(BaseModel):
+    product_id: str
+    key: str
+    metric: WebVitalMetric
+    value: float
+    rating: WebVitalRating | None = None
+    url: str | None = None
+    navigation_id: str | None = Field(default=None, max_length=128)
+    visitor_id: str | None = None
+    session_id: str | None = None
+    user_id: str | None = Field(default=None, max_length=256)
+    release: str | None = Field(default=None, max_length=128)
+    environment: str | None = Field(default=None, max_length=64)
+    occurred_at: datetime | None = None
+
+
 class BatchItem(BaseModel):
-    """One event in a batch. `kind` discriminates a usage event from an error so
-    the two storage paths (and error grouping) stay identical to the single
-    endpoints."""
-    kind: Literal["event", "error"]
+    """One event in a batch. `kind` discriminates a usage event from an error or
+    a web vital so each storage path (and error grouping) stays identical to the
+    single endpoints."""
+    kind: Literal["event", "error", "vital"]
     # usage-event field
     event_type: UsageEventType | None = None
     referrer: str | None = None
@@ -116,6 +135,11 @@ class BatchItem(BaseModel):
     stack: str | None = Field(default=None, max_length=20000)
     level: ErrorLevel = "error"
     handled: bool | None = None
+    # vital fields
+    metric: WebVitalMetric | None = None
+    value: float | None = None
+    rating: WebVitalRating | None = None
+    navigation_id: str | None = Field(default=None, max_length=128)
     # shared envelope
     url: str | None = None
     release: str | None = Field(default=None, max_length=128)
@@ -2485,6 +2509,102 @@ async def get_session_detail(
     }
 
 
+def _round_vital(metric: str, value) -> float | None:
+    if value is None:
+        return None
+    # CLS is a small unitless score; keep precision. The rest are milliseconds.
+    return round(float(value), 3 if metric == "CLS" else 1)
+
+
+@router.get("/{pipeline_id}/experience")
+async def get_experience_vitals(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Experience vitals rollup: per-metric p75 + rating distribution, and the
+    same per URL. Leads with the verdict (p75 → good/needs-improvement/poor), not
+    the raw samples."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    source = await _usage_source(pipeline_id, db)
+    usage_window = eff.analytics_usage_window_days
+    since = _now() - timedelta(days=usage_window)
+
+    metric_rows = (await db.execute(
+        select(
+            PortfolioWebVital.metric,
+            func.count(PortfolioWebVital.id),
+            func.percentile_cont(0.75).within_group(PortfolioWebVital.value.asc()),
+        )
+        .where(PortfolioWebVital.pipeline_id == pipeline_id, PortfolioWebVital.occurred_at >= since)
+        .group_by(PortfolioWebVital.metric)
+    )).all()
+
+    rating_rows = (await db.execute(
+        select(PortfolioWebVital.metric, PortfolioWebVital.rating, func.count(PortfolioWebVital.id))
+        .where(PortfolioWebVital.pipeline_id == pipeline_id, PortfolioWebVital.occurred_at >= since)
+        .group_by(PortfolioWebVital.metric, PortfolioWebVital.rating)
+    )).all()
+
+    url_rows = (await db.execute(
+        select(
+            PortfolioWebVital.url,
+            PortfolioWebVital.metric,
+            func.count(PortfolioWebVital.id),
+            func.percentile_cont(0.75).within_group(PortfolioWebVital.value.asc()),
+        )
+        .where(
+            PortfolioWebVital.pipeline_id == pipeline_id,
+            PortfolioWebVital.occurred_at >= since,
+            PortfolioWebVital.url != None,
+        )
+        .group_by(PortfolioWebVital.url, PortfolioWebVital.metric)
+        .order_by(func.count(PortfolioWebVital.id).desc())
+        .limit(60)
+    )).all()
+
+    ratings: dict[str, dict] = {}
+    for metric, rating, count in rating_rows:
+        bucket = ratings.setdefault(metric, {"good": 0, "needs-improvement": 0, "poor": 0})
+        if rating in bucket:
+            bucket[rating] = int(count)
+
+    metrics = []
+    for metric, count, p75 in metric_rows:
+        value = _round_vital(metric, p75)
+        bucket = ratings.get(metric, {})
+        metrics.append({
+            "metric": metric,
+            "sampleCount": int(count),
+            "p75": value,
+            "rating": _rate_vital(metric, value),
+            "good": bucket.get("good", 0),
+            "needsImprovement": bucket.get("needs-improvement", 0),
+            "poor": bucket.get("poor", 0),
+        })
+    metrics.sort(key=lambda m: _VITAL_ORDER.get(m["metric"], 99))
+
+    pages: dict[str, dict] = {}
+    for url, metric, count, p75 in url_rows:
+        page = pages.setdefault(url, {"url": url, "sampleCount": 0, "metrics": {}})
+        page["sampleCount"] += int(count)
+        value = _round_vital(metric, p75)
+        page["metrics"][metric] = {"p75": value, "rating": _rate_vital(metric, value)}
+    pages_list = sorted(pages.values(), key=lambda p: p["sampleCount"], reverse=True)[:10]
+
+    return {
+        "data": {
+            "source": _serialize_usage_source(source),
+            "connected": source is not None,
+            "windowDays": usage_window,
+            "totalSamples": sum(m["sampleCount"] for m in metrics),
+            "metrics": metrics,
+            "pages": pages_list,
+        }
+    }
+
+
 def _build_correlation_days(usage_rows, error_rows, days: int = 30, today: date | None = None) -> list[dict]:
     """Merge usage + error daily rows into one aligned timeline."""
     today = today or _now().date()
@@ -2810,6 +2930,54 @@ def _check_rate_limit(source_id: str, cost: int = 1) -> None:
         raise HTTPException(status_code=429, detail="Rate limit exceeded", headers={"Retry-After": "60"})
 
 
+# Core Web Vitals thresholds (good upper-bound, poor lower-bound). LCP/INP/FCP/
+# TTFB are milliseconds; CLS is unitless. A p75 at/below `good` is good, above
+# `poor` is poor, between is needs-improvement.
+_VITAL_THRESHOLDS = {
+    "LCP": (2500.0, 4000.0),
+    "INP": (200.0, 500.0),
+    "FCP": (1800.0, 3000.0),
+    "TTFB": (800.0, 1800.0),
+    "CLS": (0.1, 0.25),
+}
+_VITAL_ORDER = {"LCP": 0, "INP": 1, "CLS": 2, "FCP": 3, "TTFB": 4}
+
+
+def _rate_vital(metric: str, value: float | None) -> str | None:
+    thresholds = _VITAL_THRESHOLDS.get(metric)
+    if not thresholds or value is None:
+        return None
+    good, poor = thresholds
+    if value <= good:
+        return "good"
+    if value <= poor:
+        return "needs-improvement"
+    return "poor"
+
+
+def _record_web_vital(source, *, metric, value, rating, url, navigation_id, visitor_id, session_id, user_ref, release, environment, occurred_at, now):
+    """Build a web-vital row (not committed). Rating falls back to the
+    threshold-derived value when the client didn't send one. Shared by the
+    single /vitals endpoint and /batch."""
+    return PortfolioWebVital(
+        id=str(uuid.uuid4()),
+        pipeline_id=source.pipeline_id,
+        source_id=source.id,
+        metric=metric,
+        value=float(value),
+        rating=rating or _rate_vital(metric, value),
+        url=url,
+        navigation_id=navigation_id,
+        visitor_id=visitor_id,
+        session_id=session_id,
+        user_ref=user_ref,
+        release=release,
+        environment=environment,
+        occurred_at=occurred_at or now,
+        received_at=now,
+    )
+
+
 def _build_usage_event(source, *, event_type, visitor_id, session_id, user_ref, url, referrer, release, environment, metadata, occurred_at, now):
     """Build a usage event row (not added/committed). Shared by the single
     `/events` endpoint and `/batch` so both store identical shapes."""
@@ -3054,6 +3222,47 @@ async def ingest_error_event(
     return {"success": True, "groupId": group.id, "fingerprint": event.fingerprint}
 
 
+@public_router.post("/vitals")
+async def ingest_vital(
+    request: Request,
+    body: VitalBody,
+    db: AsyncSession = Depends(get_db),
+):
+    source = (await db.execute(
+        select(PortfolioUsageSource).where(
+            PortfolioUsageSource.pipeline_id == body.product_id,
+            PortfolioUsageSource.public_key == body.key,
+            PortfolioUsageSource.status == "connected",
+        )
+    )).scalar_one_or_none()
+    if not source:
+        raise HTTPException(status_code=404, detail="Usage source not found")
+    if not _origin_allowed(source.allowed_domain, request, body.url):
+        raise HTTPException(status_code=403, detail="Vital origin is not allowed")
+    _check_rate_limit(source.id)
+
+    now = _now()
+    db.add(_record_web_vital(
+        source,
+        metric=body.metric,
+        value=body.value,
+        rating=body.rating,
+        url=body.url,
+        navigation_id=body.navigation_id,
+        visitor_id=body.visitor_id,
+        session_id=body.session_id,
+        user_ref=body.user_id,
+        release=body.release,
+        environment=body.environment,
+        occurred_at=body.occurred_at,
+        now=now,
+    ))
+    source.last_seen_at = now
+    source.updated_at = now
+    await db.commit()
+    return {"success": True}
+
+
 @public_router.post("/batch")
 async def ingest_batch(
     request: Request,
@@ -3119,6 +3328,25 @@ async def ingest_batch(
                 occurred_at=item.occurred_at,
                 now=now,
             )
+            stored += 1
+        elif item.kind == "vital":
+            if not item.metric or item.value is None:
+                continue
+            db.add(_record_web_vital(
+                source,
+                metric=item.metric,
+                value=item.value,
+                rating=item.rating,
+                url=item.url,
+                navigation_id=item.navigation_id,
+                visitor_id=item.visitor_id,
+                session_id=item.session_id,
+                user_ref=item.user_id,
+                release=item.release,
+                environment=item.environment,
+                occurred_at=item.occurred_at,
+                now=now,
+            ))
             stored += 1
 
     if stored:

@@ -609,6 +609,72 @@ async def test_get_sessions_rollup(client, fake_db, auth_headers):
     assert body["sessions"][1]["identified"] is False
 
 
+async def test_ingest_vital(client, fake_db):
+    from app.models import PortfolioWebVital
+
+    source = make_usage_source()
+    fake_db.stub(execute=[FakeResult(rows=[source])])
+
+    resp = await client.post(
+        "/public/portfolio/vitals",
+        json={
+            "product_id": source.pipeline_id,
+            "key": source.public_key,
+            "metric": "LCP",
+            "value": 2300.0,
+            "url": "https://example.com/",
+            "session_id": "s1",
+        },
+    )
+
+    assert resp.status_code == 200
+    vital = next(o for o in fake_db.added if isinstance(o, PortfolioWebVital))
+    assert vital.metric == "LCP"
+    assert vital.value == 2300.0
+    # Rating is derived from thresholds when the client doesn't send one.
+    assert vital.rating == "good"
+    assert source.last_seen_at is not None
+
+
+async def test_ingest_vital_rejects_bad_metric(client, fake_db):
+    source = make_usage_source()
+    fake_db.stub(execute=[FakeResult(rows=[source])])
+    resp = await client.post(
+        "/public/portfolio/vitals",
+        json={"product_id": source.pipeline_id, "key": source.public_key, "metric": "BOGUS", "value": 1},
+    )
+    assert resp.status_code == 422
+
+
+async def test_get_experience_vitals(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    source = make_usage_source(pipeline_id=product.id)
+    fake_db.stub(execute=[
+        FakeResult(rows=[product]),   # launched product lookup
+        FakeResult(rows=[]),          # app settings overlay
+        FakeResult(rows=[source]),    # usage source
+        FakeResult(rows=[("LCP", 10, 2200.0), ("CLS", 8, 0.05)]),  # metric, count, p75
+        FakeResult(rows=[("LCP", "good", 7), ("LCP", "poor", 3), ("CLS", "good", 8)]),  # rating dist
+        FakeResult(rows=[("https://example.com/", "LCP", 6, 2100.0), ("https://example.com/", "CLS", 5, 0.04)]),
+    ])
+
+    resp = await client.get(f"/portfolio/{product.id}/experience", headers=auth_headers)
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["metrics"][0]["metric"] == "LCP"  # canonical order
+    lcp = body["metrics"][0]
+    assert lcp["p75"] == 2200.0
+    assert lcp["rating"] == "good"
+    assert lcp["good"] == 7 and lcp["poor"] == 3
+    cls = next(m for m in body["metrics"] if m["metric"] == "CLS")
+    assert cls["p75"] == 0.05  # CLS keeps precision
+    page = body["pages"][0]
+    assert page["url"] == "https://example.com/"
+    assert page["sampleCount"] == 11
+    assert page["metrics"]["LCP"]["p75"] == 2100.0
+
+
 def test_health_verdict_states():
     from app.config import get_settings
     from app.routes.portfolio import _health_verdict

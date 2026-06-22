@@ -394,6 +394,29 @@ class PortfolioErrorEvent(Base):
     received_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
+class PortfolioWebVital(Base):
+    """A single Core Web Vital sample (LCP/CLS/INP/FCP/TTFB) captured by the
+    beacon. The per-URL experience rollups (p75 + rating) aggregate these."""
+
+    __tablename__ = "portfolio_web_vitals"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("portfolio_usage_sources.id", ondelete="SET NULL"), nullable=True, index=True)
+    metric: Mapped[str] = mapped_column(String(10), nullable=False)
+    value: Mapped[float] = mapped_column(Float, nullable=False)
+    rating: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    navigation_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    visitor_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    release: Mapped[str | None] = mapped_column(Text, nullable=True)
+    environment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
+    received_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
 class PortfolioRevenueSource(Base):
     __tablename__ = "portfolio_revenue_sources"
 
