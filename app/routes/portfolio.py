@@ -2111,6 +2111,63 @@ async def get_usage_metrics(
         .limit(20)
     )).scalars().all())
 
+    # Aggregation engine v0 — the rollups the screen leads with; the raw
+    # recent-events log above is secondary. Top pages: pageviews grouped by URL.
+    top_pages = [
+        {
+            "url": url,
+            "views": int(views),
+            "visitors": int(visitors or 0),
+            "lastSeenAt": _iso(last_seen),
+        }
+        for url, views, visitors, last_seen in (await db.execute(
+            select(
+                PortfolioUsageEvent.url,
+                func.count(PortfolioUsageEvent.id),
+                func.count(func.distinct(PortfolioUsageEvent.visitor_id)),
+                func.max(PortfolioUsageEvent.occurred_at),
+            )
+            .where(
+                PortfolioUsageEvent.pipeline_id == pipeline_id,
+                PortfolioUsageEvent.occurred_at >= since,
+                PortfolioUsageEvent.event_type == "pageview",
+                PortfolioUsageEvent.url != None,
+            )
+            .group_by(PortfolioUsageEvent.url)
+            .order_by(func.count(PortfolioUsageEvent.id).desc())
+            .limit(10)
+        )).all()
+    ]
+
+    # Top events by frequency ranks actions, not pageviews. A custom event's name
+    # lives in metadata.name; typed events (signup/login/activation) fall back to
+    # their event_type. Pageviews are excluded — they're the top-pages rollup.
+    event_name = func.coalesce(PortfolioUsageEvent.event_metadata["name"].astext, PortfolioUsageEvent.event_type)
+    top_events = [
+        {
+            "name": name,
+            "count": int(count),
+            "visitors": int(visitors or 0),
+            "lastSeenAt": _iso(last_seen),
+        }
+        for name, count, visitors, last_seen in (await db.execute(
+            select(
+                event_name.label("name"),
+                func.count(PortfolioUsageEvent.id),
+                func.count(func.distinct(PortfolioUsageEvent.visitor_id)),
+                func.max(PortfolioUsageEvent.occurred_at),
+            )
+            .where(
+                PortfolioUsageEvent.pipeline_id == pipeline_id,
+                PortfolioUsageEvent.occurred_at >= since,
+                PortfolioUsageEvent.event_type != "pageview",
+            )
+            .group_by(event_name)
+            .order_by(func.count(PortfolioUsageEvent.id).desc())
+            .limit(10)
+        )).all()
+    ]
+
     # Conversion funnel (14d): distinct visitors at each stage, so a few noisy
     # visitors firing many events don't distort the rates.
     stage_rows = (await db.execute(
@@ -2222,6 +2279,8 @@ async def get_usage_metrics(
                 "customEvents": counts.get("custom", 0),
                 "activeUsers": int(active_users_14d),
             },
+            "topPages": top_pages,
+            "topEvents": top_events,
             "funnel": funnel,
             "growth": growth,
             "retention": retention,

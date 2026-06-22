@@ -125,7 +125,13 @@ async def test_get_usage_metrics(client, fake_db, auth_headers):
             FakeResult(rows=[source]),                  # usage source
             FakeResult(rows=[("pageview", 4), ("signup", 1)]),
             FakeResult(rows=[("2026-05-01", "pageview", 4, 2), ("2026-05-01", "signup", 1, 1)]),
-            FakeResult(rows=[event]),
+            FakeResult(rows=[event]),                   # recent events (secondary)
+            FakeResult(rows=[                           # top pages rollup
+                ("https://example.com/", 4, 2, datetime(2026, 5, 1, tzinfo=timezone.utc)),
+            ]),
+            FakeResult(rows=[                           # top events rollup
+                ("signup", 1, 1, datetime(2026, 5, 1, tzinfo=timezone.utc)),
+            ]),
         ],
         scalar=[5, 2, 2],
     )
@@ -142,6 +148,13 @@ async def test_get_usage_metrics(client, fake_db, auth_headers):
     assert body["summary14d"]["pageviews"] == 4
     assert body["summary14d"]["signups"] == 1
     assert body["summary14d"]["visitors"] == 2
+    # Lead-with rollups (aggregation engine v0).
+    assert body["topPages"][0] == {
+        "url": "https://example.com/", "views": 4, "visitors": 2,
+        "lastSeenAt": "2026-05-01T00:00:00+00:00",
+    }
+    assert body["topEvents"][0]["name"] == "signup"
+    assert body["topEvents"][0]["count"] == 1
     assert body["recentEvents"][0]["eventType"] == "pageview"
 
 
@@ -156,6 +169,8 @@ async def test_get_usage_metrics_funnel_and_growth(client, fake_db, auth_headers
             FakeResult(rows=[("pageview", 100), ("signup", 20), ("activation", 8)]),  # window counts
             FakeResult(rows=[]),          # daily
             FakeResult(rows=[]),          # recent events
+            FakeResult(rows=[]),          # top pages rollup
+            FakeResult(rows=[]),          # top events rollup
             FakeResult(rows=[("signup", 20), ("activation", 8)]),  # funnel: distinct visitors per stage
             FakeResult(rows=[]),          # retention: first-seen per visitor
             FakeResult(rows=[]),          # retention: distinct visitor active-days
