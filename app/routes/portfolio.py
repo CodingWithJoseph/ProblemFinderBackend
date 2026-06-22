@@ -9,7 +9,7 @@ from urllib.parse import urlencode, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -2314,6 +2314,86 @@ async def get_usage_metrics(
             "retention": retention,
             "daily": list(daily.values()),
             "recentEvents": [_serialize_usage_event(event) for event in recent_events],
+        }
+    }
+
+
+@router.get("/{pipeline_id}/sessions")
+async def get_sessions(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Sessions as first-class objects: each row is an aggregate of the events
+    sharing a session_id (the B.2 identity payoff), not a raw event log. Derived
+    from portfolio_usage_events — no sessions table until perf demands one."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    source = await _usage_source(pipeline_id, db)
+    usage_window = eff.analytics_usage_window_days
+    since = _now() - timedelta(days=usage_window)
+
+    base = (
+        PortfolioUsageEvent.pipeline_id == pipeline_id,
+        PortfolioUsageEvent.occurred_at >= since,
+        PortfolioUsageEvent.session_id != None,
+    )
+    total_sessions = int(await db.scalar(
+        select(func.count(func.distinct(PortfolioUsageEvent.session_id))).where(*base)
+    ) or 0)
+    identified_sessions = int(await db.scalar(
+        select(func.count(func.distinct(PortfolioUsageEvent.session_id))).where(
+            *base, PortfolioUsageEvent.user_ref != None
+        )
+    ) or 0)
+    total_events = int(await db.scalar(
+        select(func.count(PortfolioUsageEvent.id)).where(*base)
+    ) or 0)
+
+    # The rollup: one aggregated row per session, most-recently-active first.
+    pageviews = func.sum(case((PortfolioUsageEvent.event_type == "pageview", 1), else_=0))
+    rows = (await db.execute(
+        select(
+            PortfolioUsageEvent.session_id,
+            func.max(PortfolioUsageEvent.visitor_id),
+            func.max(PortfolioUsageEvent.user_ref),
+            func.min(PortfolioUsageEvent.occurred_at),
+            func.max(PortfolioUsageEvent.occurred_at),
+            func.count(PortfolioUsageEvent.id),
+            pageviews,
+        )
+        .where(*base)
+        .group_by(PortfolioUsageEvent.session_id)
+        .order_by(func.max(PortfolioUsageEvent.occurred_at).desc())
+        .limit(50)
+    )).all()
+
+    sessions = []
+    for session_id, visitor_id, user_ref, started, ended, events, page_count in rows:
+        duration = int((ended - started).total_seconds()) if started and ended else 0
+        sessions.append({
+            "sessionId": session_id,
+            "visitorId": visitor_id,
+            "userRef": user_ref,
+            "identified": user_ref is not None,
+            "startedAt": _iso(started),
+            "endedAt": _iso(ended),
+            "durationSeconds": duration,
+            "events": int(events),
+            "pageviews": int(page_count or 0),
+        })
+
+    return {
+        "data": {
+            "source": _serialize_usage_source(source),
+            "connected": source is not None,
+            "windowDays": usage_window,
+            "summary": {
+                "totalSessions": total_sessions,
+                "identifiedSessions": identified_sessions,
+                "avgEventsPerSession": round(total_events / total_sessions, 1) if total_sessions else None,
+            },
+            "sessions": sessions,
         }
     }
 

@@ -530,6 +530,41 @@ async def test_public_usage_event_ingestion(client, fake_db):
     assert source.last_seen_at is not None
 
 
+async def test_get_sessions_rollup(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    source = make_usage_source(pipeline_id=product.id)
+    started = datetime(2026, 5, 20, 10, 0, tzinfo=timezone.utc)
+    ended = datetime(2026, 5, 20, 10, 5, tzinfo=timezone.utc)
+    fake_db.stub(
+        execute=[
+            FakeResult(rows=[product]),   # launched product lookup
+            FakeResult(rows=[]),          # app settings overlay
+            FakeResult(rows=[source]),    # usage source
+            FakeResult(rows=[            # session rollup rows
+                ("sess-1", "visitor-1", "user-9", started, ended, 7, 4),
+                ("sess-2", "visitor-2", None, started, ended, 2, 2),
+            ]),
+        ],
+        scalar=[2, 1, 9],  # total_sessions, identified_sessions, total_events
+    )
+
+    resp = await client.get(f"/portfolio/{product.id}/sessions", headers=auth_headers)
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["summary"]["totalSessions"] == 2
+    assert body["summary"]["identifiedSessions"] == 1
+    assert body["summary"]["avgEventsPerSession"] == 4.5  # 9 / 2
+    first = body["sessions"][0]
+    assert first["sessionId"] == "sess-1"
+    assert first["userRef"] == "user-9"
+    assert first["identified"] is True
+    assert first["durationSeconds"] == 300  # 5 minutes
+    assert first["events"] == 7
+    assert first["pageviews"] == 4
+    assert body["sessions"][1]["identified"] is False
+
+
 def test_health_verdict_states():
     from app.config import get_settings
     from app.routes.portfolio import _health_verdict
