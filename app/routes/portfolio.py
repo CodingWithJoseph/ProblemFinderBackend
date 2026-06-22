@@ -3040,6 +3040,116 @@ async def get_issues(
     }
 
 
+@router.get("/{pipeline_id}/issues/{group_id}")
+async def get_issue_detail(
+    pipeline_id: str,
+    group_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """One issue, interrogable: the promoted issue object plus faceted breakdowns
+    (by release, by URL) so you can pivot on 'which deploy / which page', a sample
+    stack, and recent occurrences."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    now = _now()
+    usage_window = eff.analytics_usage_window_days
+    since = now - timedelta(days=usage_window)
+    midpoint = now - timedelta(days=usage_window / 2)
+    actor = func.coalesce(PortfolioErrorEvent.user_ref, PortfolioErrorEvent.visitor_id)
+
+    group = (await db.execute(
+        select(PortfolioErrorGroup).where(
+            PortfolioErrorGroup.id == group_id,
+            PortfolioErrorGroup.pipeline_id == pipeline_id,
+        )
+    )).scalar_one_or_none()
+    if not group:
+        raise HTTPException(status_code=404, detail="Issue not found")
+
+    scoped = (
+        PortfolioErrorEvent.pipeline_id == pipeline_id,
+        PortfolioErrorEvent.group_id == group_id,
+        PortfolioErrorEvent.occurred_at >= since,
+    )
+    agg = (await db.execute(
+        select(
+            func.count(func.distinct(actor)),
+            func.count(func.distinct(PortfolioErrorEvent.session_id)),
+            func.count(PortfolioErrorEvent.id),
+            func.sum(case((PortfolioErrorEvent.occurred_at >= midpoint, 1), else_=0)),
+            func.sum(case((PortfolioErrorEvent.occurred_at < midpoint, 1), else_=0)),
+        ).where(*scoped)
+    )).all()
+    users, sessions, occ, recent, prior = (
+        (int(agg[0][0] or 0), int(agg[0][1] or 0), int(agg[0][2] or 0), int(agg[0][3] or 0), int(agg[0][4] or 0))
+        if agg else (0, 0, 0, 0, 0)
+    )
+
+    # Facets: slice this issue's occurrences by a dimension. Pivoting is the verb.
+    release_label = func.coalesce(PortfolioErrorEvent.release, "(none)")
+    release_rows = (await db.execute(
+        select(release_label, func.count(PortfolioErrorEvent.id), func.count(func.distinct(actor)))
+        .where(*scoped)
+        .group_by(release_label)
+        .order_by(func.count(PortfolioErrorEvent.id).desc())
+        .limit(20)
+    )).all()
+    url_label = func.coalesce(PortfolioErrorEvent.url, "(none)")
+    url_rows = (await db.execute(
+        select(url_label, func.count(PortfolioErrorEvent.id), func.count(func.distinct(actor)))
+        .where(*scoped)
+        .group_by(url_label)
+        .order_by(func.count(PortfolioErrorEvent.id).desc())
+        .limit(20)
+    )).all()
+
+    sample = (await db.execute(
+        select(PortfolioErrorEvent)
+        .where(PortfolioErrorEvent.pipeline_id == pipeline_id, PortfolioErrorEvent.group_id == group_id)
+        .order_by(PortfolioErrorEvent.occurred_at.desc())
+        .limit(1)
+    )).scalar_one_or_none()
+
+    recent_events = list((await db.execute(
+        select(PortfolioErrorEvent)
+        .where(PortfolioErrorEvent.pipeline_id == pipeline_id, PortfolioErrorEvent.group_id == group_id)
+        .order_by(PortfolioErrorEvent.occurred_at.desc())
+        .limit(20)
+    )).scalars().all())
+
+    sample_payload = None
+    if sample:
+        sample_payload = {
+            "message": sample.message,
+            "stack": sample.stack,
+            "level": sample.level,
+            "handled": sample.handled,
+            "url": sample.url,
+            "release": sample.release,
+            "occurredAt": _iso(sample.occurred_at),
+        }
+
+    return {
+        "data": {
+            "issue": _serialize_issue(
+                group,
+                affected_users=users,
+                affected_sessions=sessions,
+                occurrences=occ,
+                trend=_issue_trend(recent, prior),
+            ),
+            "sample": sample_payload,
+            "facets": {
+                "release": [{"value": value, "count": int(count), "users": int(u)} for value, count, u in release_rows],
+                "url": [{"value": value, "count": int(count), "users": int(u)} for value, count, u in url_rows],
+            },
+            "recentOccurrences": [_serialize_error_event(event) for event in recent_events],
+            "windowDays": usage_window,
+        }
+    }
+
+
 # Per-source ingest rate limit. Fixed one-minute window kept in process: a
 # coarse flood guard so one source can't bury ingest, not a precise distributed
 # quota (each worker holds its own window). A batch counts as its event total.

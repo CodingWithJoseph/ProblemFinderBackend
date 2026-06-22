@@ -182,6 +182,45 @@ async def test_get_issues_promotes_groups(client, fake_db, auth_headers):
     assert body["issues"][1]["trend"]["direction"] == "down"  # 1 recent vs 4 prior
 
 
+async def test_get_issue_detail_facets(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    group = make_error_group(pipeline_id=product.id, event_count=40, title="Boom")
+    sample = make_error_event(pipeline_id=product.id, group_id=group.id, message="Boom", stack="at x (a.js:1:1)")
+    fake_db.stub(execute=[
+        FakeResult(rows=[product]),                 # launched product lookup
+        FakeResult(rows=[]),                        # app settings overlay
+        FakeResult(rows=[group]),                   # group lookup
+        FakeResult(rows=[(9, 12, 40, 30, 10)]),     # agg: users, sessions, occ, recent, prior
+        FakeResult(rows=[("v2.0.0", 25, 6), ("v1.9.0", 15, 4)]),  # release facet
+        FakeResult(rows=[("https://example.com/app", 30, 8)]),    # url facet
+        FakeResult(rows=[sample]),                  # sample event
+        FakeResult(rows=[sample]),                  # recent occurrences
+    ])
+
+    resp = await client.get(f"/portfolio/{product.id}/issues/{group.id}", headers=auth_headers)
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["issue"]["title"] == "Boom"
+    assert body["issue"]["affectedUsers"] == 9
+    assert body["issue"]["trend"]["direction"] == "up"
+    assert body["sample"]["message"] == "Boom"
+    assert body["facets"]["release"][0] == {"value": "v2.0.0", "count": 25, "users": 6}
+    assert body["facets"]["url"][0]["value"] == "https://example.com/app"
+    assert len(body["recentOccurrences"]) == 1
+
+
+async def test_get_issue_detail_404(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    fake_db.stub(execute=[
+        FakeResult(rows=[product]),
+        FakeResult(rows=[]),
+        FakeResult(rows=[]),   # group lookup → none
+    ])
+    resp = await client.get(f"/portfolio/{product.id}/issues/nope", headers=auth_headers)
+    assert resp.status_code == 404
+
+
 async def test_get_issues_handles_group_without_events(client, fake_db, auth_headers):
     product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
     source = make_usage_source(pipeline_id=product.id)
