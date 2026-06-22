@@ -3154,6 +3154,71 @@ class IssueStatusBody(BaseModel):
     status: Literal["unresolved", "resolved", "ignored"]
 
 
+@router.get("/{pipeline_id}/issues/{group_id}/sessions")
+async def get_issue_sessions(
+    pipeline_id: str,
+    group_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """The sessions this issue fired in — the issue → affected sessions → session
+    timeline thread (where the error shows up in situ). Aggregated from the
+    group's error events by session_id."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    usage_window = eff.analytics_usage_window_days
+    since = _now() - timedelta(days=usage_window)
+
+    group = (await db.execute(
+        select(PortfolioErrorGroup).where(
+            PortfolioErrorGroup.id == group_id,
+            PortfolioErrorGroup.pipeline_id == pipeline_id,
+        )
+    )).scalar_one_or_none()
+    if not group:
+        raise HTTPException(status_code=404, detail="Issue not found")
+
+    rows = (await db.execute(
+        select(
+            PortfolioErrorEvent.session_id,
+            func.max(PortfolioErrorEvent.visitor_id),
+            func.max(PortfolioErrorEvent.user_ref),
+            func.count(PortfolioErrorEvent.id),
+            func.min(PortfolioErrorEvent.occurred_at),
+            func.max(PortfolioErrorEvent.occurred_at),
+        )
+        .where(
+            PortfolioErrorEvent.pipeline_id == pipeline_id,
+            PortfolioErrorEvent.group_id == group_id,
+            PortfolioErrorEvent.occurred_at >= since,
+            PortfolioErrorEvent.session_id != None,
+        )
+        .group_by(PortfolioErrorEvent.session_id)
+        .order_by(func.max(PortfolioErrorEvent.occurred_at).desc())
+        .limit(50)
+    )).all()
+
+    sessions = []
+    for session_id, visitor_id, user_ref, occurrences, first_seen, last_seen in rows:
+        sessions.append({
+            "sessionId": session_id,
+            "visitorId": visitor_id,
+            "userRef": user_ref,
+            "identified": user_ref is not None,
+            "occurrences": int(occurrences),
+            "firstSeenAt": _iso(first_seen),
+            "lastSeenAt": _iso(last_seen),
+        })
+
+    return {
+        "data": {
+            "issueId": group_id,
+            "windowDays": usage_window,
+            "sessions": sessions,
+        }
+    }
+
+
 @router.patch("/{pipeline_id}/issues/{group_id}")
 async def update_issue_status(
     pipeline_id: str,

@@ -182,6 +182,43 @@ async def test_get_issues_promotes_groups(client, fake_db, auth_headers):
     assert body["issues"][1]["trend"]["direction"] == "down"  # 1 recent vs 4 prior
 
 
+async def test_get_issue_sessions(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    group = make_error_group(pipeline_id=product.id)
+    t1 = datetime(2026, 5, 20, 10, 0, tzinfo=timezone.utc)
+    t2 = datetime(2026, 5, 20, 10, 4, tzinfo=timezone.utc)
+    fake_db.stub(execute=[
+        FakeResult(rows=[product]),   # launched product lookup
+        FakeResult(rows=[]),          # app settings overlay
+        FakeResult(rows=[group]),     # group lookup
+        FakeResult(rows=[            # session, visitor, user_ref, occurrences, first, last
+            ("sess-1", "v1", "user-9", 3, t1, t2),
+            ("sess-2", "v2", None, 1, t1, t1),
+        ]),
+    ])
+
+    resp = await client.get(f"/portfolio/{product.id}/issues/{group.id}/sessions", headers=auth_headers)
+
+    assert resp.status_code == 200
+    sessions = resp.json()["data"]["sessions"]
+    assert sessions[0]["sessionId"] == "sess-1"
+    assert sessions[0]["userRef"] == "user-9"
+    assert sessions[0]["identified"] is True
+    assert sessions[0]["occurrences"] == 3
+    assert sessions[1]["identified"] is False
+
+
+async def test_get_issue_sessions_404(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    fake_db.stub(execute=[
+        FakeResult(rows=[product]),
+        FakeResult(rows=[]),
+        FakeResult(rows=[]),   # group lookup → none
+    ])
+    resp = await client.get(f"/portfolio/{product.id}/issues/nope/sessions", headers=auth_headers)
+    assert resp.status_code == 404
+
+
 async def test_patch_issue_status(client, fake_db, auth_headers):
     product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
     group = make_error_group(pipeline_id=product.id, status="unresolved")
