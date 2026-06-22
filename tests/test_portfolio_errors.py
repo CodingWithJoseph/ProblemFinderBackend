@@ -182,6 +182,35 @@ async def test_get_issues_promotes_groups(client, fake_db, auth_headers):
     assert body["issues"][1]["trend"]["direction"] == "down"  # 1 recent vs 4 prior
 
 
+async def test_get_errors_by_release(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    source = make_usage_source(pipeline_id=product.id)
+    t_old = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    t_new = datetime(2026, 5, 22, tzinfo=timezone.utc)
+    fake_db.stub(execute=[
+        FakeResult(rows=[product]),   # launched product lookup
+        FakeResult(rows=[]),          # app settings overlay
+        FakeResult(rows=[source]),    # usage source
+        FakeResult(rows=[            # error agg per release: release, errors, users, sessions, first, last
+            ("v1.9.0", 20, 8, 10, t_old, t_old),
+            ("v2.0.0", 60, 25, 30, t_new, t_new),
+        ]),
+        FakeResult(rows=[("v1.9.0", 200), ("v2.0.0", 250)]),  # usage sessions per release
+    ])
+
+    resp = await client.get(f"/portfolio/{product.id}/errors/by-release", headers=auth_headers)
+
+    assert resp.status_code == 200
+    releases = resp.json()["data"]["releases"]
+    # Most recent release leads.
+    assert releases[0]["release"] == "v2.0.0"
+    assert releases[0]["errors"] == 60
+    assert releases[0]["sessions"] == 250
+    assert releases[0]["errorsPerSession"] == 0.24  # 60 / 250
+    older = next(r for r in releases if r["release"] == "v1.9.0")
+    assert older["errorsPerSession"] == 0.1  # 20 / 200 — the deploy regressed
+
+
 async def test_get_issue_detail_facets(client, fake_db, auth_headers):
     product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
     group = make_error_group(pipeline_id=product.id, event_count=40, title="Boom")

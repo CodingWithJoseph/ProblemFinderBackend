@@ -3150,6 +3150,77 @@ async def get_issue_detail(
     }
 
 
+@router.get("/{pipeline_id}/errors/by-release")
+async def get_errors_by_release(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Split-by-release across all errors: did this deploy regress? Per release we
+    compute the error rate (errors / sessions) so a traffic difference between
+    releases doesn't read as a regression on raw counts. Errors carry `release`
+    natively; usage sessions carry it since B.4."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    source = await _usage_source(pipeline_id, db)
+    now = _now()
+    usage_window = eff.analytics_usage_window_days
+    since = now - timedelta(days=usage_window)
+    actor = func.coalesce(PortfolioErrorEvent.user_ref, PortfolioErrorEvent.visitor_id)
+    error_release = func.coalesce(PortfolioErrorEvent.release, "(none)")
+    usage_release = func.coalesce(PortfolioUsageEvent.release, "(none)")
+
+    error_rows = (await db.execute(
+        select(
+            error_release,
+            func.count(PortfolioErrorEvent.id),
+            func.count(func.distinct(actor)),
+            func.count(func.distinct(PortfolioErrorEvent.session_id)),
+            func.min(PortfolioErrorEvent.occurred_at),
+            func.max(PortfolioErrorEvent.occurred_at),
+        )
+        .where(PortfolioErrorEvent.pipeline_id == pipeline_id, PortfolioErrorEvent.occurred_at >= since)
+        .group_by(error_release)
+    )).all()
+
+    # Sessions per release from usage, the denominator for the rate.
+    session_rows = (await db.execute(
+        select(usage_release, func.count(func.distinct(PortfolioUsageEvent.session_id)))
+        .where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.occurred_at >= since,
+            PortfolioUsageEvent.session_id != None,
+        )
+        .group_by(usage_release)
+    )).all()
+    sessions_by_release = {release: int(count) for release, count in session_rows}
+
+    releases = []
+    for release, errors, users, err_sessions, first_seen, last_seen in error_rows:
+        sessions = sessions_by_release.get(release, 0)
+        releases.append({
+            "release": release,
+            "errors": int(errors),
+            "affectedUsers": int(users),
+            "affectedSessions": int(err_sessions),
+            "sessions": sessions,
+            "errorsPerSession": round(int(errors) / sessions, 4) if sessions else None,
+            "firstSeenAt": _iso(first_seen),
+            "lastSeenAt": _iso(last_seen),
+        })
+    # Most recently active release first — the latest deploy is what you're judging.
+    releases.sort(key=lambda r: r["lastSeenAt"] or "", reverse=True)
+
+    return {
+        "data": {
+            "source": _serialize_usage_source(source),
+            "connected": source is not None,
+            "windowDays": usage_window,
+            "releases": releases,
+        }
+    }
+
+
 # Per-source ingest rate limit. Fixed one-minute window kept in process: a
 # coarse flood guard so one source can't bury ingest, not a precise distributed
 # quota (each worker holds its own window). A batch counts as its event total.
