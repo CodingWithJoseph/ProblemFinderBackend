@@ -417,6 +417,28 @@ class PortfolioWebVital(Base):
     received_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
+class PortfolioLog(Base):
+    """A client log line (debug/info/warn/error) from the beacon's log() call or
+    console hook. Faceted by level/session/release in the logs explorer."""
+
+    __tablename__ = "portfolio_logs"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("portfolio_usage_sources.id", ondelete="SET NULL"), nullable=True, index=True)
+    level: Mapped[str] = mapped_column(String(10), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    event_metadata: Mapped[dict | None] = mapped_column("metadata", JSONB, nullable=True)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    visitor_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    release: Mapped[str | None] = mapped_column(Text, nullable=True)
+    environment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
+    received_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
 class PortfolioRevenueSource(Base):
     __tablename__ = "portfolio_revenue_sources"
 

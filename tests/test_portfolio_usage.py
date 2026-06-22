@@ -675,6 +675,74 @@ async def test_get_experience_vitals(client, fake_db, auth_headers):
     assert page["metrics"]["LCP"]["p75"] == 2100.0
 
 
+async def test_ingest_log(client, fake_db):
+    from app.models import PortfolioLog
+
+    source = make_usage_source()
+    fake_db.stub(execute=[FakeResult(rows=[source])])
+
+    resp = await client.post(
+        "/public/portfolio/logs",
+        json={
+            "product_id": source.pipeline_id,
+            "key": source.public_key,
+            "level": "warn",
+            "message": "slow query",
+            "session_id": "s1",
+        },
+    )
+
+    assert resp.status_code == 200
+    log = next(o for o in fake_db.added if isinstance(o, PortfolioLog))
+    assert log.level == "warn"
+    assert log.message == "slow query"
+    assert source.last_seen_at is not None
+
+
+async def test_ingest_log_rejects_bad_level(client, fake_db):
+    source = make_usage_source()
+    fake_db.stub(execute=[FakeResult(rows=[source])])
+    resp = await client.post(
+        "/public/portfolio/logs",
+        json={"product_id": source.pipeline_id, "key": source.public_key, "level": "trace", "message": "x"},
+    )
+    assert resp.status_code == 422
+
+
+async def test_get_logs_faceted(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    source = make_usage_source(pipeline_id=product.id)
+
+    class _Log:
+        def __init__(self, level, message):
+            self.id = "log-1"
+            self.level = level
+            self.message = message
+            self.url = "https://example.com/"
+            self.session_id = "s1"
+            self.user_ref = None
+            self.release = "v1"
+            self.event_metadata = {}
+            self.occurred_at = datetime(2026, 5, 20, tzinfo=timezone.utc)
+
+    fake_db.stub(execute=[
+        FakeResult(rows=[product]),   # launched product lookup
+        FakeResult(rows=[]),          # app settings overlay
+        FakeResult(rows=[source]),    # usage source
+        FakeResult(rows=[("info", 5), ("warn", 2), ("error", 1)]),  # level facet
+        FakeResult(rows=[_Log("warn", "slow query")]),              # log lines
+    ])
+
+    resp = await client.get(f"/portfolio/{product.id}/logs?q=slow", headers=auth_headers)
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["levelCounts"] == {"debug": 0, "info": 5, "warn": 2, "error": 1}
+    assert body["filters"]["q"] == "slow"
+    assert body["logs"][0]["message"] == "slow query"
+    assert body["logs"][0]["level"] == "warn"
+
+
 def test_health_verdict_states():
     from app.config import get_settings
     from app.routes.portfolio import _health_verdict

@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 from urllib.parse import urlencode, urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import case, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -28,6 +28,7 @@ from app.models import (
     PortfolioIdentity,
     PortfolioMrrMovement,
     PortfolioRevenueSource,
+    PortfolioLog,
     PortfolioUsageEvent,
     PortfolioUsageSource,
     PortfolioWebVital,
@@ -55,6 +56,7 @@ RevenueProvider = Literal["stripe"]
 ErrorLevel = Literal["error", "warning"]
 WebVitalMetric = Literal["LCP", "CLS", "INP", "FCP", "TTFB"]
 WebVitalRating = Literal["good", "needs-improvement", "poor"]
+LogLevel = Literal["debug", "info", "warn", "error"]
 
 
 class UsageEventBody(BaseModel):
@@ -122,16 +124,31 @@ class VitalBody(BaseModel):
     occurred_at: datetime | None = None
 
 
+class LogBody(BaseModel):
+    product_id: str
+    key: str
+    level: LogLevel
+    message: str = Field(min_length=1, max_length=4000)
+    metadata: dict | None = None
+    url: str | None = None
+    visitor_id: str | None = None
+    session_id: str | None = None
+    user_id: str | None = Field(default=None, max_length=256)
+    release: str | None = Field(default=None, max_length=128)
+    environment: str | None = Field(default=None, max_length=64)
+    occurred_at: datetime | None = None
+
+
 class BatchItem(BaseModel):
-    """One event in a batch. `kind` discriminates a usage event from an error or
-    a web vital so each storage path (and error grouping) stays identical to the
-    single endpoints."""
-    kind: Literal["event", "error", "vital"]
+    """One event in a batch. `kind` discriminates a usage event from an error, a
+    web vital, or a log so each storage path (and error grouping) stays identical
+    to the single endpoints."""
+    kind: Literal["event", "error", "vital", "log"]
     # usage-event field
     event_type: UsageEventType | None = None
     referrer: str | None = None
     # error fields
-    message: str | None = Field(default=None, max_length=2000)
+    message: str | None = Field(default=None, max_length=4000)
     stack: str | None = Field(default=None, max_length=20000)
     level: ErrorLevel = "error"
     handled: bool | None = None
@@ -140,6 +157,8 @@ class BatchItem(BaseModel):
     value: float | None = None
     rating: WebVitalRating | None = None
     navigation_id: str | None = Field(default=None, max_length=128)
+    # log field
+    log_level: LogLevel | None = None
     # shared envelope
     url: str | None = None
     release: str | None = Field(default=None, max_length=128)
@@ -2605,6 +2624,79 @@ async def get_experience_vitals(
     }
 
 
+@router.get("/{pipeline_id}/logs")
+async def get_logs(
+    pipeline_id: str,
+    level: LogLevel | None = None,
+    q: str | None = Query(default=None, max_length=200),
+    session: str | None = None,
+    release: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Faceted log explorer: leads with the per-level counts (the rollup), then
+    the filtered lines. Facets — level, message search (q), session, release —
+    compose; the level counts reflect the other filters so the facet is live."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    source = await _usage_source(pipeline_id, db)
+    usage_window = eff.analytics_usage_window_days
+    since = _now() - timedelta(days=usage_window)
+
+    # Filters other than level apply to both the level facet and the lines, so
+    # the facet shows the level distribution within the current context.
+    base = [PortfolioLog.pipeline_id == pipeline_id, PortfolioLog.occurred_at >= since]
+    if q:
+        base.append(PortfolioLog.message.ilike(f"%{q}%"))
+    if session:
+        base.append(PortfolioLog.session_id == session)
+    if release:
+        base.append(PortfolioLog.release == release)
+
+    level_rows = (await db.execute(
+        select(PortfolioLog.level, func.count(PortfolioLog.id)).where(*base).group_by(PortfolioLog.level)
+    )).all()
+    level_counts = {lvl: 0 for lvl in ("debug", "info", "warn", "error")}
+    for lvl, count in level_rows:
+        if lvl in level_counts:
+            level_counts[lvl] = int(count)
+
+    line_filters = list(base)
+    if level:
+        line_filters.append(PortfolioLog.level == level)
+    logs = list((await db.execute(
+        select(PortfolioLog)
+        .where(*line_filters)
+        .order_by(PortfolioLog.occurred_at.desc())
+        .limit(limit)
+    )).scalars().all())
+
+    return {
+        "data": {
+            "source": _serialize_usage_source(source),
+            "connected": source is not None,
+            "windowDays": usage_window,
+            "levelCounts": level_counts,
+            "filters": {"level": level, "q": q, "session": session, "release": release},
+            "logs": [
+                {
+                    "id": log.id,
+                    "level": log.level,
+                    "message": log.message,
+                    "url": log.url,
+                    "sessionId": log.session_id,
+                    "userRef": log.user_ref,
+                    "release": log.release,
+                    "metadata": log.event_metadata or {},
+                    "occurredAt": _iso(log.occurred_at),
+                }
+                for log in logs
+            ],
+        }
+    }
+
+
 def _build_correlation_days(usage_rows, error_rows, days: int = 30, today: date | None = None) -> list[dict]:
     """Merge usage + error daily rows into one aligned timeline."""
     today = today or _now().date()
@@ -3388,6 +3480,27 @@ def _record_web_vital(source, *, metric, value, rating, url, navigation_id, visi
     )
 
 
+def _record_log(source, *, level, message, metadata, url, visitor_id, session_id, user_ref, release, environment, occurred_at, now):
+    """Build a log row (not committed). Shared by the single /logs endpoint and
+    /batch."""
+    return PortfolioLog(
+        id=str(uuid.uuid4()),
+        pipeline_id=source.pipeline_id,
+        source_id=source.id,
+        level=level,
+        message=str(message)[:4000],
+        event_metadata=metadata or {},
+        url=url,
+        visitor_id=visitor_id,
+        session_id=session_id,
+        user_ref=user_ref,
+        release=release,
+        environment=environment,
+        occurred_at=occurred_at or now,
+        received_at=now,
+    )
+
+
 def _build_usage_event(source, *, event_type, visitor_id, session_id, user_ref, url, referrer, release, environment, metadata, occurred_at, now):
     """Build a usage event row (not added/committed). Shared by the single
     `/events` endpoint and `/batch` so both store identical shapes."""
@@ -3673,6 +3786,46 @@ async def ingest_vital(
     return {"success": True}
 
 
+@public_router.post("/logs")
+async def ingest_log(
+    request: Request,
+    body: LogBody,
+    db: AsyncSession = Depends(get_db),
+):
+    source = (await db.execute(
+        select(PortfolioUsageSource).where(
+            PortfolioUsageSource.pipeline_id == body.product_id,
+            PortfolioUsageSource.public_key == body.key,
+            PortfolioUsageSource.status == "connected",
+        )
+    )).scalar_one_or_none()
+    if not source:
+        raise HTTPException(status_code=404, detail="Usage source not found")
+    if not _origin_allowed(source.allowed_domain, request, body.url):
+        raise HTTPException(status_code=403, detail="Log origin is not allowed")
+    _check_rate_limit(source.id)
+
+    now = _now()
+    db.add(_record_log(
+        source,
+        level=body.level,
+        message=body.message,
+        metadata=body.metadata,
+        url=body.url,
+        visitor_id=body.visitor_id,
+        session_id=body.session_id,
+        user_ref=body.user_id,
+        release=body.release,
+        environment=body.environment,
+        occurred_at=body.occurred_at,
+        now=now,
+    ))
+    source.last_seen_at = now
+    source.updated_at = now
+    await db.commit()
+    return {"success": True}
+
+
 @public_router.post("/batch")
 async def ingest_batch(
     request: Request,
@@ -3749,6 +3902,24 @@ async def ingest_batch(
                 rating=item.rating,
                 url=item.url,
                 navigation_id=item.navigation_id,
+                visitor_id=item.visitor_id,
+                session_id=item.session_id,
+                user_ref=item.user_id,
+                release=item.release,
+                environment=item.environment,
+                occurred_at=item.occurred_at,
+                now=now,
+            ))
+            stored += 1
+        elif item.kind == "log":
+            if not item.log_level or not item.message:
+                continue
+            db.add(_record_log(
+                source,
+                level=item.log_level,
+                message=item.message,
+                metadata=item.metadata,
+                url=item.url,
                 visitor_id=item.visitor_id,
                 session_id=item.session_id,
                 user_ref=item.user_id,
