@@ -2398,6 +2398,93 @@ async def get_sessions(
     }
 
 
+@router.get("/{pipeline_id}/sessions/{session_id}")
+async def get_session_detail(
+    pipeline_id: str,
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """One session's timeline: its usage events and the errors that happened in
+    it, merged in chronological order. Drill carries context — the error shows
+    up in situ, next to what the visitor was doing when it fired."""
+    await _require_launched_product(pipeline_id, db, uid)
+    source = await _usage_source(pipeline_id, db)
+
+    usage_events = list((await db.execute(
+        select(PortfolioUsageEvent)
+        .where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.session_id == session_id,
+        )
+        .order_by(PortfolioUsageEvent.occurred_at.asc())
+        .limit(500)
+    )).scalars().all())
+    error_events = list((await db.execute(
+        select(PortfolioErrorEvent)
+        .where(
+            PortfolioErrorEvent.pipeline_id == pipeline_id,
+            PortfolioErrorEvent.session_id == session_id,
+        )
+        .order_by(PortfolioErrorEvent.occurred_at.asc())
+        .limit(500)
+    )).scalars().all())
+
+    if not usage_events and not error_events:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    items: list[tuple] = []
+    for event in usage_events:
+        meta = event.event_metadata or {}
+        items.append((event.occurred_at, {
+            "kind": "event",
+            "id": event.id,
+            "eventType": event.event_type,
+            "name": meta.get("name"),
+            "url": event.url,
+            "metadata": meta,
+            "occurredAt": _iso(event.occurred_at),
+        }))
+    for event in error_events:
+        items.append((event.occurred_at, {
+            "kind": "error",
+            "id": event.id,
+            "groupId": event.group_id,
+            "fingerprint": event.fingerprint,
+            "message": event.message,
+            "level": event.level,
+            "url": event.url,
+            "occurredAt": _iso(event.occurred_at),
+        }))
+    items.sort(key=lambda item: item[0])
+    timeline = [payload for _, payload in items]
+
+    both = usage_events + error_events
+    started = items[0][0]
+    ended = items[-1][0]
+    user_ref = next((e.user_ref for e in both if e.user_ref), None)
+    visitor_id = next((e.visitor_id for e in both if e.visitor_id), None)
+
+    return {
+        "data": {
+            "source": _serialize_usage_source(source),
+            "session": {
+                "sessionId": session_id,
+                "visitorId": visitor_id,
+                "userRef": user_ref,
+                "identified": user_ref is not None,
+                "startedAt": _iso(started),
+                "endedAt": _iso(ended),
+                "durationSeconds": int((ended - started).total_seconds()) if started and ended else 0,
+                "events": len(usage_events),
+                "pageviews": sum(1 for e in usage_events if e.event_type == "pageview"),
+                "errors": len(error_events),
+            },
+            "timeline": timeline,
+        }
+    }
+
+
 def _build_correlation_days(usage_rows, error_rows, days: int = 30, today: date | None = None) -> list[dict]:
     """Merge usage + error daily rows into one aligned timeline."""
     today = today or _now().date()

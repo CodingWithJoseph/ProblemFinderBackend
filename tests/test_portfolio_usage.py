@@ -3,6 +3,7 @@ from urllib.parse import parse_qs, urlparse
 
 from conftest import (
     FakeResult,
+    make_error_event,
     make_pipeline,
     make_revenue_source,
     make_subscription,
@@ -528,6 +529,49 @@ async def test_public_usage_event_ingestion(client, fake_db):
     assert event.event_type == "signup"
     assert event.event_metadata == {"plan": "pro"}
     assert source.last_seen_at is not None
+
+
+async def test_get_session_detail_timeline(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    source = make_usage_source(pipeline_id=product.id)
+    t1 = datetime(2026, 5, 20, 10, 0, tzinfo=timezone.utc)
+    t2 = datetime(2026, 5, 20, 10, 2, tzinfo=timezone.utc)
+    t3 = datetime(2026, 5, 20, 10, 5, tzinfo=timezone.utc)
+    view = make_usage_event(pipeline_id=product.id, session_id="sess-1", event_type="pageview", occurred_at=t1)
+    signup = make_usage_event(pipeline_id=product.id, session_id="sess-1", event_type="signup", user_ref="user-9", occurred_at=t3)
+    err = make_error_event(pipeline_id=product.id, session_id="sess-1", message="Boom", occurred_at=t2)
+    fake_db.stub(execute=[
+        FakeResult(rows=[product]),          # launched product lookup
+        FakeResult(rows=[source]),           # usage source
+        FakeResult(rows=[view, signup]),     # usage events (scalars)
+        FakeResult(rows=[err]),              # error events (scalars)
+    ])
+
+    resp = await client.get(f"/portfolio/{product.id}/sessions/sess-1", headers=auth_headers)
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["session"]["events"] == 2
+    assert body["session"]["errors"] == 1
+    assert body["session"]["identified"] is True
+    assert body["session"]["durationSeconds"] == 300
+    # Errors are merged into the usage timeline in chronological order.
+    assert [item["kind"] for item in body["timeline"]] == ["event", "error", "event"]
+    assert body["timeline"][1]["message"] == "Boom"
+
+
+async def test_get_session_detail_404_when_empty(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    source = make_usage_source(pipeline_id=product.id)
+    fake_db.stub(execute=[
+        FakeResult(rows=[product]),
+        FakeResult(rows=[source]),
+        FakeResult(rows=[]),   # no usage events
+        FakeResult(rows=[]),   # no error events
+    ])
+
+    resp = await client.get(f"/portfolio/{product.id}/sessions/nope", headers=auth_headers)
+    assert resp.status_code == 404
 
 
 async def test_get_sessions_rollup(client, fake_db, auth_headers):
