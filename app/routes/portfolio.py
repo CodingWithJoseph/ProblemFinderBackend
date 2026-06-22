@@ -9,7 +9,7 @@ from urllib.parse import urlencode, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -93,6 +93,11 @@ class IdentifyBody(BaseModel):
     email: str | None = Field(default=None, max_length=320)
     group_id: str | None = Field(default=None, max_length=256)
     traits: dict | None = None
+    # Session context for backfill: when the beacon calls identify() mid-session,
+    # these let the server attribute the session's prior anonymous events to the
+    # now-known user_ref. Optional so older snippets keep working.
+    session_id: str | None = None
+    visitor_id: str | None = None
 
 
 class UsageSourceUpdateBody(BaseModel):
@@ -2584,8 +2589,28 @@ async def ingest_identify(
         existing.resolution_method = method
         existing.resolved_at = now if method != "unresolved" else existing.resolved_at
     existing.updated_at = now
+
+    # Backfill the current session: events fire before the user is known, so the
+    # session's earlier rows carry a null user_ref. Once identify() runs, stamp
+    # them with the user_ref so the whole session attributes to one actor. Scoped
+    # to this session's still-anonymous rows, so a re-identify can't reassign
+    # events already attributed to a different user.
+    backfilled = 0
+    if body.session_id:
+        for model in (PortfolioUsageEvent, PortfolioErrorEvent):
+            result = await db.execute(
+                update(model)
+                .where(
+                    model.pipeline_id == source.pipeline_id,
+                    model.session_id == body.session_id,
+                    model.user_ref.is_(None),
+                )
+                .values(user_ref=body.user_id)
+            )
+            backfilled += result.rowcount or 0
+
     await db.commit()
-    return {"success": True, "resolution": existing.resolution_method}
+    return {"success": True, "resolution": existing.resolution_method, "backfilled": backfilled}
 
 
 @public_router.post("/errors")
