@@ -506,6 +506,27 @@ async def _usage_source(pipeline_id: str, db: AsyncSession) -> PortfolioUsageSou
     )).scalar_one_or_none()
 
 
+def _health_verdict(*, connected: bool, last_seen_at, total_events: int, eff, now) -> dict:
+    """Health verdict engine v0: a per-source computed state, so the UI renders a
+    badge instead of making the user read a timestamp and guess. Freshness-only
+    for now (errors/vitals/revenue fold in at v2). States: no-data / healthy /
+    warning / unhealthy."""
+    if not connected or last_seen_at is None or total_events <= 0:
+        return {"state": "no-data", "label": "No data", "reason": "No events received yet",
+                "lastSeenAt": _iso(last_seen_at), "ageHours": None}
+
+    seen = last_seen_at if last_seen_at.tzinfo else last_seen_at.replace(tzinfo=timezone.utc)
+    age_hours = max(0.0, (now - seen).total_seconds() / 3600.0)
+    if age_hours <= eff.health_warning_hours:
+        state, label, reason = "healthy", "Healthy", "Receiving events"
+    elif age_hours <= eff.health_unhealthy_hours:
+        state, label, reason = "warning", "Quiet", f"No events for {int(age_hours)}h"
+    else:
+        state, label, reason = "unhealthy", "Silent", f"No events for {int(age_hours)}h"
+    return {"state": state, "label": label, "reason": reason,
+            "lastSeenAt": _iso(last_seen_at), "ageHours": round(age_hours, 1)}
+
+
 def _empty_error_daily(days: int = 14) -> dict[str, dict]:
     today = _now().date()
     rows: dict[str, dict] = {}
@@ -2268,6 +2289,13 @@ async def get_usage_metrics(
             "connected": source is not None,
             "totalEvents": int(total_events),
             "lastSeenAt": _iso(source.last_seen_at if source else None),
+            "health": _health_verdict(
+                connected=source is not None,
+                last_seen_at=source.last_seen_at if source else None,
+                total_events=int(total_events),
+                eff=eff,
+                now=now,
+            ),
             "windowDays": usage_window,
             "growthWindowDays": growth_window,
             "summary14d": {

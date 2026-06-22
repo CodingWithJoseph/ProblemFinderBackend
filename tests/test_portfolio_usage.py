@@ -530,6 +530,26 @@ async def test_public_usage_event_ingestion(client, fake_db):
     assert source.last_seen_at is not None
 
 
+def test_health_verdict_states():
+    from app.config import get_settings
+    from app.routes.portfolio import _health_verdict
+
+    eff = get_settings()  # health_warning_hours=24, health_unhealthy_hours=72
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+
+    # No source / no events → no-data.
+    assert _health_verdict(connected=False, last_seen_at=None, total_events=0, eff=eff, now=now)["state"] == "no-data"
+    assert _health_verdict(connected=True, last_seen_at=None, total_events=0, eff=eff, now=now)["state"] == "no-data"
+
+    # Fresh → healthy; quiet → warning; long silent → unhealthy.
+    fresh = now - timedelta(hours=2)
+    quiet = now - timedelta(hours=36)
+    silent = now - timedelta(hours=100)
+    assert _health_verdict(connected=True, last_seen_at=fresh, total_events=10, eff=eff, now=now)["state"] == "healthy"
+    assert _health_verdict(connected=True, last_seen_at=quiet, total_events=10, eff=eff, now=now)["state"] == "warning"
+    assert _health_verdict(connected=True, last_seen_at=silent, total_events=10, eff=eff, now=now)["state"] == "unhealthy"
+
+
 async def test_public_usage_event_persists_release_and_environment(client, fake_db):
     source = make_usage_source()
     fake_db.stub(execute=[FakeResult(rows=[source])])

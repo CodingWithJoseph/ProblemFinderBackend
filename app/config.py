@@ -105,6 +105,12 @@ class Settings(BaseSettings):
     # backs off. In-process per worker; a coarse flood guard, not a precise quota.
     ingest_rate_limit_per_minute: int = 600
 
+    # Health verdict engine (v0): a source is healthy while it's seen an event
+    # within health_warning_hours, "quiet" up to health_unhealthy_hours, and
+    # "silent" beyond it. Freshness-only for now; errors/vitals fold in at v2.
+    health_warning_hours: int = 24
+    health_unhealthy_hours: int = 72
+
     # CORS
     allowed_origins: str = "http://localhost:3000"
 
