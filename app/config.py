@@ -100,6 +100,11 @@ class Settings(BaseSettings):
     # Max new-issue emails emitted per run, so a burst can't blast an inbox.
     alert_new_issue_cap: int = 5
 
+    # Ingest rate limit: max events accepted per source per minute (a batch
+    # counts as its event total). Beyond this, ingest returns 429 and the beacon
+    # backs off. In-process per worker; a coarse flood guard, not a precise quota.
+    ingest_rate_limit_per_minute: int = 600
+
     # CORS
     allowed_origins: str = "http://localhost:3000"
 

@@ -515,6 +515,47 @@ async def test_public_usage_event_ingestion(client, fake_db):
     assert source.last_seen_at is not None
 
 
+async def test_public_usage_event_persists_release_and_environment(client, fake_db):
+    source = make_usage_source()
+    fake_db.stub(execute=[FakeResult(rows=[source])])
+
+    resp = await client.post(
+        "/public/portfolio/events",
+        json={
+            "product_id": source.pipeline_id,
+            "key": source.public_key,
+            "event_type": "pageview",
+            "release": "v3.1.0",
+            "environment": "production",
+        },
+    )
+
+    assert resp.status_code == 200
+    event = next(o for o in fake_db.added if isinstance(o, PortfolioUsageEvent))
+    assert event.release == "v3.1.0"
+    assert event.environment == "production"
+
+
+async def test_ingest_rate_limit_returns_429(client, fake_db, monkeypatch):
+    from app.config import get_settings
+
+    portfolio_routes._rate_windows.clear()
+    monkeypatch.setattr(get_settings(), "ingest_rate_limit_per_minute", 1)
+
+    source = make_usage_source()
+    fake_db.stub(execute=[FakeResult(rows=[source]), FakeResult(rows=[source])])
+    payload = {"product_id": source.pipeline_id, "key": source.public_key, "event_type": "pageview"}
+
+    first = await client.post("/public/portfolio/events", json=payload)
+    assert first.status_code == 200
+    # Second event in the same minute window trips the per-source limit.
+    second = await client.post("/public/portfolio/events", json=payload)
+    assert second.status_code == 429
+    assert second.headers.get("Retry-After") == "60"
+
+    portfolio_routes._rate_windows.clear()
+
+
 async def test_public_batch_ingests_mixed_events(client, fake_db):
     from app.models import PortfolioErrorEvent, PortfolioErrorGroup
 

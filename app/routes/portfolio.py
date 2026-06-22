@@ -63,6 +63,8 @@ class UsageEventBody(BaseModel):
     user_id: str | None = Field(default=None, max_length=256)
     url: str | None = None
     referrer: str | None = None
+    release: str | None = Field(default=None, max_length=128)
+    environment: str | None = Field(default=None, max_length=64)
     metadata: dict | None = None
     occurred_at: datetime | None = None
 
@@ -76,6 +78,7 @@ class ErrorEventBody(BaseModel):
     handled: bool | None = None
     url: str | None = None
     release: str | None = Field(default=None, max_length=128)
+    environment: str | None = Field(default=None, max_length=64)
     visitor_id: str | None = None
     session_id: str | None = None
     user_id: str | None = Field(default=None, max_length=256)
@@ -116,6 +119,7 @@ class BatchItem(BaseModel):
     # shared envelope
     url: str | None = None
     release: str | None = Field(default=None, max_length=128)
+    environment: str | None = Field(default=None, max_length=64)
     visitor_id: str | None = None
     session_id: str | None = None
     user_id: str | None = Field(default=None, max_length=256)
@@ -199,6 +203,8 @@ def _serialize_usage_event(event: PortfolioUsageEvent) -> dict:
         "userId": event.user_ref,
         "url": event.url,
         "referrer": event.referrer,
+        "release": event.release,
+        "environment": event.environment,
         "metadata": event.event_metadata or {},
         "occurredAt": _iso(event.occurred_at),
         "receivedAt": _iso(event.received_at),
@@ -235,6 +241,7 @@ def _serialize_error_event(event: PortfolioErrorEvent) -> dict:
         "handled": event.handled,
         "url": event.url,
         "release": event.release,
+        "environment": event.environment,
         "visitorId": event.visitor_id,
         "sessionId": event.session_id,
         "userId": event.user_ref,
@@ -2525,7 +2532,31 @@ async def get_error_metrics(
     }
 
 
-def _build_usage_event(source, *, event_type, visitor_id, session_id, user_ref, url, referrer, metadata, occurred_at, now):
+# Per-source ingest rate limit. Fixed one-minute window kept in process: a
+# coarse flood guard so one source can't bury ingest, not a precise distributed
+# quota (each worker holds its own window). A batch counts as its event total.
+_rate_windows: dict[str, list] = {}
+
+
+def _check_rate_limit(source_id: str, cost: int = 1) -> None:
+    limit = get_settings().ingest_rate_limit_per_minute
+    if limit <= 0:
+        return
+    window = int(_now().timestamp()) // 60
+    entry = _rate_windows.get(source_id)
+    if entry is None or entry[0] != window:
+        # New window. Opportunistically drop stale entries so the map can't grow
+        # unbounded across many sources.
+        if len(_rate_windows) > 10000:
+            _rate_windows.clear()
+        entry = [window, 0]
+        _rate_windows[source_id] = entry
+    entry[1] += cost
+    if entry[1] > limit:
+        raise HTTPException(status_code=429, detail="Rate limit exceeded", headers={"Retry-After": "60"})
+
+
+def _build_usage_event(source, *, event_type, visitor_id, session_id, user_ref, url, referrer, release, environment, metadata, occurred_at, now):
     """Build a usage event row (not added/committed). Shared by the single
     `/events` endpoint and `/batch` so both store identical shapes."""
     return PortfolioUsageEvent(
@@ -2538,13 +2569,15 @@ def _build_usage_event(source, *, event_type, visitor_id, session_id, user_ref, 
         user_ref=user_ref,
         url=url,
         referrer=referrer,
+        release=release,
+        environment=environment,
         event_metadata=metadata or {},
         occurred_at=occurred_at or now,
         received_at=now,
     )
 
 
-async def _record_error_event(source, db, *, message, stack, level, handled, url, release, visitor_id, session_id, user_ref, metadata, occurred_at, now):
+async def _record_error_event(source, db, *, message, stack, level, handled, url, release, environment, visitor_id, session_id, user_ref, metadata, occurred_at, now):
     """Upsert the fingerprint group and add the error event (not committed).
     Shared by the single `/errors` endpoint and `/batch` so grouping, regression
     reopen, and first/last-seen tracking stay identical across both."""
@@ -2595,6 +2628,7 @@ async def _record_error_event(source, db, *, message, stack, level, handled, url
         handled=handled,
         url=url,
         release=release,
+        environment=environment,
         visitor_id=visitor_id,
         session_id=session_id,
         user_ref=user_ref,
@@ -2623,6 +2657,7 @@ async def ingest_usage_event(
         raise HTTPException(status_code=404, detail="Usage source not found")
     if not _usage_event_domain_allowed(source, request, body):
         raise HTTPException(status_code=403, detail="Usage event origin is not allowed")
+    _check_rate_limit(source.id)
 
     now = _now()
     event = _build_usage_event(
@@ -2633,6 +2668,8 @@ async def ingest_usage_event(
         user_ref=body.user_id,
         url=body.url,
         referrer=body.referrer,
+        release=body.release,
+        environment=body.environment,
         metadata=body.metadata,
         occurred_at=body.occurred_at,
         now=now,
@@ -2738,6 +2775,7 @@ async def ingest_error_event(
         raise HTTPException(status_code=404, detail="Usage source not found")
     if not _origin_allowed(source.allowed_domain, request, body.url):
         raise HTTPException(status_code=403, detail="Error event origin is not allowed")
+    _check_rate_limit(source.id)
 
     now = _now()
     event, group = await _record_error_event(
@@ -2748,6 +2786,7 @@ async def ingest_error_event(
         handled=body.handled,
         url=body.url,
         release=body.release,
+        environment=body.environment,
         visitor_id=body.visitor_id,
         session_id=body.session_id,
         user_ref=body.user_id,
@@ -2783,6 +2822,8 @@ async def ingest_batch(
     # via the Origin/Referer headers rather than each item's url.
     if not _origin_allowed(source.allowed_domain, request, None):
         raise HTTPException(status_code=403, detail="Batch origin is not allowed")
+    # A batch costs its event total, so batching can't bypass the per-source limit.
+    _check_rate_limit(source.id, cost=max(1, len(body.batch)))
 
     now = _now()
     stored = 0
@@ -2798,6 +2839,8 @@ async def ingest_batch(
                 user_ref=item.user_id,
                 url=item.url,
                 referrer=item.referrer,
+                release=item.release,
+                environment=item.environment,
                 metadata=item.metadata,
                 occurred_at=item.occurred_at,
                 now=now,
@@ -2814,6 +2857,7 @@ async def ingest_batch(
                 handled=item.handled,
                 url=item.url,
                 release=item.release,
+                environment=item.environment,
                 visitor_id=item.visitor_id,
                 session_id=item.session_id,
                 user_ref=item.user_id,
