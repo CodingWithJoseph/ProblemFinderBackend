@@ -2906,6 +2906,140 @@ async def get_error_metrics(
     }
 
 
+def _issue_trend(recent: int, prior: int) -> dict:
+    """Direction of an issue over the window: this half vs the prior half. 'up'
+    means it's getting worse (a regression signal), 'down' means it's receding."""
+    if recent > prior:
+        direction = "up"
+    elif recent < prior:
+        direction = "down"
+    else:
+        direction = "flat"
+    change_pct = _pct_change(recent, prior)
+    return {"direction": direction, "recent": int(recent), "prior": int(prior), "changePct": change_pct}
+
+
+def _serialize_issue(group: PortfolioErrorGroup, *, affected_users, affected_sessions, occurrences, trend) -> dict:
+    """A fingerprint group promoted to an issue object: the group's identity plus
+    the impact metrics the engine computes (affected users/sessions, windowed
+    occurrences, trend). affected-users is net-new — it isn't stored anywhere."""
+    return {
+        "id": group.id,
+        "fingerprint": group.fingerprint,
+        "title": group.title,
+        "level": group.level,
+        "status": group.status,
+        "lastRelease": group.last_release,
+        "firstSeenAt": _iso(group.first_seen_at),
+        "lastSeenAt": _iso(group.last_seen_at),
+        "totalOccurrences": int(group.event_count or 0),
+        "occurrences": int(occurrences),
+        "affectedUsers": int(affected_users),
+        "affectedSessions": int(affected_sessions),
+        "trend": trend,
+    }
+
+
+@router.get("/{pipeline_id}/issues")
+async def get_issues(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Issue promotion engine: fingerprint groups → issue objects ranked by
+    affected users. Affected-users/sessions and the trend are computed here from
+    the raw error events (the group row only stores occurrences + first/last
+    seen)."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    source = await _usage_source(pipeline_id, db)
+    now = _now()
+    usage_window = eff.analytics_usage_window_days
+    since = now - timedelta(days=usage_window)
+    midpoint = now - timedelta(days=usage_window / 2)
+    actor = func.coalesce(PortfolioErrorEvent.user_ref, PortfolioErrorEvent.visitor_id)
+
+    open_issues = int(await db.scalar(
+        select(func.count(PortfolioErrorGroup.id)).where(
+            PortfolioErrorGroup.pipeline_id == pipeline_id,
+            PortfolioErrorGroup.status == "unresolved",
+            PortfolioErrorGroup.last_seen_at >= since,
+        )
+    ) or 0)
+    affected_users_total = int(await db.scalar(
+        select(func.count(func.distinct(actor))).where(
+            PortfolioErrorEvent.pipeline_id == pipeline_id,
+            PortfolioErrorEvent.occurred_at >= since,
+        )
+    ) or 0)
+    occurrences_total = int(await db.scalar(
+        select(func.count(PortfolioErrorEvent.id)).where(
+            PortfolioErrorEvent.pipeline_id == pipeline_id,
+            PortfolioErrorEvent.occurred_at >= since,
+        )
+    ) or 0)
+
+    # One pass over the window's events → per-group impact + a split into this
+    # half / prior half for the trend.
+    agg_rows = (await db.execute(
+        select(
+            PortfolioErrorEvent.group_id,
+            func.count(func.distinct(actor)),
+            func.count(func.distinct(PortfolioErrorEvent.session_id)),
+            func.count(PortfolioErrorEvent.id),
+            func.sum(case((PortfolioErrorEvent.occurred_at >= midpoint, 1), else_=0)),
+            func.sum(case((PortfolioErrorEvent.occurred_at < midpoint, 1), else_=0)),
+        )
+        .where(
+            PortfolioErrorEvent.pipeline_id == pipeline_id,
+            PortfolioErrorEvent.occurred_at >= since,
+            PortfolioErrorEvent.group_id != None,
+        )
+        .group_by(PortfolioErrorEvent.group_id)
+    )).all()
+    agg = {
+        group_id: (int(users), int(sessions), int(occ), int(recent or 0), int(prior or 0))
+        for group_id, users, sessions, occ, recent, prior in agg_rows
+    }
+
+    groups = list((await db.execute(
+        select(PortfolioErrorGroup)
+        .where(
+            PortfolioErrorGroup.pipeline_id == pipeline_id,
+            PortfolioErrorGroup.last_seen_at >= since,
+        )
+        .limit(200)
+    )).scalars().all())
+
+    issues = []
+    for group in groups:
+        users, sessions, occ, recent, prior = agg.get(group.id, (0, 0, 0, 0, 0))
+        issues.append(_serialize_issue(
+            group,
+            affected_users=users,
+            affected_sessions=sessions,
+            occurrences=occ,
+            trend=_issue_trend(recent, prior),
+        ))
+    # Ranked by affected users — the impact ordering the issues list leads with.
+    issues.sort(key=lambda issue: (issue["affectedUsers"], issue["occurrences"]), reverse=True)
+    issues = issues[:50]
+
+    return {
+        "data": {
+            "source": _serialize_usage_source(source),
+            "connected": source is not None,
+            "windowDays": usage_window,
+            "summary": {
+                "openIssues": open_issues,
+                "affectedUsers": affected_users_total,
+                "occurrences": occurrences_total,
+            },
+            "issues": issues,
+        }
+    }
+
+
 # Per-source ingest rate limit. Fixed one-minute window kept in process: a
 # coarse flood guard so one source can't bury ingest, not a precise distributed
 # quota (each worker holds its own window). A batch counts as its event total.

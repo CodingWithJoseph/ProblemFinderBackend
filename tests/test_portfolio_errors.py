@@ -146,3 +146,60 @@ async def test_get_error_metrics(client, fake_db, auth_headers):
     assert body["issues"][0]["eventCount"] == 5
     assert body["issues"][0]["affectedSessions"] == 3
     assert body["recentErrors"][0]["message"].startswith("TypeError")
+
+
+async def test_get_issues_promotes_groups(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    source = make_usage_source(pipeline_id=product.id)
+    big = make_error_group(pipeline_id=product.id, event_count=40, fingerprint="fp-big", title="Big")
+    small = make_error_group(pipeline_id=product.id, event_count=5, fingerprint="fp-small", title="Small")
+    fake_db.stub(
+        execute=[
+            FakeResult(rows=[product]),   # launched product lookup
+            FakeResult(rows=[]),          # app settings overlay
+            FakeResult(rows=[source]),    # usage source
+            FakeResult(rows=[            # per-group aggregation: group_id, users, sessions, occ, recent, prior
+                (small.id, 2, 3, 5, 1, 4),
+                (big.id, 9, 12, 40, 30, 10),
+            ]),
+            FakeResult(rows=[small, big]),  # groups (unordered)
+        ],
+        scalar=[2, 11, 45],  # openIssues, affectedUsers, occurrences
+    )
+
+    resp = await client.get(f"/portfolio/{product.id}/issues", headers=auth_headers)
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["summary"] == {"openIssues": 2, "affectedUsers": 11, "occurrences": 45}
+    # Ranked by affected users: the bigger-impact issue leads.
+    assert body["issues"][0]["title"] == "Big"
+    assert body["issues"][0]["affectedUsers"] == 9
+    assert body["issues"][0]["affectedSessions"] == 12
+    assert body["issues"][0]["occurrences"] == 40
+    assert body["issues"][0]["trend"]["direction"] == "up"   # 30 recent vs 10 prior
+    assert body["issues"][1]["title"] == "Small"
+    assert body["issues"][1]["trend"]["direction"] == "down"  # 1 recent vs 4 prior
+
+
+async def test_get_issues_handles_group_without_events(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    source = make_usage_source(pipeline_id=product.id)
+    group = make_error_group(pipeline_id=product.id, event_count=3)
+    fake_db.stub(
+        execute=[
+            FakeResult(rows=[product]),
+            FakeResult(rows=[]),
+            FakeResult(rows=[source]),
+            FakeResult(rows=[]),          # no per-group aggregation in window
+            FakeResult(rows=[group]),     # group still present
+        ],
+        scalar=[1, 0, 0],
+    )
+
+    resp = await client.get(f"/portfolio/{product.id}/issues", headers=auth_headers)
+    assert resp.status_code == 200
+    issue = resp.json()["data"]["issues"][0]
+    assert issue["affectedUsers"] == 0
+    assert issue["occurrences"] == 0
+    assert issue["trend"]["direction"] == "flat"
