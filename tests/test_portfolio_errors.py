@@ -182,6 +182,47 @@ async def test_get_issues_promotes_groups(client, fake_db, auth_headers):
     assert body["issues"][1]["trend"]["direction"] == "down"  # 1 recent vs 4 prior
 
 
+async def test_patch_issue_status(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    group = make_error_group(pipeline_id=product.id, status="unresolved")
+    fake_db.stub(execute=[
+        FakeResult(rows=[product]),   # launched product lookup
+        FakeResult(rows=[group]),     # group lookup
+    ])
+
+    resp = await client.patch(
+        f"/portfolio/{product.id}/issues/{group.id}",
+        json={"status": "resolved"},
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["data"]["status"] == "resolved"
+    assert group.status == "resolved"
+
+
+async def test_patch_issue_status_404(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    fake_db.stub(execute=[FakeResult(rows=[product]), FakeResult(rows=[])])
+    resp = await client.patch(
+        f"/portfolio/{product.id}/issues/nope",
+        json={"status": "resolved"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 404
+
+
+async def test_patch_issue_status_rejects_bad_status(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    fake_db.stub(execute=[FakeResult(rows=[product])])
+    resp = await client.patch(
+        f"/portfolio/{product.id}/issues/x",
+        json={"status": "bogus"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 422
+
+
 async def test_get_errors_by_release(client, fake_db, auth_headers):
     product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
     source = make_usage_source(pipeline_id=product.id)

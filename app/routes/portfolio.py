@@ -3150,6 +3150,36 @@ async def get_issue_detail(
     }
 
 
+class IssueStatusBody(BaseModel):
+    status: Literal["unresolved", "resolved", "ignored"]
+
+
+@router.patch("/{pipeline_id}/issues/{group_id}")
+async def update_issue_status(
+    pipeline_id: str,
+    group_id: str,
+    body: IssueStatusBody,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Manually set an issue's status. Resolve to clear it from open issues;
+    ingest auto-reopens a resolved issue if it recurs (regression). Ignore mutes
+    it — recurrence does not reopen an ignored issue."""
+    await _require_launched_product(pipeline_id, db, uid)
+    group = (await db.execute(
+        select(PortfolioErrorGroup).where(
+            PortfolioErrorGroup.id == group_id,
+            PortfolioErrorGroup.pipeline_id == pipeline_id,
+        )
+    )).scalar_one_or_none()
+    if not group:
+        raise HTTPException(status_code=404, detail="Issue not found")
+    group.status = body.status
+    group.updated_at = _now()
+    await db.commit()
+    return {"data": {"id": group.id, "status": group.status}}
+
+
 @router.get("/{pipeline_id}/errors/by-release")
 async def get_errors_by_release(
     pipeline_id: str,
