@@ -515,6 +515,72 @@ async def test_public_usage_event_ingestion(client, fake_db):
     assert source.last_seen_at is not None
 
 
+async def test_public_batch_ingests_mixed_events(client, fake_db):
+    from app.models import PortfolioErrorEvent, PortfolioErrorGroup
+
+    source = make_usage_source()
+    fake_db.stub(execute=[
+        FakeResult(rows=[source]),  # source lookup
+        FakeResult(rows=[]),        # error item: no existing group → create
+    ])
+
+    resp = await client.post(
+        "/public/portfolio/batch",
+        json={
+            "product_id": source.pipeline_id,
+            "key": source.public_key,
+            "batch": [
+                {"kind": "event", "event_type": "pageview", "visitor_id": "v1", "session_id": "s1",
+                 "url": "https://example.com/", "release": "v2", "environment": "production"},
+                {"kind": "event", "event_type": "signup", "visitor_id": "v1", "session_id": "s1"},
+                {"kind": "error", "message": "Boom", "stack": "at x (a.js:1:1)", "session_id": "s1"},
+            ],
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["stored"] == 3
+    usage = [o for o in fake_db.added if isinstance(o, PortfolioUsageEvent)]
+    assert {e.event_type for e in usage} == {"pageview", "signup"}
+    # The error item routes through the shared grouping path.
+    assert any(isinstance(o, PortfolioErrorGroup) for o in fake_db.added)
+    assert any(isinstance(o, PortfolioErrorEvent) for o in fake_db.added)
+    assert source.last_seen_at is not None
+
+
+async def test_public_batch_rejects_bad_key(client, fake_db):
+    fake_db.stub(execute=[FakeResult(rows=[])])
+
+    resp = await client.post(
+        "/public/portfolio/batch",
+        json={"product_id": "p1", "key": "nope", "batch": [{"kind": "event", "event_type": "pageview"}]},
+    )
+
+    assert resp.status_code == 404
+
+
+async def test_public_batch_skips_invalid_items(client, fake_db):
+    source = make_usage_source()
+    fake_db.stub(execute=[FakeResult(rows=[source])])
+
+    # An event with no event_type and an error with no message are both dropped.
+    resp = await client.post(
+        "/public/portfolio/batch",
+        json={
+            "product_id": source.pipeline_id,
+            "key": source.public_key,
+            "batch": [
+                {"kind": "event"},
+                {"kind": "error"},
+            ],
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["stored"] == 0
+    assert not any(isinstance(o, PortfolioUsageEvent) for o in fake_db.added)
+
+
 async def test_public_usage_event_rejects_unapproved_domain(client, fake_db):
     source = make_usage_source(allowed_domain="example.com")
     fake_db.stub(execute=[FakeResult(rows=[source])])

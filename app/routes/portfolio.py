@@ -100,6 +100,35 @@ class IdentifyBody(BaseModel):
     visitor_id: str | None = None
 
 
+class BatchItem(BaseModel):
+    """One event in a batch. `kind` discriminates a usage event from an error so
+    the two storage paths (and error grouping) stay identical to the single
+    endpoints."""
+    kind: Literal["event", "error"]
+    # usage-event field
+    event_type: UsageEventType | None = None
+    referrer: str | None = None
+    # error fields
+    message: str | None = Field(default=None, max_length=2000)
+    stack: str | None = Field(default=None, max_length=20000)
+    level: ErrorLevel = "error"
+    handled: bool | None = None
+    # shared envelope
+    url: str | None = None
+    release: str | None = Field(default=None, max_length=128)
+    visitor_id: str | None = None
+    session_id: str | None = None
+    user_id: str | None = Field(default=None, max_length=256)
+    metadata: dict | None = None
+    occurred_at: datetime | None = None
+
+
+class BatchBody(BaseModel):
+    product_id: str
+    key: str
+    batch: list[BatchItem] = Field(default_factory=list, max_length=100)
+
+
 class UsageSourceUpdateBody(BaseModel):
     product_url: str | None = Field(default=None, max_length=2048)
     allowed_domain: str | None = Field(default=None, max_length=255)
@@ -2496,6 +2525,87 @@ async def get_error_metrics(
     }
 
 
+def _build_usage_event(source, *, event_type, visitor_id, session_id, user_ref, url, referrer, metadata, occurred_at, now):
+    """Build a usage event row (not added/committed). Shared by the single
+    `/events` endpoint and `/batch` so both store identical shapes."""
+    return PortfolioUsageEvent(
+        id=str(uuid.uuid4()),
+        pipeline_id=source.pipeline_id,
+        source_id=source.id,
+        event_type=event_type,
+        visitor_id=visitor_id,
+        session_id=session_id,
+        user_ref=user_ref,
+        url=url,
+        referrer=referrer,
+        event_metadata=metadata or {},
+        occurred_at=occurred_at or now,
+        received_at=now,
+    )
+
+
+async def _record_error_event(source, db, *, message, stack, level, handled, url, release, visitor_id, session_id, user_ref, metadata, occurred_at, now):
+    """Upsert the fingerprint group and add the error event (not committed).
+    Shared by the single `/errors` endpoint and `/batch` so grouping, regression
+    reopen, and first/last-seen tracking stay identical across both."""
+    occurred = occurred_at or now
+    fingerprint = _error_fingerprint(message, stack)
+    title = (_normalize_error_message(message) or message)[:500]
+
+    group = await _error_group(source.pipeline_id, fingerprint, db)
+    if group is None:
+        group = PortfolioErrorGroup(
+            id=str(uuid.uuid4()),
+            pipeline_id=source.pipeline_id,
+            source_id=source.id,
+            fingerprint=fingerprint,
+            title=title,
+            level=level,
+            status="unresolved",
+            event_count=1,
+            last_release=release,
+            first_seen_at=occurred,
+            last_seen_at=occurred,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(group)
+    else:
+        group.event_count = int(group.event_count or 0) + 1
+        if group.last_seen_at is None or occurred > group.last_seen_at:
+            group.last_seen_at = occurred
+        if group.first_seen_at is None or occurred < group.first_seen_at:
+            group.first_seen_at = occurred
+        if release:
+            group.last_release = release
+        # Regression: a previously resolved issue is happening again → reopen it.
+        if group.status == "resolved":
+            group.status = "unresolved"
+        group.updated_at = now
+
+    event = PortfolioErrorEvent(
+        id=str(uuid.uuid4()),
+        pipeline_id=source.pipeline_id,
+        source_id=source.id,
+        group_id=group.id,
+        fingerprint=fingerprint,
+        message=message[:2000],
+        stack=stack,
+        level=level,
+        handled=handled,
+        url=url,
+        release=release,
+        visitor_id=visitor_id,
+        session_id=session_id,
+        user_ref=user_ref,
+        event_metadata=metadata or {},
+        occurred_at=occurred,
+        received_at=now,
+    )
+    db.add(event)
+    return event, group
+
+
 @public_router.post("/events")
 async def ingest_usage_event(
     request: Request,
@@ -2515,19 +2625,17 @@ async def ingest_usage_event(
         raise HTTPException(status_code=403, detail="Usage event origin is not allowed")
 
     now = _now()
-    event = PortfolioUsageEvent(
-        id=str(uuid.uuid4()),
-        pipeline_id=source.pipeline_id,
-        source_id=source.id,
+    event = _build_usage_event(
+        source,
         event_type=body.event_type,
         visitor_id=body.visitor_id,
         session_id=body.session_id,
         user_ref=body.user_id,
         url=body.url,
         referrer=body.referrer,
-        event_metadata=body.metadata or {},
-        occurred_at=body.occurred_at or now,
-        received_at=now,
+        metadata=body.metadata,
+        occurred_at=body.occurred_at,
+        now=now,
     )
     source.last_seen_at = now
     source.updated_at = now
@@ -2632,48 +2740,9 @@ async def ingest_error_event(
         raise HTTPException(status_code=403, detail="Error event origin is not allowed")
 
     now = _now()
-    occurred = body.occurred_at or now
-    fingerprint = _error_fingerprint(body.message, body.stack)
-    title = (_normalize_error_message(body.message) or body.message)[:500]
-
-    group = await _error_group(source.pipeline_id, fingerprint, db)
-    if group is None:
-        group = PortfolioErrorGroup(
-            id=str(uuid.uuid4()),
-            pipeline_id=source.pipeline_id,
-            source_id=source.id,
-            fingerprint=fingerprint,
-            title=title,
-            level=body.level,
-            status="unresolved",
-            event_count=1,
-            last_release=body.release,
-            first_seen_at=occurred,
-            last_seen_at=occurred,
-            created_at=now,
-            updated_at=now,
-        )
-        db.add(group)
-    else:
-        group.event_count = int(group.event_count or 0) + 1
-        if group.last_seen_at is None or occurred > group.last_seen_at:
-            group.last_seen_at = occurred
-        if group.first_seen_at is None or occurred < group.first_seen_at:
-            group.first_seen_at = occurred
-        if body.release:
-            group.last_release = body.release
-        # Regression: a previously resolved issue is happening again → reopen it.
-        if group.status == "resolved":
-            group.status = "unresolved"
-        group.updated_at = now
-
-    event = PortfolioErrorEvent(
-        id=str(uuid.uuid4()),
-        pipeline_id=source.pipeline_id,
-        source_id=source.id,
-        group_id=group.id,
-        fingerprint=fingerprint,
-        message=body.message[:2000],
+    event, group = await _record_error_event(
+        source, db,
+        message=body.message,
         stack=body.stack,
         level=body.level,
         handled=body.handled,
@@ -2682,12 +2751,80 @@ async def ingest_error_event(
         visitor_id=body.visitor_id,
         session_id=body.session_id,
         user_ref=body.user_id,
-        event_metadata=body.metadata or {},
-        occurred_at=occurred,
-        received_at=now,
+        metadata=body.metadata,
+        occurred_at=body.occurred_at,
+        now=now,
     )
     source.last_seen_at = now
     source.updated_at = now
-    db.add(event)
     await db.commit()
-    return {"success": True, "groupId": group.id, "fingerprint": fingerprint}
+    return {"success": True, "groupId": group.id, "fingerprint": event.fingerprint}
+
+
+@public_router.post("/batch")
+async def ingest_batch(
+    request: Request,
+    body: BatchBody,
+    db: AsyncSession = Depends(get_db),
+):
+    """Store many events in one request. The beacon's delivery layer batches
+    queued events here and flushes the queue in a single `sendBeacon` on page
+    unload. Each item routes to the same storage path as its single endpoint."""
+    source = (await db.execute(
+        select(PortfolioUsageSource).where(
+            PortfolioUsageSource.pipeline_id == body.product_id,
+            PortfolioUsageSource.public_key == body.key,
+            PortfolioUsageSource.status == "connected",
+        )
+    )).scalar_one_or_none()
+    if not source:
+        raise HTTPException(status_code=404, detail="Usage source not found")
+    # One origin check for the whole batch (events from a page share an origin),
+    # via the Origin/Referer headers rather than each item's url.
+    if not _origin_allowed(source.allowed_domain, request, None):
+        raise HTTPException(status_code=403, detail="Batch origin is not allowed")
+
+    now = _now()
+    stored = 0
+    for item in body.batch:
+        if item.kind == "event":
+            if not item.event_type:
+                continue
+            db.add(_build_usage_event(
+                source,
+                event_type=item.event_type,
+                visitor_id=item.visitor_id,
+                session_id=item.session_id,
+                user_ref=item.user_id,
+                url=item.url,
+                referrer=item.referrer,
+                metadata=item.metadata,
+                occurred_at=item.occurred_at,
+                now=now,
+            ))
+            stored += 1
+        elif item.kind == "error":
+            if not item.message:
+                continue
+            await _record_error_event(
+                source, db,
+                message=item.message,
+                stack=item.stack,
+                level=item.level,
+                handled=item.handled,
+                url=item.url,
+                release=item.release,
+                visitor_id=item.visitor_id,
+                session_id=item.session_id,
+                user_ref=item.user_id,
+                metadata=item.metadata,
+                occurred_at=item.occurred_at,
+                now=now,
+            )
+            stored += 1
+
+    if stored:
+        source.last_seen_at = now
+        source.updated_at = now
+    await db.commit()
+    return {"success": True, "stored": stored}
