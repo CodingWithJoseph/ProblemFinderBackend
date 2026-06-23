@@ -182,6 +182,63 @@ async def test_get_issues_promotes_groups(client, fake_db, auth_headers):
     assert body["issues"][1]["trend"]["direction"] == "down"  # 1 recent vs 4 prior
 
 
+async def test_get_problems_list(client, fake_db, auth_headers):
+    from app.models import MonitoringProblem
+
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    problem = MonitoringProblem(
+        id="prob-1", pipeline_id=product.id, kind="error_spike", dedupe_key="2026-05-20",
+        title="Error spike", detail="60 vs 10", severity="critical", status="open",
+        metric="errors", baseline=10.0, observed=60.0,
+        detected_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
+    )
+    fake_db.stub(execute=[
+        FakeResult(rows=[product]),
+        FakeResult(rows=[problem]),
+    ])
+
+    resp = await client.get(f"/portfolio/{product.id}/problems", headers=auth_headers)
+
+    assert resp.status_code == 200
+    problems = resp.json()["data"]["problems"]
+    assert problems[0]["kind"] == "error_spike"
+    assert problems[0]["observed"] == 60.0
+    assert problems[0]["severity"] == "critical"
+
+
+async def test_get_problem_impact(client, fake_db, auth_headers):
+    from app.models import MonitoringProblem
+
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    problem = MonitoringProblem(
+        id="prob-1", pipeline_id=product.id, kind="error_spike", dedupe_key="2026-05-20",
+        title="Error spike", severity="critical", status="open",
+        metric="errors", baseline=10.0, observed=60.0,
+        detected_at=datetime(2026, 5, 20, 12, tzinfo=timezone.utc),
+    )
+    fake_db.stub(
+        execute=[
+            FakeResult(rows=[product]),
+            FakeResult(rows=[problem]),
+        ],
+        scalar=[8, 60, 15],  # before, during, after
+    )
+
+    resp = await client.get(f"/portfolio/{product.id}/problems/prob-1?windowHours=24", headers=auth_headers)
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["problem"]["id"] == "prob-1"
+    assert body["impact"] == {"metric": "errors", "windowHours": 24, "before": 8, "during": 60, "after": 15}
+
+
+async def test_get_problem_impact_404(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    fake_db.stub(execute=[FakeResult(rows=[product]), FakeResult(rows=[])])
+    resp = await client.get(f"/portfolio/{product.id}/problems/nope", headers=auth_headers)
+    assert resp.status_code == 404
+
+
 async def test_get_issue_sessions(client, fake_db, auth_headers):
     product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
     group = make_error_group(pipeline_id=product.id)

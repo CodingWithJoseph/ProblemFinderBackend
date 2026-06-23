@@ -17,6 +17,7 @@ from app.db import get_db
 from app.auth import get_uid
 from app.config import get_settings
 from app.models import (
+    MonitoringProblem,
     Pipeline,
     PlanEnum,
     PortfolioAlertSettings,
@@ -769,6 +770,91 @@ async def get_command_center(
             ],
         }
     }
+
+
+def _serialize_problem(problem: MonitoringProblem) -> dict:
+    return {
+        "id": problem.id,
+        "kind": problem.kind,
+        "title": problem.title,
+        "detail": problem.detail,
+        "severity": problem.severity,
+        "status": problem.status,
+        "metric": problem.metric,
+        "baseline": problem.baseline,
+        "observed": problem.observed,
+        "detectedAt": _iso(problem.detected_at),
+        "resolvedAt": _iso(problem.resolved_at),
+    }
+
+
+@router.get("/{pipeline_id}/problems")
+async def get_problems(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Monitoring problems for a product — the durable records the evaluator
+    writes when a condition fires (3.4), most recent first."""
+    await _require_launched_product(pipeline_id, db, uid)
+    problems = list((await db.execute(
+        select(MonitoringProblem)
+        .where(MonitoringProblem.pipeline_id == pipeline_id)
+        .order_by(MonitoringProblem.detected_at.desc())
+        .limit(50)
+    )).scalars().all())
+    return {"data": {"problems": [_serialize_problem(p) for p in problems]}}
+
+
+@router.get("/{pipeline_id}/problems/{problem_id}")
+async def get_problem_impact(
+    pipeline_id: str,
+    problem_id: str,
+    window_hours: int = Query(default=24, ge=1, le=168, alias="windowHours"),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Problem impact (3.5): deterministic before / during / after counts of the
+    problem's metric, in equal windows around when it was detected. Frames the
+    blast radius — was it a blip or a sustained regression?"""
+    await _require_launched_product(pipeline_id, db, uid)
+    problem = (await db.execute(
+        select(MonitoringProblem).where(
+            MonitoringProblem.id == problem_id,
+            MonitoringProblem.pipeline_id == pipeline_id,
+        )
+    )).scalar_one_or_none()
+    if not problem:
+        raise HTTPException(status_code=404, detail="Problem not found")
+
+    detected = problem.detected_at
+    if detected.tzinfo is None:
+        detected = detected.replace(tzinfo=timezone.utc)
+    span = timedelta(hours=window_hours)
+
+    impact = {"metric": problem.metric, "windowHours": window_hours, "before": None, "during": None, "after": None}
+    model_extra = {
+        "errors": (PortfolioErrorEvent, ()),
+        "signups": (PortfolioUsageEvent, (PortfolioUsageEvent.event_type == "signup",)),
+    }.get(problem.metric or "")
+    if model_extra:
+        model, extra = model_extra
+
+        async def _count(start, end):
+            return int(await db.scalar(
+                select(func.count(model.id)).where(
+                    model.pipeline_id == pipeline_id,
+                    model.occurred_at >= start,
+                    model.occurred_at < end,
+                    *extra,
+                )
+            ) or 0)
+
+        impact["before"] = await _count(detected - 2 * span, detected - span)
+        impact["during"] = await _count(detected - span, detected)
+        impact["after"] = await _count(detected, detected + span)
+
+    return {"data": {"problem": _serialize_problem(problem), "impact": impact}}
 
 
 def _empty_error_daily(days: int = 14) -> dict[str, dict]:
