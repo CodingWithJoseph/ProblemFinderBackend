@@ -9,9 +9,33 @@ from app.services.alerts import (
     detect_revenue_drop,
     detect_signups_drop,
     evaluate_alerts,
+    problem_from_alert,
     render_alert,
     resolve_owner_email,
 )
+from datetime import datetime, timezone
+
+
+def test_problem_from_alert_error_spike():
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    alert = {"type": "error_spike", "dedupe_key": "2026-06-01",
+             "context": {"product": "App", "current": 60, "baseline": 10.0}}
+    p = problem_from_alert(alert, now)
+    assert p["kind"] == "error_spike"
+    assert p["severity"] == "critical"
+    assert p["metric"] == "errors"
+    assert p["observed"] == 60.0
+    assert p["baseline"] == 10.0
+    assert p["detected_at"] == now
+
+
+def test_problem_from_alert_signups_drop():
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    alert = {"type": "signups_drop", "dedupe_key": "2026-W22",
+             "context": {"current": 2, "previous": 10}}
+    p = problem_from_alert(alert, now)
+    assert p["metric"] == "signups"
+    assert p["observed"] == 2.0 and p["baseline"] == 10.0
 
 
 class FakeSettingsRow:

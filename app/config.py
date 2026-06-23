@@ -100,6 +100,23 @@ class Settings(BaseSettings):
     # Max new-issue emails emitted per run, so a burst can't blast an inbox.
     alert_new_issue_cap: int = 5
 
+    # Ingest rate limit: max events accepted per source per minute (a batch
+    # counts as its event total). Beyond this, ingest returns 429 and the beacon
+    # backs off. In-process per worker; a coarse flood guard, not a precise quota.
+    ingest_rate_limit_per_minute: int = 600
+
+    # Health verdict engine (v0): a source is healthy while it's seen an event
+    # within health_warning_hours, "quiet" up to health_unhealthy_hours, and
+    # "silent" beyond it. Freshness-only for now; errors/vitals fold in at v2.
+    health_warning_hours: int = 24
+    health_unhealthy_hours: int = 72
+
+    # Health verdict engine (v2): error rate (errors / sessions) thresholds that
+    # tip a source into "noisy" then "failing". Vitals (poor LCP p75) and
+    # freshness fold into the same verdict.
+    health_error_rate_noisy: float = 0.1
+    health_error_rate_failing: float = 0.3
+
     # CORS
     allowed_origins: str = "http://localhost:3000"
 

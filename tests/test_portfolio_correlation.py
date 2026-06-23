@@ -68,3 +68,22 @@ async def test_get_correlation_endpoint(client, fake_db, auth_headers):
     assert body["summary"]["mrrCents"] is None
     assert body["summary"]["signupsChangePct"] == -0.6   # (4 - 10) / 10
     assert body["summary"]["errorsPerSession14d"] == 0.5  # 60 / 120
+
+
+async def test_error_correlation_alias(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    fake_db.stub(
+        execute=[
+            FakeResult(rows=[product]),
+            FakeResult(rows=[]),
+            FakeResult(rows=[(date(2026, 5, 31), "signup", 5, 5)]),
+            FakeResult(rows=[(date(2026, 5, 31), 50)]),
+        ],
+        scalar=[None, 4, 10, 60, 120],
+    )
+
+    # The /insights/error-correlation alias serves the same payload as /correlation.
+    resp = await client.get(f"/portfolio/{product.id}/insights/error-correlation", headers=auth_headers)
+
+    assert resp.status_code == 200
+    assert resp.json()["data"]["windowDays"] == 30

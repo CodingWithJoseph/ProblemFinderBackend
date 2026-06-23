@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import (
+    MonitoringProblem,
     Pipeline,
     PortfolioAlert,
     PortfolioAlertSettings,
@@ -169,6 +170,51 @@ def evaluate_alerts(snapshot: dict, prefs: AlertPrefs | None = None) -> list[dic
         })
 
     return alerts
+
+
+# type -> (title, severity, metric) for the durable problem record.
+_PROBLEM_META = {
+    "new_issue": ("New error issue", "warning", "errors"),
+    "error_spike": ("Error spike", "critical", "errors"),
+    "signups_drop": ("Signups dropped", "warning", "signups"),
+    "revenue_drop": ("MRR dropped", "critical", "mrr"),
+}
+
+
+def problem_from_alert(alert: dict, now: datetime) -> dict:
+    """Map a fired alert to monitoring_problem fields. Pure. baseline/observed
+    capture the signal that tripped so the impact view can frame before/after."""
+    kind = alert["type"]
+    ctx = alert.get("context") or {}
+    title, severity, metric = _PROBLEM_META.get(kind, (kind, "warning", None))
+    baseline = observed = None
+    detail = None
+    if kind == "error_spike":
+        observed = float(ctx.get("current", 0))
+        baseline = float(ctx.get("baseline", 0))
+        detail = f"{ctx.get('current')} errors vs {ctx.get('baseline')} baseline"
+    elif kind == "signups_drop":
+        observed = float(ctx.get("current", 0))
+        baseline = float(ctx.get("previous", 0))
+        detail = f"{ctx.get('current')} signups vs {ctx.get('previous')} the prior period"
+    elif kind == "revenue_drop":
+        observed = float(ctx.get("current_mrr") or 0)
+        baseline = float(ctx.get("previous_mrr") or 0)
+        detail = f"MRR {ctx.get('current_mrr')} vs {ctx.get('previous_mrr')}"
+    elif kind == "new_issue":
+        title = ctx.get("title") or title
+        detail = f"New {ctx.get('level', 'error')} issue"
+    return {
+        "kind": kind,
+        "dedupe_key": alert["dedupe_key"],
+        "title": title,
+        "detail": detail,
+        "severity": severity,
+        "metric": metric,
+        "baseline": baseline,
+        "observed": observed,
+        "detected_at": now,
+    }
 
 
 async def alert_settings_row(db: AsyncSession, pipeline_id: str) -> PortfolioAlertSettings | None:
@@ -350,6 +396,9 @@ async def run_alert_checks() -> int:
                 for alert in evaluate_alerts(snapshot, aprefs):
                     if await already_alerted(db, pipeline_id, alert["type"], alert["dedupe_key"]):
                         continue
+                    # Record the durable problem before emailing: the condition
+                    # is an inspectable object even when alert email is off.
+                    db.add(MonitoringProblem(pipeline_id=pipeline_id, **problem_from_alert(alert, now)))
                     if np.send_instantly and recipient:
                         subject, text, html = render_alert(alert["type"], alert["context"])
                         await email_service.send(to=recipient, subject=subject, text=text, html=html)

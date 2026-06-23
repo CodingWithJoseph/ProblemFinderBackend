@@ -7,9 +7,9 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 from urllib.parse import urlencode, urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +17,7 @@ from app.db import get_db
 from app.auth import get_uid
 from app.config import get_settings
 from app.models import (
+    MonitoringProblem,
     Pipeline,
     PlanEnum,
     PortfolioAlertSettings,
@@ -28,8 +29,10 @@ from app.models import (
     PortfolioIdentity,
     PortfolioMrrMovement,
     PortfolioRevenueSource,
+    PortfolioLog,
     PortfolioUsageEvent,
     PortfolioUsageSource,
+    PortfolioWebVital,
     Subscription,
 )
 from app.services.alerts import AlertPrefs, alert_settings_row
@@ -52,6 +55,9 @@ stripe.api_key = settings.stripe_secret_key
 UsageEventType = Literal["pageview", "signup", "login", "activation", "custom"]
 RevenueProvider = Literal["stripe"]
 ErrorLevel = Literal["error", "warning"]
+WebVitalMetric = Literal["LCP", "CLS", "INP", "FCP", "TTFB"]
+WebVitalRating = Literal["good", "needs-improvement", "poor"]
+LogLevel = Literal["debug", "info", "warn", "error"]
 
 
 class UsageEventBody(BaseModel):
@@ -63,6 +69,8 @@ class UsageEventBody(BaseModel):
     user_id: str | None = Field(default=None, max_length=256)
     url: str | None = None
     referrer: str | None = None
+    release: str | None = Field(default=None, max_length=128)
+    environment: str | None = Field(default=None, max_length=64)
     metadata: dict | None = None
     occurred_at: datetime | None = None
 
@@ -76,6 +84,7 @@ class ErrorEventBody(BaseModel):
     handled: bool | None = None
     url: str | None = None
     release: str | None = Field(default=None, max_length=128)
+    environment: str | None = Field(default=None, max_length=64)
     visitor_id: str | None = None
     session_id: str | None = None
     user_id: str | None = Field(default=None, max_length=256)
@@ -93,6 +102,79 @@ class IdentifyBody(BaseModel):
     email: str | None = Field(default=None, max_length=320)
     group_id: str | None = Field(default=None, max_length=256)
     traits: dict | None = None
+    # Session context for backfill: when the beacon calls identify() mid-session,
+    # these let the server attribute the session's prior anonymous events to the
+    # now-known user_ref. Optional so older snippets keep working.
+    session_id: str | None = None
+    visitor_id: str | None = None
+
+
+class VitalBody(BaseModel):
+    product_id: str
+    key: str
+    metric: WebVitalMetric
+    value: float
+    rating: WebVitalRating | None = None
+    url: str | None = None
+    navigation_id: str | None = Field(default=None, max_length=128)
+    visitor_id: str | None = None
+    session_id: str | None = None
+    user_id: str | None = Field(default=None, max_length=256)
+    release: str | None = Field(default=None, max_length=128)
+    environment: str | None = Field(default=None, max_length=64)
+    occurred_at: datetime | None = None
+
+
+class LogBody(BaseModel):
+    product_id: str
+    key: str
+    level: LogLevel
+    message: str = Field(min_length=1, max_length=4000)
+    metadata: dict | None = None
+    url: str | None = None
+    visitor_id: str | None = None
+    session_id: str | None = None
+    user_id: str | None = Field(default=None, max_length=256)
+    release: str | None = Field(default=None, max_length=128)
+    environment: str | None = Field(default=None, max_length=64)
+    occurred_at: datetime | None = None
+
+
+class BatchItem(BaseModel):
+    """One event in a batch. `kind` discriminates a usage event from an error, a
+    web vital, or a log so each storage path (and error grouping) stays identical
+    to the single endpoints."""
+    kind: Literal["event", "error", "vital", "log"]
+    # usage-event field
+    event_type: UsageEventType | None = None
+    referrer: str | None = None
+    # error fields
+    message: str | None = Field(default=None, max_length=4000)
+    stack: str | None = Field(default=None, max_length=20000)
+    level: ErrorLevel = "error"
+    handled: bool | None = None
+    # vital fields
+    metric: WebVitalMetric | None = None
+    value: float | None = None
+    rating: WebVitalRating | None = None
+    navigation_id: str | None = Field(default=None, max_length=128)
+    # log field
+    log_level: LogLevel | None = None
+    # shared envelope
+    url: str | None = None
+    release: str | None = Field(default=None, max_length=128)
+    environment: str | None = Field(default=None, max_length=64)
+    visitor_id: str | None = None
+    session_id: str | None = None
+    user_id: str | None = Field(default=None, max_length=256)
+    metadata: dict | None = None
+    occurred_at: datetime | None = None
+
+
+class BatchBody(BaseModel):
+    product_id: str
+    key: str
+    batch: list[BatchItem] = Field(default_factory=list, max_length=100)
 
 
 class UsageSourceUpdateBody(BaseModel):
@@ -165,6 +247,8 @@ def _serialize_usage_event(event: PortfolioUsageEvent) -> dict:
         "userId": event.user_ref,
         "url": event.url,
         "referrer": event.referrer,
+        "release": event.release,
+        "environment": event.environment,
         "metadata": event.event_metadata or {},
         "occurredAt": _iso(event.occurred_at),
         "receivedAt": _iso(event.received_at),
@@ -201,6 +285,7 @@ def _serialize_error_event(event: PortfolioErrorEvent) -> dict:
         "handled": event.handled,
         "url": event.url,
         "release": event.release,
+        "environment": event.environment,
         "visitorId": event.visitor_id,
         "sessionId": event.session_id,
         "userId": event.user_ref,
@@ -463,6 +548,313 @@ async def _usage_source(pipeline_id: str, db: AsyncSession) -> PortfolioUsageSou
         .where(PortfolioUsageSource.pipeline_id == pipeline_id)
         .order_by(PortfolioUsageSource.created_at.asc())
     )).scalar_one_or_none()
+
+
+def _health_verdict(*, connected: bool, last_seen_at, total_events: int, eff, now) -> dict:
+    """Health verdict engine v0: a per-source computed state, so the UI renders a
+    badge instead of making the user read a timestamp and guess. Freshness-only
+    for now (errors/vitals/revenue fold in at v2). States: no-data / healthy /
+    warning / unhealthy."""
+    if not connected or last_seen_at is None or total_events <= 0:
+        return {"state": "no-data", "label": "No data", "reason": "No events received yet",
+                "lastSeenAt": _iso(last_seen_at), "ageHours": None}
+
+    seen = last_seen_at if last_seen_at.tzinfo else last_seen_at.replace(tzinfo=timezone.utc)
+    age_hours = max(0.0, (now - seen).total_seconds() / 3600.0)
+    if age_hours <= eff.health_warning_hours:
+        state, label, reason = "healthy", "Healthy", "Receiving events"
+    elif age_hours <= eff.health_unhealthy_hours:
+        state, label, reason = "warning", "Quiet", f"No events for {int(age_hours)}h"
+    else:
+        state, label, reason = "unhealthy", "Silent", f"No events for {int(age_hours)}h"
+    return {"state": state, "label": label, "reason": reason,
+            "lastSeenAt": _iso(last_seen_at), "ageHours": round(age_hours, 1)}
+
+
+def _health_verdict_v2(*, connected, last_seen_at, total_events, error_rate, lcp_rating, eff, now) -> dict:
+    """Health verdict engine v2: freshness + error rate + vitals → a richer
+    operational state. Precedence is severity-ordered: nothing to judge, then
+    gone silent, then failing/noisy on live data, then merely stale, else live."""
+    def verdict(state, label, reason, age_hours):
+        return {"state": state, "label": label, "reason": reason,
+                "lastSeenAt": _iso(last_seen_at), "ageHours": round(age_hours, 1) if age_hours is not None else None}
+
+    if not connected or last_seen_at is None or total_events <= 0:
+        return verdict("no-data", "No data", "No events received yet", None)
+
+    seen = last_seen_at if last_seen_at.tzinfo else last_seen_at.replace(tzinfo=timezone.utc)
+    age_hours = max(0.0, (now - seen).total_seconds() / 3600.0)
+
+    if age_hours > eff.health_unhealthy_hours:
+        return verdict("silent", "Silent", f"No events for {int(age_hours)}h", age_hours)
+
+    rate_pct = f"{round(error_rate * 100)}%" if error_rate is not None else None
+    if (error_rate is not None and error_rate >= eff.health_error_rate_failing):
+        return verdict("failing", "Failing", f"Error rate {rate_pct}", age_hours)
+    if lcp_rating == "poor":
+        return verdict("failing", "Failing", "Poor experience (LCP)", age_hours)
+    if (error_rate is not None and error_rate >= eff.health_error_rate_noisy):
+        return verdict("noisy", "Noisy", f"Error rate {rate_pct}", age_hours)
+    if lcp_rating == "needs-improvement":
+        return verdict("noisy", "Noisy", "Experience needs improvement (LCP)", age_hours)
+    if age_hours > eff.health_warning_hours:
+        return verdict("stale", "Stale", f"No events for {int(age_hours)}h", age_hours)
+    return verdict("live", "Live", "Healthy and current", age_hours)
+
+
+async def _source_health(pipeline_id: str, source, eff, now, db) -> tuple[dict, dict]:
+    """Gather the signals the v2 verdict needs (freshness, error rate, LCP p75)
+    and compute it. Returns (verdict, signals)."""
+    last_seen = source.last_seen_at if source else None
+    since = now - timedelta(days=eff.analytics_usage_window_days)
+
+    total_events = int(await db.scalar(
+        select(func.count(PortfolioUsageEvent.id)).where(PortfolioUsageEvent.pipeline_id == pipeline_id)
+    ) or 0)
+    errors = int(await db.scalar(
+        select(func.count(PortfolioErrorEvent.id)).where(
+            PortfolioErrorEvent.pipeline_id == pipeline_id,
+            PortfolioErrorEvent.occurred_at >= since,
+        )
+    ) or 0)
+    sessions = int(await db.scalar(
+        select(func.count(func.distinct(PortfolioUsageEvent.session_id))).where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.occurred_at >= since,
+            PortfolioUsageEvent.session_id != None,
+        )
+    ) or 0)
+    lcp_p75 = await db.scalar(
+        select(func.percentile_cont(0.75).within_group(PortfolioWebVital.value.asc())).where(
+            PortfolioWebVital.pipeline_id == pipeline_id,
+            PortfolioWebVital.occurred_at >= since,
+            PortfolioWebVital.metric == "LCP",
+        )
+    )
+    error_rate = round(errors / sessions, 4) if sessions else None
+    lcp_rating = _rate_vital("LCP", lcp_p75) if lcp_p75 is not None else None
+
+    verdict = _health_verdict_v2(
+        connected=source is not None,
+        last_seen_at=last_seen,
+        total_events=total_events,
+        error_rate=error_rate,
+        lcp_rating=lcp_rating,
+        eff=eff,
+        now=now,
+    )
+    signals = {
+        "errors": errors,
+        "sessions": sessions,
+        "errorRate": error_rate,
+        "lcpP75": _round_vital("LCP", lcp_p75),
+        "lcpRating": lcp_rating,
+    }
+    return verdict, signals
+
+
+@router.get("/{pipeline_id}/health")
+async def get_source_health(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """The v2 health verdict for a source, with the signals behind it."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    source = await _usage_source(pipeline_id, db)
+    now = _now()
+    verdict, signals = await _source_health(pipeline_id, source, eff, now, db)
+    return {
+        "data": {
+            "source": _serialize_usage_source(source),
+            "connected": source is not None,
+            "windowDays": eff.analytics_usage_window_days,
+            "health": verdict,
+            "signals": signals,
+        }
+    }
+
+
+@router.get("/{pipeline_id}/command-center")
+async def get_command_center(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """The at-a-glance Connect screen: the v2 health verdict, week-over-week
+    trends (visitors / signups / errors / revenue), and the top open issues —
+    one read that says 'is this product OK, and what needs attention'."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    source = await _usage_source(pipeline_id, db)
+    now = _now()
+    growth_window = eff.analytics_growth_window_days
+    week_start = now - timedelta(days=growth_window)
+    prev_week_start = now - timedelta(days=2 * growth_window)
+
+    verdict, signals = await _source_health(pipeline_id, source, eff, now, db)
+    revenue = await _revenue_source(pipeline_id, db)
+
+    async def _count(model, start, end, *extra):
+        return int(await db.scalar(
+            select(func.count(model.id)).where(
+                model.pipeline_id == pipeline_id,
+                model.occurred_at >= start,
+                model.occurred_at < end,
+                *extra,
+            )
+        ) or 0)
+
+    async def _distinct_visitors(start, end):
+        return int(await db.scalar(
+            select(func.count(func.distinct(PortfolioUsageEvent.visitor_id))).where(
+                PortfolioUsageEvent.pipeline_id == pipeline_id,
+                PortfolioUsageEvent.occurred_at >= start,
+                PortfolioUsageEvent.occurred_at < end,
+                PortfolioUsageEvent.visitor_id != None,
+            )
+        ) or 0)
+
+    visitors_cur = await _distinct_visitors(week_start, now)
+    visitors_prev = await _distinct_visitors(prev_week_start, week_start)
+    signups_cur = await _count(PortfolioUsageEvent, week_start, now, PortfolioUsageEvent.event_type == "signup")
+    signups_prev = await _count(PortfolioUsageEvent, prev_week_start, week_start, PortfolioUsageEvent.event_type == "signup")
+    errors_cur = await _count(PortfolioErrorEvent, week_start, now)
+    errors_prev = await _count(PortfolioErrorEvent, prev_week_start, week_start)
+
+    def trend(current, previous):
+        return {"current": int(current), "previous": int(previous), "changePct": _pct_change(current, previous)}
+
+    rev_cur = revenue.current_mrr_cents if revenue else None
+    rev_prev = revenue.previous_mrr_cents if revenue else None
+
+    top_groups = list((await db.execute(
+        select(PortfolioErrorGroup)
+        .where(
+            PortfolioErrorGroup.pipeline_id == pipeline_id,
+            PortfolioErrorGroup.status == "unresolved",
+        )
+        .order_by(PortfolioErrorGroup.last_seen_at.desc())
+        .limit(3)
+    )).scalars().all())
+
+    return {
+        "data": {
+            "windowDays": eff.analytics_usage_window_days,
+            "growthWindowDays": growth_window,
+            "health": verdict,
+            "signals": signals,
+            "trends": {
+                "visitors": trend(visitors_cur, visitors_prev),
+                "signups": trend(signups_cur, signups_prev),
+                "errors": trend(errors_cur, errors_prev),
+                "revenue": {
+                    "current": rev_cur,
+                    "previous": rev_prev,
+                    "changePct": _pct_change(rev_cur, rev_prev) if (rev_cur is not None and rev_prev) else None,
+                },
+            },
+            "revenueConnected": revenue is not None,
+            "topIssues": [
+                {
+                    "id": group.id,
+                    "title": group.title,
+                    "level": group.level,
+                    "status": group.status,
+                    "eventCount": int(group.event_count or 0),
+                    "lastRelease": group.last_release,
+                    "lastSeenAt": _iso(group.last_seen_at),
+                }
+                for group in top_groups
+            ],
+        }
+    }
+
+
+def _serialize_problem(problem: MonitoringProblem) -> dict:
+    return {
+        "id": problem.id,
+        "kind": problem.kind,
+        "title": problem.title,
+        "detail": problem.detail,
+        "severity": problem.severity,
+        "status": problem.status,
+        "metric": problem.metric,
+        "baseline": problem.baseline,
+        "observed": problem.observed,
+        "detectedAt": _iso(problem.detected_at),
+        "resolvedAt": _iso(problem.resolved_at),
+    }
+
+
+@router.get("/{pipeline_id}/problems")
+async def get_problems(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Monitoring problems for a product — the durable records the evaluator
+    writes when a condition fires (3.4), most recent first."""
+    await _require_launched_product(pipeline_id, db, uid)
+    problems = list((await db.execute(
+        select(MonitoringProblem)
+        .where(MonitoringProblem.pipeline_id == pipeline_id)
+        .order_by(MonitoringProblem.detected_at.desc())
+        .limit(50)
+    )).scalars().all())
+    return {"data": {"problems": [_serialize_problem(p) for p in problems]}}
+
+
+@router.get("/{pipeline_id}/problems/{problem_id}")
+async def get_problem_impact(
+    pipeline_id: str,
+    problem_id: str,
+    window_hours: int = Query(default=24, ge=1, le=168, alias="windowHours"),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Problem impact (3.5): deterministic before / during / after counts of the
+    problem's metric, in equal windows around when it was detected. Frames the
+    blast radius — was it a blip or a sustained regression?"""
+    await _require_launched_product(pipeline_id, db, uid)
+    problem = (await db.execute(
+        select(MonitoringProblem).where(
+            MonitoringProblem.id == problem_id,
+            MonitoringProblem.pipeline_id == pipeline_id,
+        )
+    )).scalar_one_or_none()
+    if not problem:
+        raise HTTPException(status_code=404, detail="Problem not found")
+
+    detected = problem.detected_at
+    if detected.tzinfo is None:
+        detected = detected.replace(tzinfo=timezone.utc)
+    span = timedelta(hours=window_hours)
+
+    impact = {"metric": problem.metric, "windowHours": window_hours, "before": None, "during": None, "after": None}
+    model_extra = {
+        "errors": (PortfolioErrorEvent, ()),
+        "signups": (PortfolioUsageEvent, (PortfolioUsageEvent.event_type == "signup",)),
+    }.get(problem.metric or "")
+    if model_extra:
+        model, extra = model_extra
+
+        async def _count(start, end):
+            return int(await db.scalar(
+                select(func.count(model.id)).where(
+                    model.pipeline_id == pipeline_id,
+                    model.occurred_at >= start,
+                    model.occurred_at < end,
+                    *extra,
+                )
+            ) or 0)
+
+        impact["before"] = await _count(detected - 2 * span, detected - span)
+        impact["during"] = await _count(detected - span, detected)
+        impact["after"] = await _count(detected, detected + span)
+
+    return {"data": {"problem": _serialize_problem(problem), "impact": impact}}
 
 
 def _empty_error_daily(days: int = 14) -> dict[str, dict]:
@@ -2070,6 +2462,63 @@ async def get_usage_metrics(
         .limit(20)
     )).scalars().all())
 
+    # Aggregation engine v0 — the rollups the screen leads with; the raw
+    # recent-events log above is secondary. Top pages: pageviews grouped by URL.
+    top_pages = [
+        {
+            "url": url,
+            "views": int(views),
+            "visitors": int(visitors or 0),
+            "lastSeenAt": _iso(last_seen),
+        }
+        for url, views, visitors, last_seen in (await db.execute(
+            select(
+                PortfolioUsageEvent.url,
+                func.count(PortfolioUsageEvent.id),
+                func.count(func.distinct(PortfolioUsageEvent.visitor_id)),
+                func.max(PortfolioUsageEvent.occurred_at),
+            )
+            .where(
+                PortfolioUsageEvent.pipeline_id == pipeline_id,
+                PortfolioUsageEvent.occurred_at >= since,
+                PortfolioUsageEvent.event_type == "pageview",
+                PortfolioUsageEvent.url != None,
+            )
+            .group_by(PortfolioUsageEvent.url)
+            .order_by(func.count(PortfolioUsageEvent.id).desc())
+            .limit(10)
+        )).all()
+    ]
+
+    # Top events by frequency ranks actions, not pageviews. A custom event's name
+    # lives in metadata.name; typed events (signup/login/activation) fall back to
+    # their event_type. Pageviews are excluded — they're the top-pages rollup.
+    event_name = func.coalesce(PortfolioUsageEvent.event_metadata["name"].astext, PortfolioUsageEvent.event_type)
+    top_events = [
+        {
+            "name": name,
+            "count": int(count),
+            "visitors": int(visitors or 0),
+            "lastSeenAt": _iso(last_seen),
+        }
+        for name, count, visitors, last_seen in (await db.execute(
+            select(
+                event_name.label("name"),
+                func.count(PortfolioUsageEvent.id),
+                func.count(func.distinct(PortfolioUsageEvent.visitor_id)),
+                func.max(PortfolioUsageEvent.occurred_at),
+            )
+            .where(
+                PortfolioUsageEvent.pipeline_id == pipeline_id,
+                PortfolioUsageEvent.occurred_at >= since,
+                PortfolioUsageEvent.event_type != "pageview",
+            )
+            .group_by(event_name)
+            .order_by(func.count(PortfolioUsageEvent.id).desc())
+            .limit(10)
+        )).all()
+    ]
+
     # Conversion funnel (14d): distinct visitors at each stage, so a few noisy
     # visitors firing many events don't distort the rates.
     stage_rows = (await db.execute(
@@ -2170,6 +2619,13 @@ async def get_usage_metrics(
             "connected": source is not None,
             "totalEvents": int(total_events),
             "lastSeenAt": _iso(source.last_seen_at if source else None),
+            "health": _health_verdict(
+                connected=source is not None,
+                last_seen_at=source.last_seen_at if source else None,
+                total_events=int(total_events),
+                eff=eff,
+                now=now,
+            ),
             "windowDays": usage_window,
             "growthWindowDays": growth_window,
             "summary14d": {
@@ -2181,11 +2637,349 @@ async def get_usage_metrics(
                 "customEvents": counts.get("custom", 0),
                 "activeUsers": int(active_users_14d),
             },
+            "topPages": top_pages,
+            "topEvents": top_events,
             "funnel": funnel,
             "growth": growth,
             "retention": retention,
             "daily": list(daily.values()),
             "recentEvents": [_serialize_usage_event(event) for event in recent_events],
+        }
+    }
+
+
+@router.get("/{pipeline_id}/sessions")
+async def get_sessions(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Sessions as first-class objects: each row is an aggregate of the events
+    sharing a session_id (the B.2 identity payoff), not a raw event log. Derived
+    from portfolio_usage_events — no sessions table until perf demands one."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    source = await _usage_source(pipeline_id, db)
+    usage_window = eff.analytics_usage_window_days
+    since = _now() - timedelta(days=usage_window)
+
+    base = (
+        PortfolioUsageEvent.pipeline_id == pipeline_id,
+        PortfolioUsageEvent.occurred_at >= since,
+        PortfolioUsageEvent.session_id != None,
+    )
+    total_sessions = int(await db.scalar(
+        select(func.count(func.distinct(PortfolioUsageEvent.session_id))).where(*base)
+    ) or 0)
+    identified_sessions = int(await db.scalar(
+        select(func.count(func.distinct(PortfolioUsageEvent.session_id))).where(
+            *base, PortfolioUsageEvent.user_ref != None
+        )
+    ) or 0)
+    total_events = int(await db.scalar(
+        select(func.count(PortfolioUsageEvent.id)).where(*base)
+    ) or 0)
+
+    # The rollup: one aggregated row per session, most-recently-active first.
+    pageviews = func.sum(case((PortfolioUsageEvent.event_type == "pageview", 1), else_=0))
+    rows = (await db.execute(
+        select(
+            PortfolioUsageEvent.session_id,
+            func.max(PortfolioUsageEvent.visitor_id),
+            func.max(PortfolioUsageEvent.user_ref),
+            func.min(PortfolioUsageEvent.occurred_at),
+            func.max(PortfolioUsageEvent.occurred_at),
+            func.count(PortfolioUsageEvent.id),
+            pageviews,
+        )
+        .where(*base)
+        .group_by(PortfolioUsageEvent.session_id)
+        .order_by(func.max(PortfolioUsageEvent.occurred_at).desc())
+        .limit(50)
+    )).all()
+
+    sessions = []
+    for session_id, visitor_id, user_ref, started, ended, events, page_count in rows:
+        duration = int((ended - started).total_seconds()) if started and ended else 0
+        sessions.append({
+            "sessionId": session_id,
+            "visitorId": visitor_id,
+            "userRef": user_ref,
+            "identified": user_ref is not None,
+            "startedAt": _iso(started),
+            "endedAt": _iso(ended),
+            "durationSeconds": duration,
+            "events": int(events),
+            "pageviews": int(page_count or 0),
+        })
+
+    return {
+        "data": {
+            "source": _serialize_usage_source(source),
+            "connected": source is not None,
+            "windowDays": usage_window,
+            "summary": {
+                "totalSessions": total_sessions,
+                "identifiedSessions": identified_sessions,
+                "avgEventsPerSession": round(total_events / total_sessions, 1) if total_sessions else None,
+            },
+            "sessions": sessions,
+        }
+    }
+
+
+@router.get("/{pipeline_id}/sessions/{session_id}")
+async def get_session_detail(
+    pipeline_id: str,
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """One session's timeline: its usage events and the errors that happened in
+    it, merged in chronological order. Drill carries context — the error shows
+    up in situ, next to what the visitor was doing when it fired."""
+    await _require_launched_product(pipeline_id, db, uid)
+    source = await _usage_source(pipeline_id, db)
+
+    usage_events = list((await db.execute(
+        select(PortfolioUsageEvent)
+        .where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.session_id == session_id,
+        )
+        .order_by(PortfolioUsageEvent.occurred_at.asc())
+        .limit(500)
+    )).scalars().all())
+    error_events = list((await db.execute(
+        select(PortfolioErrorEvent)
+        .where(
+            PortfolioErrorEvent.pipeline_id == pipeline_id,
+            PortfolioErrorEvent.session_id == session_id,
+        )
+        .order_by(PortfolioErrorEvent.occurred_at.asc())
+        .limit(500)
+    )).scalars().all())
+
+    if not usage_events and not error_events:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    items: list[tuple] = []
+    for event in usage_events:
+        meta = event.event_metadata or {}
+        items.append((event.occurred_at, {
+            "kind": "event",
+            "id": event.id,
+            "eventType": event.event_type,
+            "name": meta.get("name"),
+            "url": event.url,
+            "metadata": meta,
+            "occurredAt": _iso(event.occurred_at),
+        }))
+    for event in error_events:
+        items.append((event.occurred_at, {
+            "kind": "error",
+            "id": event.id,
+            "groupId": event.group_id,
+            "fingerprint": event.fingerprint,
+            "message": event.message,
+            "level": event.level,
+            "url": event.url,
+            "occurredAt": _iso(event.occurred_at),
+        }))
+    items.sort(key=lambda item: item[0])
+    timeline = [payload for _, payload in items]
+
+    both = usage_events + error_events
+    started = items[0][0]
+    ended = items[-1][0]
+    user_ref = next((e.user_ref for e in both if e.user_ref), None)
+    visitor_id = next((e.visitor_id for e in both if e.visitor_id), None)
+
+    return {
+        "data": {
+            "source": _serialize_usage_source(source),
+            "session": {
+                "sessionId": session_id,
+                "visitorId": visitor_id,
+                "userRef": user_ref,
+                "identified": user_ref is not None,
+                "startedAt": _iso(started),
+                "endedAt": _iso(ended),
+                "durationSeconds": int((ended - started).total_seconds()) if started and ended else 0,
+                "events": len(usage_events),
+                "pageviews": sum(1 for e in usage_events if e.event_type == "pageview"),
+                "errors": len(error_events),
+            },
+            "timeline": timeline,
+        }
+    }
+
+
+def _round_vital(metric: str, value) -> float | None:
+    if value is None:
+        return None
+    # CLS is a small unitless score; keep precision. The rest are milliseconds.
+    return round(float(value), 3 if metric == "CLS" else 1)
+
+
+@router.get("/{pipeline_id}/experience")
+async def get_experience_vitals(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Experience vitals rollup: per-metric p75 + rating distribution, and the
+    same per URL. Leads with the verdict (p75 → good/needs-improvement/poor), not
+    the raw samples."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    source = await _usage_source(pipeline_id, db)
+    usage_window = eff.analytics_usage_window_days
+    since = _now() - timedelta(days=usage_window)
+
+    metric_rows = (await db.execute(
+        select(
+            PortfolioWebVital.metric,
+            func.count(PortfolioWebVital.id),
+            func.percentile_cont(0.75).within_group(PortfolioWebVital.value.asc()),
+        )
+        .where(PortfolioWebVital.pipeline_id == pipeline_id, PortfolioWebVital.occurred_at >= since)
+        .group_by(PortfolioWebVital.metric)
+    )).all()
+
+    rating_rows = (await db.execute(
+        select(PortfolioWebVital.metric, PortfolioWebVital.rating, func.count(PortfolioWebVital.id))
+        .where(PortfolioWebVital.pipeline_id == pipeline_id, PortfolioWebVital.occurred_at >= since)
+        .group_by(PortfolioWebVital.metric, PortfolioWebVital.rating)
+    )).all()
+
+    url_rows = (await db.execute(
+        select(
+            PortfolioWebVital.url,
+            PortfolioWebVital.metric,
+            func.count(PortfolioWebVital.id),
+            func.percentile_cont(0.75).within_group(PortfolioWebVital.value.asc()),
+        )
+        .where(
+            PortfolioWebVital.pipeline_id == pipeline_id,
+            PortfolioWebVital.occurred_at >= since,
+            PortfolioWebVital.url != None,
+        )
+        .group_by(PortfolioWebVital.url, PortfolioWebVital.metric)
+        .order_by(func.count(PortfolioWebVital.id).desc())
+        .limit(60)
+    )).all()
+
+    ratings: dict[str, dict] = {}
+    for metric, rating, count in rating_rows:
+        bucket = ratings.setdefault(metric, {"good": 0, "needs-improvement": 0, "poor": 0})
+        if rating in bucket:
+            bucket[rating] = int(count)
+
+    metrics = []
+    for metric, count, p75 in metric_rows:
+        value = _round_vital(metric, p75)
+        bucket = ratings.get(metric, {})
+        metrics.append({
+            "metric": metric,
+            "sampleCount": int(count),
+            "p75": value,
+            "rating": _rate_vital(metric, value),
+            "good": bucket.get("good", 0),
+            "needsImprovement": bucket.get("needs-improvement", 0),
+            "poor": bucket.get("poor", 0),
+        })
+    metrics.sort(key=lambda m: _VITAL_ORDER.get(m["metric"], 99))
+
+    pages: dict[str, dict] = {}
+    for url, metric, count, p75 in url_rows:
+        page = pages.setdefault(url, {"url": url, "sampleCount": 0, "metrics": {}})
+        page["sampleCount"] += int(count)
+        value = _round_vital(metric, p75)
+        page["metrics"][metric] = {"p75": value, "rating": _rate_vital(metric, value)}
+    pages_list = sorted(pages.values(), key=lambda p: p["sampleCount"], reverse=True)[:10]
+
+    return {
+        "data": {
+            "source": _serialize_usage_source(source),
+            "connected": source is not None,
+            "windowDays": usage_window,
+            "totalSamples": sum(m["sampleCount"] for m in metrics),
+            "metrics": metrics,
+            "pages": pages_list,
+        }
+    }
+
+
+@router.get("/{pipeline_id}/logs")
+async def get_logs(
+    pipeline_id: str,
+    level: LogLevel | None = None,
+    q: str | None = Query(default=None, max_length=200),
+    session: str | None = None,
+    release: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Faceted log explorer: leads with the per-level counts (the rollup), then
+    the filtered lines. Facets — level, message search (q), session, release —
+    compose; the level counts reflect the other filters so the facet is live."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    source = await _usage_source(pipeline_id, db)
+    usage_window = eff.analytics_usage_window_days
+    since = _now() - timedelta(days=usage_window)
+
+    # Filters other than level apply to both the level facet and the lines, so
+    # the facet shows the level distribution within the current context.
+    base = [PortfolioLog.pipeline_id == pipeline_id, PortfolioLog.occurred_at >= since]
+    if q:
+        base.append(PortfolioLog.message.ilike(f"%{q}%"))
+    if session:
+        base.append(PortfolioLog.session_id == session)
+    if release:
+        base.append(PortfolioLog.release == release)
+
+    level_rows = (await db.execute(
+        select(PortfolioLog.level, func.count(PortfolioLog.id)).where(*base).group_by(PortfolioLog.level)
+    )).all()
+    level_counts = {lvl: 0 for lvl in ("debug", "info", "warn", "error")}
+    for lvl, count in level_rows:
+        if lvl in level_counts:
+            level_counts[lvl] = int(count)
+
+    line_filters = list(base)
+    if level:
+        line_filters.append(PortfolioLog.level == level)
+    logs = list((await db.execute(
+        select(PortfolioLog)
+        .where(*line_filters)
+        .order_by(PortfolioLog.occurred_at.desc())
+        .limit(limit)
+    )).scalars().all())
+
+    return {
+        "data": {
+            "source": _serialize_usage_source(source),
+            "connected": source is not None,
+            "windowDays": usage_window,
+            "levelCounts": level_counts,
+            "filters": {"level": level, "q": q, "session": session, "release": release},
+            "logs": [
+                {
+                    "id": log.id,
+                    "level": log.level,
+                    "message": log.message,
+                    "url": log.url,
+                    "sessionId": log.session_id,
+                    "userRef": log.user_ref,
+                    "release": log.release,
+                    "metadata": log.event_metadata or {},
+                    "occurredAt": _iso(log.occurred_at),
+                }
+                for log in logs
+            ],
         }
     }
 
@@ -2242,6 +3036,7 @@ def _correlation_insights(days: list[dict]) -> list[str]:
 # correlation (`/insights/revenue-correlation`). Left at its current path here to
 # keep this build non-breaking.
 @router.get("/{pipeline_id}/correlation")
+@router.get("/{pipeline_id}/insights/error-correlation")
 async def get_correlation(
     pipeline_id: str,
     db: AsyncSession = Depends(get_db),
@@ -2491,6 +3286,593 @@ async def get_error_metrics(
     }
 
 
+def _issue_trend(recent: int, prior: int) -> dict:
+    """Direction of an issue over the window: this half vs the prior half. 'up'
+    means it's getting worse (a regression signal), 'down' means it's receding."""
+    if recent > prior:
+        direction = "up"
+    elif recent < prior:
+        direction = "down"
+    else:
+        direction = "flat"
+    change_pct = _pct_change(recent, prior)
+    return {"direction": direction, "recent": int(recent), "prior": int(prior), "changePct": change_pct}
+
+
+def _serialize_issue(group: PortfolioErrorGroup, *, affected_users, affected_sessions, occurrences, trend) -> dict:
+    """A fingerprint group promoted to an issue object: the group's identity plus
+    the impact metrics the engine computes (affected users/sessions, windowed
+    occurrences, trend). affected-users is net-new — it isn't stored anywhere."""
+    return {
+        "id": group.id,
+        "fingerprint": group.fingerprint,
+        "title": group.title,
+        "level": group.level,
+        "status": group.status,
+        "lastRelease": group.last_release,
+        "firstSeenAt": _iso(group.first_seen_at),
+        "lastSeenAt": _iso(group.last_seen_at),
+        "totalOccurrences": int(group.event_count or 0),
+        "occurrences": int(occurrences),
+        "affectedUsers": int(affected_users),
+        "affectedSessions": int(affected_sessions),
+        "trend": trend,
+    }
+
+
+@router.get("/{pipeline_id}/issues")
+async def get_issues(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Issue promotion engine: fingerprint groups → issue objects ranked by
+    affected users. Affected-users/sessions and the trend are computed here from
+    the raw error events (the group row only stores occurrences + first/last
+    seen)."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    source = await _usage_source(pipeline_id, db)
+    now = _now()
+    usage_window = eff.analytics_usage_window_days
+    since = now - timedelta(days=usage_window)
+    midpoint = now - timedelta(days=usage_window / 2)
+    actor = func.coalesce(PortfolioErrorEvent.user_ref, PortfolioErrorEvent.visitor_id)
+
+    open_issues = int(await db.scalar(
+        select(func.count(PortfolioErrorGroup.id)).where(
+            PortfolioErrorGroup.pipeline_id == pipeline_id,
+            PortfolioErrorGroup.status == "unresolved",
+            PortfolioErrorGroup.last_seen_at >= since,
+        )
+    ) or 0)
+    affected_users_total = int(await db.scalar(
+        select(func.count(func.distinct(actor))).where(
+            PortfolioErrorEvent.pipeline_id == pipeline_id,
+            PortfolioErrorEvent.occurred_at >= since,
+        )
+    ) or 0)
+    occurrences_total = int(await db.scalar(
+        select(func.count(PortfolioErrorEvent.id)).where(
+            PortfolioErrorEvent.pipeline_id == pipeline_id,
+            PortfolioErrorEvent.occurred_at >= since,
+        )
+    ) or 0)
+
+    # One pass over the window's events → per-group impact + a split into this
+    # half / prior half for the trend.
+    agg_rows = (await db.execute(
+        select(
+            PortfolioErrorEvent.group_id,
+            func.count(func.distinct(actor)),
+            func.count(func.distinct(PortfolioErrorEvent.session_id)),
+            func.count(PortfolioErrorEvent.id),
+            func.sum(case((PortfolioErrorEvent.occurred_at >= midpoint, 1), else_=0)),
+            func.sum(case((PortfolioErrorEvent.occurred_at < midpoint, 1), else_=0)),
+        )
+        .where(
+            PortfolioErrorEvent.pipeline_id == pipeline_id,
+            PortfolioErrorEvent.occurred_at >= since,
+            PortfolioErrorEvent.group_id != None,
+        )
+        .group_by(PortfolioErrorEvent.group_id)
+    )).all()
+    agg = {
+        group_id: (int(users), int(sessions), int(occ), int(recent or 0), int(prior or 0))
+        for group_id, users, sessions, occ, recent, prior in agg_rows
+    }
+
+    groups = list((await db.execute(
+        select(PortfolioErrorGroup)
+        .where(
+            PortfolioErrorGroup.pipeline_id == pipeline_id,
+            PortfolioErrorGroup.last_seen_at >= since,
+        )
+        .limit(200)
+    )).scalars().all())
+
+    issues = []
+    for group in groups:
+        users, sessions, occ, recent, prior = agg.get(group.id, (0, 0, 0, 0, 0))
+        issues.append(_serialize_issue(
+            group,
+            affected_users=users,
+            affected_sessions=sessions,
+            occurrences=occ,
+            trend=_issue_trend(recent, prior),
+        ))
+    # Ranked by affected users — the impact ordering the issues list leads with.
+    issues.sort(key=lambda issue: (issue["affectedUsers"], issue["occurrences"]), reverse=True)
+    issues = issues[:50]
+
+    return {
+        "data": {
+            "source": _serialize_usage_source(source),
+            "connected": source is not None,
+            "windowDays": usage_window,
+            "summary": {
+                "openIssues": open_issues,
+                "affectedUsers": affected_users_total,
+                "occurrences": occurrences_total,
+            },
+            "issues": issues,
+        }
+    }
+
+
+@router.get("/{pipeline_id}/issues/{group_id}")
+async def get_issue_detail(
+    pipeline_id: str,
+    group_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """One issue, interrogable: the promoted issue object plus faceted breakdowns
+    (by release, by URL) so you can pivot on 'which deploy / which page', a sample
+    stack, and recent occurrences."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    now = _now()
+    usage_window = eff.analytics_usage_window_days
+    since = now - timedelta(days=usage_window)
+    midpoint = now - timedelta(days=usage_window / 2)
+    actor = func.coalesce(PortfolioErrorEvent.user_ref, PortfolioErrorEvent.visitor_id)
+
+    group = (await db.execute(
+        select(PortfolioErrorGroup).where(
+            PortfolioErrorGroup.id == group_id,
+            PortfolioErrorGroup.pipeline_id == pipeline_id,
+        )
+    )).scalar_one_or_none()
+    if not group:
+        raise HTTPException(status_code=404, detail="Issue not found")
+
+    scoped = (
+        PortfolioErrorEvent.pipeline_id == pipeline_id,
+        PortfolioErrorEvent.group_id == group_id,
+        PortfolioErrorEvent.occurred_at >= since,
+    )
+    agg = (await db.execute(
+        select(
+            func.count(func.distinct(actor)),
+            func.count(func.distinct(PortfolioErrorEvent.session_id)),
+            func.count(PortfolioErrorEvent.id),
+            func.sum(case((PortfolioErrorEvent.occurred_at >= midpoint, 1), else_=0)),
+            func.sum(case((PortfolioErrorEvent.occurred_at < midpoint, 1), else_=0)),
+        ).where(*scoped)
+    )).all()
+    users, sessions, occ, recent, prior = (
+        (int(agg[0][0] or 0), int(agg[0][1] or 0), int(agg[0][2] or 0), int(agg[0][3] or 0), int(agg[0][4] or 0))
+        if agg else (0, 0, 0, 0, 0)
+    )
+
+    # Facets: slice this issue's occurrences by a dimension. Pivoting is the verb.
+    release_label = func.coalesce(PortfolioErrorEvent.release, "(none)")
+    release_rows = (await db.execute(
+        select(release_label, func.count(PortfolioErrorEvent.id), func.count(func.distinct(actor)))
+        .where(*scoped)
+        .group_by(release_label)
+        .order_by(func.count(PortfolioErrorEvent.id).desc())
+        .limit(20)
+    )).all()
+    url_label = func.coalesce(PortfolioErrorEvent.url, "(none)")
+    url_rows = (await db.execute(
+        select(url_label, func.count(PortfolioErrorEvent.id), func.count(func.distinct(actor)))
+        .where(*scoped)
+        .group_by(url_label)
+        .order_by(func.count(PortfolioErrorEvent.id).desc())
+        .limit(20)
+    )).all()
+
+    sample = (await db.execute(
+        select(PortfolioErrorEvent)
+        .where(PortfolioErrorEvent.pipeline_id == pipeline_id, PortfolioErrorEvent.group_id == group_id)
+        .order_by(PortfolioErrorEvent.occurred_at.desc())
+        .limit(1)
+    )).scalar_one_or_none()
+
+    recent_events = list((await db.execute(
+        select(PortfolioErrorEvent)
+        .where(PortfolioErrorEvent.pipeline_id == pipeline_id, PortfolioErrorEvent.group_id == group_id)
+        .order_by(PortfolioErrorEvent.occurred_at.desc())
+        .limit(20)
+    )).scalars().all())
+
+    sample_payload = None
+    if sample:
+        sample_payload = {
+            "message": sample.message,
+            "stack": sample.stack,
+            "level": sample.level,
+            "handled": sample.handled,
+            "url": sample.url,
+            "release": sample.release,
+            "occurredAt": _iso(sample.occurred_at),
+        }
+
+    return {
+        "data": {
+            "issue": _serialize_issue(
+                group,
+                affected_users=users,
+                affected_sessions=sessions,
+                occurrences=occ,
+                trend=_issue_trend(recent, prior),
+            ),
+            "sample": sample_payload,
+            "facets": {
+                "release": [{"value": value, "count": int(count), "users": int(u)} for value, count, u in release_rows],
+                "url": [{"value": value, "count": int(count), "users": int(u)} for value, count, u in url_rows],
+            },
+            "recentOccurrences": [_serialize_error_event(event) for event in recent_events],
+            "windowDays": usage_window,
+        }
+    }
+
+
+class IssueStatusBody(BaseModel):
+    status: Literal["unresolved", "resolved", "ignored"]
+
+
+@router.get("/{pipeline_id}/issues/{group_id}/sessions")
+async def get_issue_sessions(
+    pipeline_id: str,
+    group_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """The sessions this issue fired in — the issue → affected sessions → session
+    timeline thread (where the error shows up in situ). Aggregated from the
+    group's error events by session_id."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    usage_window = eff.analytics_usage_window_days
+    since = _now() - timedelta(days=usage_window)
+
+    group = (await db.execute(
+        select(PortfolioErrorGroup).where(
+            PortfolioErrorGroup.id == group_id,
+            PortfolioErrorGroup.pipeline_id == pipeline_id,
+        )
+    )).scalar_one_or_none()
+    if not group:
+        raise HTTPException(status_code=404, detail="Issue not found")
+
+    rows = (await db.execute(
+        select(
+            PortfolioErrorEvent.session_id,
+            func.max(PortfolioErrorEvent.visitor_id),
+            func.max(PortfolioErrorEvent.user_ref),
+            func.count(PortfolioErrorEvent.id),
+            func.min(PortfolioErrorEvent.occurred_at),
+            func.max(PortfolioErrorEvent.occurred_at),
+        )
+        .where(
+            PortfolioErrorEvent.pipeline_id == pipeline_id,
+            PortfolioErrorEvent.group_id == group_id,
+            PortfolioErrorEvent.occurred_at >= since,
+            PortfolioErrorEvent.session_id != None,
+        )
+        .group_by(PortfolioErrorEvent.session_id)
+        .order_by(func.max(PortfolioErrorEvent.occurred_at).desc())
+        .limit(50)
+    )).all()
+
+    sessions = []
+    for session_id, visitor_id, user_ref, occurrences, first_seen, last_seen in rows:
+        sessions.append({
+            "sessionId": session_id,
+            "visitorId": visitor_id,
+            "userRef": user_ref,
+            "identified": user_ref is not None,
+            "occurrences": int(occurrences),
+            "firstSeenAt": _iso(first_seen),
+            "lastSeenAt": _iso(last_seen),
+        })
+
+    return {
+        "data": {
+            "issueId": group_id,
+            "windowDays": usage_window,
+            "sessions": sessions,
+        }
+    }
+
+
+@router.patch("/{pipeline_id}/issues/{group_id}")
+async def update_issue_status(
+    pipeline_id: str,
+    group_id: str,
+    body: IssueStatusBody,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Manually set an issue's status. Resolve to clear it from open issues;
+    ingest auto-reopens a resolved issue if it recurs (regression). Ignore mutes
+    it — recurrence does not reopen an ignored issue."""
+    await _require_launched_product(pipeline_id, db, uid)
+    group = (await db.execute(
+        select(PortfolioErrorGroup).where(
+            PortfolioErrorGroup.id == group_id,
+            PortfolioErrorGroup.pipeline_id == pipeline_id,
+        )
+    )).scalar_one_or_none()
+    if not group:
+        raise HTTPException(status_code=404, detail="Issue not found")
+    group.status = body.status
+    group.updated_at = _now()
+    await db.commit()
+    return {"data": {"id": group.id, "status": group.status}}
+
+
+@router.get("/{pipeline_id}/errors/by-release")
+async def get_errors_by_release(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Split-by-release across all errors: did this deploy regress? Per release we
+    compute the error rate (errors / sessions) so a traffic difference between
+    releases doesn't read as a regression on raw counts. Errors carry `release`
+    natively; usage sessions carry it since B.4."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    source = await _usage_source(pipeline_id, db)
+    now = _now()
+    usage_window = eff.analytics_usage_window_days
+    since = now - timedelta(days=usage_window)
+    actor = func.coalesce(PortfolioErrorEvent.user_ref, PortfolioErrorEvent.visitor_id)
+    error_release = func.coalesce(PortfolioErrorEvent.release, "(none)")
+    usage_release = func.coalesce(PortfolioUsageEvent.release, "(none)")
+
+    error_rows = (await db.execute(
+        select(
+            error_release,
+            func.count(PortfolioErrorEvent.id),
+            func.count(func.distinct(actor)),
+            func.count(func.distinct(PortfolioErrorEvent.session_id)),
+            func.min(PortfolioErrorEvent.occurred_at),
+            func.max(PortfolioErrorEvent.occurred_at),
+        )
+        .where(PortfolioErrorEvent.pipeline_id == pipeline_id, PortfolioErrorEvent.occurred_at >= since)
+        .group_by(error_release)
+    )).all()
+
+    # Sessions per release from usage, the denominator for the rate.
+    session_rows = (await db.execute(
+        select(usage_release, func.count(func.distinct(PortfolioUsageEvent.session_id)))
+        .where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.occurred_at >= since,
+            PortfolioUsageEvent.session_id != None,
+        )
+        .group_by(usage_release)
+    )).all()
+    sessions_by_release = {release: int(count) for release, count in session_rows}
+
+    releases = []
+    for release, errors, users, err_sessions, first_seen, last_seen in error_rows:
+        sessions = sessions_by_release.get(release, 0)
+        releases.append({
+            "release": release,
+            "errors": int(errors),
+            "affectedUsers": int(users),
+            "affectedSessions": int(err_sessions),
+            "sessions": sessions,
+            "errorsPerSession": round(int(errors) / sessions, 4) if sessions else None,
+            "firstSeenAt": _iso(first_seen),
+            "lastSeenAt": _iso(last_seen),
+        })
+    # Most recently active release first — the latest deploy is what you're judging.
+    releases.sort(key=lambda r: r["lastSeenAt"] or "", reverse=True)
+
+    return {
+        "data": {
+            "source": _serialize_usage_source(source),
+            "connected": source is not None,
+            "windowDays": usage_window,
+            "releases": releases,
+        }
+    }
+
+
+# Per-source ingest rate limit. Fixed one-minute window kept in process: a
+# coarse flood guard so one source can't bury ingest, not a precise distributed
+# quota (each worker holds its own window). A batch counts as its event total.
+_rate_windows: dict[str, list] = {}
+
+
+def _check_rate_limit(source_id: str, cost: int = 1) -> None:
+    limit = get_settings().ingest_rate_limit_per_minute
+    if limit <= 0:
+        return
+    window = int(_now().timestamp()) // 60
+    entry = _rate_windows.get(source_id)
+    if entry is None or entry[0] != window:
+        # New window. Opportunistically drop stale entries so the map can't grow
+        # unbounded across many sources.
+        if len(_rate_windows) > 10000:
+            _rate_windows.clear()
+        entry = [window, 0]
+        _rate_windows[source_id] = entry
+    entry[1] += cost
+    if entry[1] > limit:
+        raise HTTPException(status_code=429, detail="Rate limit exceeded", headers={"Retry-After": "60"})
+
+
+# Core Web Vitals thresholds (good upper-bound, poor lower-bound). LCP/INP/FCP/
+# TTFB are milliseconds; CLS is unitless. A p75 at/below `good` is good, above
+# `poor` is poor, between is needs-improvement.
+_VITAL_THRESHOLDS = {
+    "LCP": (2500.0, 4000.0),
+    "INP": (200.0, 500.0),
+    "FCP": (1800.0, 3000.0),
+    "TTFB": (800.0, 1800.0),
+    "CLS": (0.1, 0.25),
+}
+_VITAL_ORDER = {"LCP": 0, "INP": 1, "CLS": 2, "FCP": 3, "TTFB": 4}
+
+
+def _rate_vital(metric: str, value: float | None) -> str | None:
+    thresholds = _VITAL_THRESHOLDS.get(metric)
+    if not thresholds or value is None:
+        return None
+    good, poor = thresholds
+    if value <= good:
+        return "good"
+    if value <= poor:
+        return "needs-improvement"
+    return "poor"
+
+
+def _record_web_vital(source, *, metric, value, rating, url, navigation_id, visitor_id, session_id, user_ref, release, environment, occurred_at, now):
+    """Build a web-vital row (not committed). Rating falls back to the
+    threshold-derived value when the client didn't send one. Shared by the
+    single /vitals endpoint and /batch."""
+    return PortfolioWebVital(
+        id=str(uuid.uuid4()),
+        pipeline_id=source.pipeline_id,
+        source_id=source.id,
+        metric=metric,
+        value=float(value),
+        rating=rating or _rate_vital(metric, value),
+        url=url,
+        navigation_id=navigation_id,
+        visitor_id=visitor_id,
+        session_id=session_id,
+        user_ref=user_ref,
+        release=release,
+        environment=environment,
+        occurred_at=occurred_at or now,
+        received_at=now,
+    )
+
+
+def _record_log(source, *, level, message, metadata, url, visitor_id, session_id, user_ref, release, environment, occurred_at, now):
+    """Build a log row (not committed). Shared by the single /logs endpoint and
+    /batch."""
+    return PortfolioLog(
+        id=str(uuid.uuid4()),
+        pipeline_id=source.pipeline_id,
+        source_id=source.id,
+        level=level,
+        message=str(message)[:4000],
+        event_metadata=metadata or {},
+        url=url,
+        visitor_id=visitor_id,
+        session_id=session_id,
+        user_ref=user_ref,
+        release=release,
+        environment=environment,
+        occurred_at=occurred_at or now,
+        received_at=now,
+    )
+
+
+def _build_usage_event(source, *, event_type, visitor_id, session_id, user_ref, url, referrer, release, environment, metadata, occurred_at, now):
+    """Build a usage event row (not added/committed). Shared by the single
+    `/events` endpoint and `/batch` so both store identical shapes."""
+    return PortfolioUsageEvent(
+        id=str(uuid.uuid4()),
+        pipeline_id=source.pipeline_id,
+        source_id=source.id,
+        event_type=event_type,
+        visitor_id=visitor_id,
+        session_id=session_id,
+        user_ref=user_ref,
+        url=url,
+        referrer=referrer,
+        release=release,
+        environment=environment,
+        event_metadata=metadata or {},
+        occurred_at=occurred_at or now,
+        received_at=now,
+    )
+
+
+async def _record_error_event(source, db, *, message, stack, level, handled, url, release, environment, visitor_id, session_id, user_ref, metadata, occurred_at, now):
+    """Upsert the fingerprint group and add the error event (not committed).
+    Shared by the single `/errors` endpoint and `/batch` so grouping, regression
+    reopen, and first/last-seen tracking stay identical across both."""
+    occurred = occurred_at or now
+    fingerprint = _error_fingerprint(message, stack)
+    title = (_normalize_error_message(message) or message)[:500]
+
+    group = await _error_group(source.pipeline_id, fingerprint, db)
+    if group is None:
+        group = PortfolioErrorGroup(
+            id=str(uuid.uuid4()),
+            pipeline_id=source.pipeline_id,
+            source_id=source.id,
+            fingerprint=fingerprint,
+            title=title,
+            level=level,
+            status="unresolved",
+            event_count=1,
+            last_release=release,
+            first_seen_at=occurred,
+            last_seen_at=occurred,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(group)
+    else:
+        group.event_count = int(group.event_count or 0) + 1
+        if group.last_seen_at is None or occurred > group.last_seen_at:
+            group.last_seen_at = occurred
+        if group.first_seen_at is None or occurred < group.first_seen_at:
+            group.first_seen_at = occurred
+        if release:
+            group.last_release = release
+        # Regression: a previously resolved issue is happening again → reopen it.
+        if group.status == "resolved":
+            group.status = "unresolved"
+        group.updated_at = now
+
+    event = PortfolioErrorEvent(
+        id=str(uuid.uuid4()),
+        pipeline_id=source.pipeline_id,
+        source_id=source.id,
+        group_id=group.id,
+        fingerprint=fingerprint,
+        message=message[:2000],
+        stack=stack,
+        level=level,
+        handled=handled,
+        url=url,
+        release=release,
+        environment=environment,
+        visitor_id=visitor_id,
+        session_id=session_id,
+        user_ref=user_ref,
+        event_metadata=metadata or {},
+        occurred_at=occurred,
+        received_at=now,
+    )
+    db.add(event)
+    return event, group
+
+
 @public_router.post("/events")
 async def ingest_usage_event(
     request: Request,
@@ -2508,21 +3890,22 @@ async def ingest_usage_event(
         raise HTTPException(status_code=404, detail="Usage source not found")
     if not _usage_event_domain_allowed(source, request, body):
         raise HTTPException(status_code=403, detail="Usage event origin is not allowed")
+    _check_rate_limit(source.id)
 
     now = _now()
-    event = PortfolioUsageEvent(
-        id=str(uuid.uuid4()),
-        pipeline_id=source.pipeline_id,
-        source_id=source.id,
+    event = _build_usage_event(
+        source,
         event_type=body.event_type,
         visitor_id=body.visitor_id,
         session_id=body.session_id,
         user_ref=body.user_id,
         url=body.url,
         referrer=body.referrer,
-        event_metadata=body.metadata or {},
-        occurred_at=body.occurred_at or now,
-        received_at=now,
+        release=body.release,
+        environment=body.environment,
+        metadata=body.metadata,
+        occurred_at=body.occurred_at,
+        now=now,
     )
     source.last_seen_at = now
     source.updated_at = now
@@ -2584,8 +3967,28 @@ async def ingest_identify(
         existing.resolution_method = method
         existing.resolved_at = now if method != "unresolved" else existing.resolved_at
     existing.updated_at = now
+
+    # Backfill the current session: events fire before the user is known, so the
+    # session's earlier rows carry a null user_ref. Once identify() runs, stamp
+    # them with the user_ref so the whole session attributes to one actor. Scoped
+    # to this session's still-anonymous rows, so a re-identify can't reassign
+    # events already attributed to a different user.
+    backfilled = 0
+    if body.session_id:
+        for model in (PortfolioUsageEvent, PortfolioErrorEvent):
+            result = await db.execute(
+                update(model)
+                .where(
+                    model.pipeline_id == source.pipeline_id,
+                    model.session_id == body.session_id,
+                    model.user_ref.is_(None),
+                )
+                .values(user_ref=body.user_id)
+            )
+            backfilled += result.rowcount or 0
+
     await db.commit()
-    return {"success": True, "resolution": existing.resolution_method}
+    return {"success": True, "resolution": existing.resolution_method, "backfilled": backfilled}
 
 
 @public_router.post("/errors")
@@ -2605,64 +4008,218 @@ async def ingest_error_event(
         raise HTTPException(status_code=404, detail="Usage source not found")
     if not _origin_allowed(source.allowed_domain, request, body.url):
         raise HTTPException(status_code=403, detail="Error event origin is not allowed")
+    _check_rate_limit(source.id)
 
     now = _now()
-    occurred = body.occurred_at or now
-    fingerprint = _error_fingerprint(body.message, body.stack)
-    title = (_normalize_error_message(body.message) or body.message)[:500]
-
-    group = await _error_group(source.pipeline_id, fingerprint, db)
-    if group is None:
-        group = PortfolioErrorGroup(
-            id=str(uuid.uuid4()),
-            pipeline_id=source.pipeline_id,
-            source_id=source.id,
-            fingerprint=fingerprint,
-            title=title,
-            level=body.level,
-            status="unresolved",
-            event_count=1,
-            last_release=body.release,
-            first_seen_at=occurred,
-            last_seen_at=occurred,
-            created_at=now,
-            updated_at=now,
-        )
-        db.add(group)
-    else:
-        group.event_count = int(group.event_count or 0) + 1
-        if group.last_seen_at is None or occurred > group.last_seen_at:
-            group.last_seen_at = occurred
-        if group.first_seen_at is None or occurred < group.first_seen_at:
-            group.first_seen_at = occurred
-        if body.release:
-            group.last_release = body.release
-        # Regression: a previously resolved issue is happening again → reopen it.
-        if group.status == "resolved":
-            group.status = "unresolved"
-        group.updated_at = now
-
-    event = PortfolioErrorEvent(
-        id=str(uuid.uuid4()),
-        pipeline_id=source.pipeline_id,
-        source_id=source.id,
-        group_id=group.id,
-        fingerprint=fingerprint,
-        message=body.message[:2000],
+    event, group = await _record_error_event(
+        source, db,
+        message=body.message,
         stack=body.stack,
         level=body.level,
         handled=body.handled,
         url=body.url,
         release=body.release,
+        environment=body.environment,
         visitor_id=body.visitor_id,
         session_id=body.session_id,
         user_ref=body.user_id,
-        event_metadata=body.metadata or {},
-        occurred_at=occurred,
-        received_at=now,
+        metadata=body.metadata,
+        occurred_at=body.occurred_at,
+        now=now,
     )
     source.last_seen_at = now
     source.updated_at = now
-    db.add(event)
     await db.commit()
-    return {"success": True, "groupId": group.id, "fingerprint": fingerprint}
+    return {"success": True, "groupId": group.id, "fingerprint": event.fingerprint}
+
+
+@public_router.post("/vitals")
+async def ingest_vital(
+    request: Request,
+    body: VitalBody,
+    db: AsyncSession = Depends(get_db),
+):
+    source = (await db.execute(
+        select(PortfolioUsageSource).where(
+            PortfolioUsageSource.pipeline_id == body.product_id,
+            PortfolioUsageSource.public_key == body.key,
+            PortfolioUsageSource.status == "connected",
+        )
+    )).scalar_one_or_none()
+    if not source:
+        raise HTTPException(status_code=404, detail="Usage source not found")
+    if not _origin_allowed(source.allowed_domain, request, body.url):
+        raise HTTPException(status_code=403, detail="Vital origin is not allowed")
+    _check_rate_limit(source.id)
+
+    now = _now()
+    db.add(_record_web_vital(
+        source,
+        metric=body.metric,
+        value=body.value,
+        rating=body.rating,
+        url=body.url,
+        navigation_id=body.navigation_id,
+        visitor_id=body.visitor_id,
+        session_id=body.session_id,
+        user_ref=body.user_id,
+        release=body.release,
+        environment=body.environment,
+        occurred_at=body.occurred_at,
+        now=now,
+    ))
+    source.last_seen_at = now
+    source.updated_at = now
+    await db.commit()
+    return {"success": True}
+
+
+@public_router.post("/logs")
+async def ingest_log(
+    request: Request,
+    body: LogBody,
+    db: AsyncSession = Depends(get_db),
+):
+    source = (await db.execute(
+        select(PortfolioUsageSource).where(
+            PortfolioUsageSource.pipeline_id == body.product_id,
+            PortfolioUsageSource.public_key == body.key,
+            PortfolioUsageSource.status == "connected",
+        )
+    )).scalar_one_or_none()
+    if not source:
+        raise HTTPException(status_code=404, detail="Usage source not found")
+    if not _origin_allowed(source.allowed_domain, request, body.url):
+        raise HTTPException(status_code=403, detail="Log origin is not allowed")
+    _check_rate_limit(source.id)
+
+    now = _now()
+    db.add(_record_log(
+        source,
+        level=body.level,
+        message=body.message,
+        metadata=body.metadata,
+        url=body.url,
+        visitor_id=body.visitor_id,
+        session_id=body.session_id,
+        user_ref=body.user_id,
+        release=body.release,
+        environment=body.environment,
+        occurred_at=body.occurred_at,
+        now=now,
+    ))
+    source.last_seen_at = now
+    source.updated_at = now
+    await db.commit()
+    return {"success": True}
+
+
+@public_router.post("/batch")
+async def ingest_batch(
+    request: Request,
+    body: BatchBody,
+    db: AsyncSession = Depends(get_db),
+):
+    """Store many events in one request. The beacon's delivery layer batches
+    queued events here and flushes the queue in a single `sendBeacon` on page
+    unload. Each item routes to the same storage path as its single endpoint."""
+    source = (await db.execute(
+        select(PortfolioUsageSource).where(
+            PortfolioUsageSource.pipeline_id == body.product_id,
+            PortfolioUsageSource.public_key == body.key,
+            PortfolioUsageSource.status == "connected",
+        )
+    )).scalar_one_or_none()
+    if not source:
+        raise HTTPException(status_code=404, detail="Usage source not found")
+    # One origin check for the whole batch (events from a page share an origin),
+    # via the Origin/Referer headers rather than each item's url.
+    if not _origin_allowed(source.allowed_domain, request, None):
+        raise HTTPException(status_code=403, detail="Batch origin is not allowed")
+    # A batch costs its event total, so batching can't bypass the per-source limit.
+    _check_rate_limit(source.id, cost=max(1, len(body.batch)))
+
+    now = _now()
+    stored = 0
+    for item in body.batch:
+        if item.kind == "event":
+            if not item.event_type:
+                continue
+            db.add(_build_usage_event(
+                source,
+                event_type=item.event_type,
+                visitor_id=item.visitor_id,
+                session_id=item.session_id,
+                user_ref=item.user_id,
+                url=item.url,
+                referrer=item.referrer,
+                release=item.release,
+                environment=item.environment,
+                metadata=item.metadata,
+                occurred_at=item.occurred_at,
+                now=now,
+            ))
+            stored += 1
+        elif item.kind == "error":
+            if not item.message:
+                continue
+            await _record_error_event(
+                source, db,
+                message=item.message,
+                stack=item.stack,
+                level=item.level,
+                handled=item.handled,
+                url=item.url,
+                release=item.release,
+                environment=item.environment,
+                visitor_id=item.visitor_id,
+                session_id=item.session_id,
+                user_ref=item.user_id,
+                metadata=item.metadata,
+                occurred_at=item.occurred_at,
+                now=now,
+            )
+            stored += 1
+        elif item.kind == "vital":
+            if not item.metric or item.value is None:
+                continue
+            db.add(_record_web_vital(
+                source,
+                metric=item.metric,
+                value=item.value,
+                rating=item.rating,
+                url=item.url,
+                navigation_id=item.navigation_id,
+                visitor_id=item.visitor_id,
+                session_id=item.session_id,
+                user_ref=item.user_id,
+                release=item.release,
+                environment=item.environment,
+                occurred_at=item.occurred_at,
+                now=now,
+            ))
+            stored += 1
+        elif item.kind == "log":
+            if not item.log_level or not item.message:
+                continue
+            db.add(_record_log(
+                source,
+                level=item.log_level,
+                message=item.message,
+                metadata=item.metadata,
+                url=item.url,
+                visitor_id=item.visitor_id,
+                session_id=item.session_id,
+                user_ref=item.user_id,
+                release=item.release,
+                environment=item.environment,
+                occurred_at=item.occurred_at,
+                now=now,
+            ))
+            stored += 1
+
+    if stored:
+        source.last_seen_at = now
+        source.updated_at = now
+    await db.commit()
+    return {"success": True, "stored": stored}
