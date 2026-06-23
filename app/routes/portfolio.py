@@ -675,6 +675,102 @@ async def get_source_health(
     }
 
 
+@router.get("/{pipeline_id}/command-center")
+async def get_command_center(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """The at-a-glance Connect screen: the v2 health verdict, week-over-week
+    trends (visitors / signups / errors / revenue), and the top open issues —
+    one read that says 'is this product OK, and what needs attention'."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    source = await _usage_source(pipeline_id, db)
+    now = _now()
+    growth_window = eff.analytics_growth_window_days
+    week_start = now - timedelta(days=growth_window)
+    prev_week_start = now - timedelta(days=2 * growth_window)
+
+    verdict, signals = await _source_health(pipeline_id, source, eff, now, db)
+    revenue = await _revenue_source(pipeline_id, db)
+
+    async def _count(model, start, end, *extra):
+        return int(await db.scalar(
+            select(func.count(model.id)).where(
+                model.pipeline_id == pipeline_id,
+                model.occurred_at >= start,
+                model.occurred_at < end,
+                *extra,
+            )
+        ) or 0)
+
+    async def _distinct_visitors(start, end):
+        return int(await db.scalar(
+            select(func.count(func.distinct(PortfolioUsageEvent.visitor_id))).where(
+                PortfolioUsageEvent.pipeline_id == pipeline_id,
+                PortfolioUsageEvent.occurred_at >= start,
+                PortfolioUsageEvent.occurred_at < end,
+                PortfolioUsageEvent.visitor_id != None,
+            )
+        ) or 0)
+
+    visitors_cur = await _distinct_visitors(week_start, now)
+    visitors_prev = await _distinct_visitors(prev_week_start, week_start)
+    signups_cur = await _count(PortfolioUsageEvent, week_start, now, PortfolioUsageEvent.event_type == "signup")
+    signups_prev = await _count(PortfolioUsageEvent, prev_week_start, week_start, PortfolioUsageEvent.event_type == "signup")
+    errors_cur = await _count(PortfolioErrorEvent, week_start, now)
+    errors_prev = await _count(PortfolioErrorEvent, prev_week_start, week_start)
+
+    def trend(current, previous):
+        return {"current": int(current), "previous": int(previous), "changePct": _pct_change(current, previous)}
+
+    rev_cur = revenue.current_mrr_cents if revenue else None
+    rev_prev = revenue.previous_mrr_cents if revenue else None
+
+    top_groups = list((await db.execute(
+        select(PortfolioErrorGroup)
+        .where(
+            PortfolioErrorGroup.pipeline_id == pipeline_id,
+            PortfolioErrorGroup.status == "unresolved",
+        )
+        .order_by(PortfolioErrorGroup.last_seen_at.desc())
+        .limit(3)
+    )).scalars().all())
+
+    return {
+        "data": {
+            "windowDays": eff.analytics_usage_window_days,
+            "growthWindowDays": growth_window,
+            "health": verdict,
+            "signals": signals,
+            "trends": {
+                "visitors": trend(visitors_cur, visitors_prev),
+                "signups": trend(signups_cur, signups_prev),
+                "errors": trend(errors_cur, errors_prev),
+                "revenue": {
+                    "current": rev_cur,
+                    "previous": rev_prev,
+                    "changePct": _pct_change(rev_cur, rev_prev) if (rev_cur is not None and rev_prev) else None,
+                },
+            },
+            "revenueConnected": revenue is not None,
+            "topIssues": [
+                {
+                    "id": group.id,
+                    "title": group.title,
+                    "level": group.level,
+                    "status": group.status,
+                    "eventCount": int(group.event_count or 0),
+                    "lastRelease": group.last_release,
+                    "lastSeenAt": _iso(group.last_seen_at),
+                }
+                for group in top_groups
+            ],
+        }
+    }
+
+
 def _empty_error_daily(days: int = 14) -> dict[str, dict]:
     today = _now().date()
     rows: dict[str, dict] = {}

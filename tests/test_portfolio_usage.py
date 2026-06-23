@@ -4,6 +4,7 @@ from urllib.parse import parse_qs, urlparse
 from conftest import (
     FakeResult,
     make_error_event,
+    make_error_group,
     make_pipeline,
     make_revenue_source,
     make_subscription,
@@ -741,6 +742,42 @@ async def test_get_logs_faceted(client, fake_db, auth_headers):
     assert body["filters"]["q"] == "slow"
     assert body["logs"][0]["message"] == "slow query"
     assert body["logs"][0]["level"] == "warn"
+
+
+async def test_get_command_center(client, fake_db, auth_headers):
+    from datetime import datetime as _dt, timezone as _tz
+
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    source = make_usage_source(pipeline_id=product.id, last_seen_at=_dt.now(_tz.utc))
+    revenue = make_revenue_source(pipeline_id=product.id, current_mrr_cents=10000, previous_mrr_cents=8000)
+    group = make_error_group(pipeline_id=product.id, title="Boom", event_count=12)
+    fake_db.stub(
+        execute=[
+            FakeResult(rows=[product]),   # launched product lookup
+            FakeResult(rows=[]),          # app settings overlay
+            FakeResult(rows=[source]),    # usage source
+            FakeResult(rows=[revenue]),   # revenue source
+            FakeResult(rows=[group]),     # top open issues
+        ],
+        scalar=[
+            100, 5, 100, None,            # health: total, errors, sessions, lcp_p75
+            60, 40,                       # visitors current/prev
+            12, 8,                        # signups current/prev
+            3, 5,                         # errors current/prev
+        ],
+    )
+
+    resp = await client.get(f"/portfolio/{product.id}/command-center", headers=auth_headers)
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["health"]["state"] == "live"   # fresh, 5% error rate
+    assert body["trends"]["visitors"]["changePct"] == 0.5   # (60-40)/40
+    assert body["trends"]["errors"]["current"] == 3
+    assert body["trends"]["revenue"]["current"] == 10000
+    assert body["trends"]["revenue"]["changePct"] == 0.25   # (10000-8000)/8000
+    assert body["revenueConnected"] is True
+    assert body["topIssues"][0]["title"] == "Boom"
 
 
 def test_health_verdict_v2_states():
