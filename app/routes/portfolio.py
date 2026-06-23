@@ -2950,6 +2950,7 @@ def _correlation_insights(days: list[dict]) -> list[str]:
 # correlation (`/insights/revenue-correlation`). Left at its current path here to
 # keep this build non-breaking.
 @router.get("/{pipeline_id}/correlation")
+@router.get("/{pipeline_id}/insights/error-correlation")
 async def get_correlation(
     pipeline_id: str,
     db: AsyncSession = Depends(get_db),
