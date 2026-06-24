@@ -8,6 +8,7 @@ from typing import Any, Literal
 from urllib.parse import urlencode, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import case, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -17,7 +18,10 @@ from app.db import get_db
 from app.auth import get_uid
 from app.config import get_settings
 from app.models import (
+    MonitoringInvestigation,
+    MonitoringInvestigationEntry,
     MonitoringProblem,
+    MonitoringReport,
     Pipeline,
     PlanEnum,
     PortfolioAlertSettings,
@@ -855,6 +859,260 @@ async def get_problem_impact(
         impact["after"] = await _count(detected, detected + span)
 
     return {"data": {"problem": _serialize_problem(problem), "impact": impact}}
+
+
+# ── Phase 4: Investigate & Report ────────────────────────────────────────────
+
+class InvestigationCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    summary: str | None = Field(default=None, max_length=4000)
+
+
+class InvestigationUpdate(BaseModel):
+    title: str | None = Field(default=None, max_length=200)
+    summary: str | None = Field(default=None, max_length=4000)
+    status: Literal["open", "resolved", "archived"] | None = None
+
+
+class EntryCreate(BaseModel):
+    kind: Literal["note", "issue", "problem", "session", "link"]
+    ref_id: str | None = Field(default=None, max_length=256)
+    body: str | None = Field(default=None, max_length=8000)
+    metadata: dict | None = None
+
+
+class ReportCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    body: str | None = Field(default=None, max_length=100000)
+    investigation_id: str | None = None
+
+
+def _serialize_investigation(inv: MonitoringInvestigation) -> dict:
+    return {
+        "id": inv.id,
+        "title": inv.title,
+        "summary": inv.summary,
+        "status": inv.status,
+        "createdAt": _iso(inv.created_at),
+        "updatedAt": _iso(inv.updated_at),
+    }
+
+
+def _serialize_entry(entry: MonitoringInvestigationEntry) -> dict:
+    return {
+        "id": entry.id,
+        "kind": entry.kind,
+        "refId": entry.ref_id,
+        "body": entry.body,
+        "metadata": entry.event_metadata or {},
+        "createdAt": _iso(entry.created_at),
+    }
+
+
+def _serialize_report(report: MonitoringReport) -> dict:
+    return {
+        "id": report.id,
+        "title": report.title,
+        "body": report.body,
+        "investigationId": report.investigation_id,
+        "createdAt": _iso(report.created_at),
+        "updatedAt": _iso(report.updated_at),
+    }
+
+
+async def _get_investigation(pipeline_id: str, investigation_id: str, db) -> MonitoringInvestigation:
+    inv = (await db.execute(
+        select(MonitoringInvestigation).where(
+            MonitoringInvestigation.id == investigation_id,
+            MonitoringInvestigation.pipeline_id == pipeline_id,
+        )
+    )).scalar_one_or_none()
+    if not inv:
+        raise HTTPException(status_code=404, detail="Investigation not found")
+    return inv
+
+
+@router.post("/{pipeline_id}/investigations")
+async def create_investigation(
+    pipeline_id: str,
+    body: InvestigationCreate,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    await _require_launched_product(pipeline_id, db, uid)
+    now = _now()
+    inv = MonitoringInvestigation(
+        id=str(uuid.uuid4()), pipeline_id=pipeline_id,
+        title=body.title, summary=body.summary, status="open",
+        created_at=now, updated_at=now,
+    )
+    db.add(inv)
+    await db.commit()
+    return {"data": _serialize_investigation(inv)}
+
+
+@router.get("/{pipeline_id}/investigations")
+async def list_investigations(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    await _require_launched_product(pipeline_id, db, uid)
+    rows = list((await db.execute(
+        select(MonitoringInvestigation)
+        .where(MonitoringInvestigation.pipeline_id == pipeline_id)
+        .order_by(MonitoringInvestigation.created_at.desc())
+        .limit(100)
+    )).scalars().all())
+    return {"data": {"investigations": [_serialize_investigation(i) for i in rows]}}
+
+
+@router.get("/{pipeline_id}/investigations/{investigation_id}")
+async def get_investigation(
+    pipeline_id: str,
+    investigation_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """An investigation and its timeline — evidence + notes ordered by time."""
+    await _require_launched_product(pipeline_id, db, uid)
+    inv = await _get_investigation(pipeline_id, investigation_id, db)
+    entries = list((await db.execute(
+        select(MonitoringInvestigationEntry)
+        .where(MonitoringInvestigationEntry.investigation_id == investigation_id)
+        .order_by(MonitoringInvestigationEntry.created_at.asc())
+    )).scalars().all())
+    return {
+        "data": {
+            "investigation": _serialize_investigation(inv),
+            "timeline": [_serialize_entry(e) for e in entries],
+        }
+    }
+
+
+@router.patch("/{pipeline_id}/investigations/{investigation_id}")
+async def update_investigation(
+    pipeline_id: str,
+    investigation_id: str,
+    body: InvestigationUpdate,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    await _require_launched_product(pipeline_id, db, uid)
+    inv = await _get_investigation(pipeline_id, investigation_id, db)
+    if body.title is not None:
+        inv.title = body.title
+    if body.summary is not None:
+        inv.summary = body.summary
+    if body.status is not None:
+        inv.status = body.status
+    inv.updated_at = _now()
+    await db.commit()
+    return {"data": _serialize_investigation(inv)}
+
+
+@router.post("/{pipeline_id}/investigations/{investigation_id}/entries")
+async def add_investigation_entry(
+    pipeline_id: str,
+    investigation_id: str,
+    body: EntryCreate,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Add a timeline entry: a note, or evidence linking an issue/problem/session."""
+    await _require_launched_product(pipeline_id, db, uid)
+    inv = await _get_investigation(pipeline_id, investigation_id, db)
+    if body.kind == "note" and not (body.body or "").strip():
+        raise HTTPException(status_code=422, detail="A note needs a body")
+    if body.kind != "note" and not body.ref_id:
+        raise HTTPException(status_code=422, detail="Evidence needs a ref_id")
+    now = _now()
+    entry = MonitoringInvestigationEntry(
+        id=str(uuid.uuid4()), investigation_id=investigation_id,
+        kind=body.kind, ref_id=body.ref_id, body=body.body,
+        event_metadata=body.metadata or {}, created_at=now,
+    )
+    db.add(entry)
+    inv.updated_at = now
+    await db.commit()
+    return {"data": _serialize_entry(entry)}
+
+
+@router.post("/{pipeline_id}/reports")
+async def create_report(
+    pipeline_id: str,
+    body: ReportCreate,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    await _require_launched_product(pipeline_id, db, uid)
+    now = _now()
+    report = MonitoringReport(
+        id=str(uuid.uuid4()), pipeline_id=pipeline_id,
+        investigation_id=body.investigation_id, title=body.title,
+        body=body.body or "", created_at=now, updated_at=now,
+    )
+    db.add(report)
+    await db.commit()
+    return {"data": _serialize_report(report)}
+
+
+@router.get("/{pipeline_id}/reports")
+async def list_reports(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    await _require_launched_product(pipeline_id, db, uid)
+    rows = list((await db.execute(
+        select(MonitoringReport)
+        .where(MonitoringReport.pipeline_id == pipeline_id)
+        .order_by(MonitoringReport.created_at.desc())
+        .limit(100)
+    )).scalars().all())
+    return {"data": {"reports": [_serialize_report(r) for r in rows]}}
+
+
+async def _get_report(pipeline_id: str, report_id: str, db) -> MonitoringReport:
+    report = (await db.execute(
+        select(MonitoringReport).where(
+            MonitoringReport.id == report_id,
+            MonitoringReport.pipeline_id == pipeline_id,
+        )
+    )).scalar_one_or_none()
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return report
+
+
+@router.get("/{pipeline_id}/reports/{report_id}")
+async def get_report(
+    pipeline_id: str,
+    report_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    await _require_launched_product(pipeline_id, db, uid)
+    report = await _get_report(pipeline_id, report_id, db)
+    return {"data": _serialize_report(report)}
+
+
+@router.get("/{pipeline_id}/reports/{report_id}/export")
+async def export_report(
+    pipeline_id: str,
+    report_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Exportable view: the report rendered as downloadable Markdown."""
+    await _require_launched_product(pipeline_id, db, uid)
+    report = await _get_report(pipeline_id, report_id, db)
+    markdown = f"# {report.title}\n\n_Generated {_iso(report.updated_at)}_\n\n{report.body}\n"
+    return PlainTextResponse(
+        markdown,
+        media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="report-{report.id}.md"'},
+    )
 
 
 def _empty_error_daily(days: int = 14) -> dict[str, dict]:
