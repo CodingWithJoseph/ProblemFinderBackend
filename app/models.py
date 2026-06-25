@@ -341,6 +341,12 @@ class PortfolioUsageEvent(Base):
     referrer: Mapped[str | None] = mapped_column(Text, nullable=True)
     release: Mapped[str | None] = mapped_column(Text, nullable=True)
     environment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Trace identity (frontend->backend correlation) + dimensions. See 0038.
+    trace_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    span_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parent_span_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    platform: Mapped[str | None] = mapped_column(Text, nullable=True)
+    capture_mode: Mapped[str | None] = mapped_column(Text, nullable=True)
     event_metadata: Mapped[dict | None] = mapped_column("metadata", JSONB, nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
     received_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
@@ -360,6 +366,7 @@ class PortfolioErrorGroup(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False)
     level: Mapped[str] = mapped_column(String(20), nullable=False, default="error")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="unresolved")
+    error_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     event_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_release: Mapped[str | None] = mapped_column(Text, nullable=True)
     first_seen_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
@@ -383,9 +390,15 @@ class PortfolioErrorEvent(Base):
     stack: Mapped[str | None] = mapped_column(Text, nullable=True)
     level: Mapped[str] = mapped_column(String(20), nullable=False, default="error")
     handled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    error_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     url: Mapped[str | None] = mapped_column(Text, nullable=True)
     release: Mapped[str | None] = mapped_column(Text, nullable=True)
     environment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trace_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    span_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parent_span_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    platform: Mapped[str | None] = mapped_column(Text, nullable=True)
+    capture_mode: Mapped[str | None] = mapped_column(Text, nullable=True)
     visitor_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     user_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -413,6 +426,10 @@ class PortfolioWebVital(Base):
     user_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     release: Mapped[str | None] = mapped_column(Text, nullable=True)
     environment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trace_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    span_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parent_span_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    platform: Mapped[str | None] = mapped_column(Text, nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
     received_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
@@ -435,7 +452,44 @@ class PortfolioLog(Base):
     user_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     release: Mapped[str | None] = mapped_column(Text, nullable=True)
     environment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trace_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    span_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parent_span_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    platform: Mapped[str | None] = mapped_column(Text, nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
+    received_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class PortfolioSpan(Base):
+    """One unit of work in a trace — a page load, a fetch, a backend request, a
+    slow query, or a manually tagged feature. Joined into a trace by trace_id and
+    into a call tree by parent_span_id. Usage/error/log/vital rows reference the
+    same trace_id, so a frontend error can be tied to the backend span that
+    caused it (the incident chain) and journeys can be derived from span order."""
+
+    __tablename__ = "portfolio_spans"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("portfolio_usage_sources.id", ondelete="SET NULL"), nullable=True, index=True)
+    trace_id: Mapped[str] = mapped_column(Text, nullable=False)
+    span_id: Mapped[str] = mapped_column(Text, nullable=False)
+    parent_span_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False, default="client")
+    service: Mapped[str | None] = mapped_column(Text, nullable=True)
+    feature: Mapped[str | None] = mapped_column(Text, nullable=True)
+    platform: Mapped[str | None] = mapped_column(Text, nullable=True)
+    capture_mode: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    release: Mapped[str | None] = mapped_column(Text, nullable=True)
+    environment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    visitor_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attributes: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    start_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
+    duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     received_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
