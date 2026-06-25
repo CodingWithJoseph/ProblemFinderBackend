@@ -3243,6 +3243,117 @@ async def get_timeseries(
     }
 
 
+def _explorer_health(error_rate: float | None, lcp_rating: str | None, loads: int) -> str:
+    """One-glance verdict per page: error rate dominates, then felt-speed."""
+    if not loads:
+        return "no-data"
+    if error_rate is not None and error_rate >= 0.05:
+        return "unhealthy"
+    if lcp_rating == "poor" or (error_rate is not None and error_rate >= 0.01):
+        return "warning"
+    return "healthy"
+
+
+@router.get("/{pipeline_id}/explorer")
+async def get_explorer(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Multi-metric explorer: one row per page with loads, error rate, felt-speed
+    (LCP p75 + rating), a health badge, and a per-row loads sparkline — the
+    sortable 'where do I look first' table."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    source = await _usage_source(pipeline_id, db)
+    usage_window = eff.analytics_usage_window_days
+    since = _now() - timedelta(days=usage_window)
+    window_dates = sorted(_empty_daily(usage_window).keys())
+
+    load_rows = (await db.execute(
+        select(PortfolioUsageEvent.url, func.count(PortfolioUsageEvent.id))
+        .where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.occurred_at >= since,
+            PortfolioUsageEvent.event_type == "pageview",
+            PortfolioUsageEvent.url != None,
+        )
+        .group_by(PortfolioUsageEvent.url)
+        .order_by(func.count(PortfolioUsageEvent.id).desc())
+        .limit(25)
+    )).all()
+    urls = [url for url, _ in load_rows]
+
+    error_rows = (await db.execute(
+        select(PortfolioErrorEvent.url, func.count(PortfolioErrorEvent.id))
+        .where(
+            PortfolioErrorEvent.pipeline_id == pipeline_id,
+            PortfolioErrorEvent.occurred_at >= since,
+            PortfolioErrorEvent.url.in_(urls) if urls else False,
+        )
+        .group_by(PortfolioErrorEvent.url)
+    )).all()
+    errors_by_url = {url: int(count) for url, count in error_rows}
+
+    lcp_rows = (await db.execute(
+        select(
+            PortfolioWebVital.url,
+            func.percentile_cont(0.75).within_group(PortfolioWebVital.value.asc()),
+        )
+        .where(
+            PortfolioWebVital.pipeline_id == pipeline_id,
+            PortfolioWebVital.occurred_at >= since,
+            PortfolioWebVital.metric == "LCP",
+            PortfolioWebVital.url.in_(urls) if urls else False,
+        )
+        .group_by(PortfolioWebVital.url)
+    )).all()
+    lcp_by_url = {url: p75 for url, p75 in lcp_rows}
+
+    spark_rows = (await db.execute(
+        select(PortfolioUsageEvent.url, func.date(PortfolioUsageEvent.occurred_at), func.count(PortfolioUsageEvent.id))
+        .where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.occurred_at >= since,
+            PortfolioUsageEvent.event_type == "pageview",
+            PortfolioUsageEvent.url.in_(urls) if urls else False,
+        )
+        .group_by(PortfolioUsageEvent.url, func.date(PortfolioUsageEvent.occurred_at))
+    )).all()
+    spark_by_url: dict[str, dict[str, int]] = {}
+    for url, day, count in spark_rows:
+        key = day.isoformat() if hasattr(day, "isoformat") else str(day)
+        spark_by_url.setdefault(url, {})[key] = int(count)
+
+    rows = []
+    for url, loads in load_rows:
+        loads = int(loads)
+        errors = errors_by_url.get(url, 0)
+        error_rate = round(errors / loads, 4) if loads else None
+        lcp_p75 = _round_vital("LCP", lcp_by_url.get(url))
+        lcp_rating = _rate_vital("LCP", lcp_p75)
+        daily = spark_by_url.get(url, {})
+        rows.append({
+            "url": url,
+            "loads": loads,
+            "errors": errors,
+            "errorRate": error_rate,
+            "lcpP75": lcp_p75,
+            "lcpRating": lcp_rating,
+            "health": _explorer_health(error_rate, lcp_rating, loads),
+            "spark": [daily.get(d, 0) for d in window_dates],
+        })
+
+    return {
+        "data": {
+            "source": _serialize_usage_source(source),
+            "connected": source is not None,
+            "windowDays": usage_window,
+            "rows": rows,
+        }
+    }
+
+
 @router.get("/{pipeline_id}/traces/{trace_id}")
 async def get_trace(
     pipeline_id: str,
