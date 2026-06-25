@@ -34,6 +34,7 @@ from app.models import (
     PortfolioMrrMovement,
     PortfolioRevenueSource,
     PortfolioLog,
+    PortfolioSpan,
     PortfolioUsageEvent,
     PortfolioUsageSource,
     PortfolioWebVital,
@@ -316,6 +317,8 @@ def _serialize_error_event(event: PortfolioErrorEvent) -> dict:
         "url": event.url,
         "release": event.release,
         "environment": event.environment,
+        "traceId": event.trace_id,
+        "spanId": event.span_id,
         "visitorId": event.visitor_id,
         "sessionId": event.session_id,
         "userId": event.user_ref,
@@ -323,6 +326,58 @@ def _serialize_error_event(event: PortfolioErrorEvent) -> dict:
         "occurredAt": _iso(event.occurred_at),
         "receivedAt": _iso(event.received_at),
     }
+
+
+def _serialize_span(span: PortfolioSpan, depth: int = 0) -> dict:
+    return {
+        "id": span.id,
+        "traceId": span.trace_id,
+        "spanId": span.span_id,
+        "parentSpanId": span.parent_span_id,
+        "name": span.name,
+        "kind": span.kind,
+        "service": span.service,
+        "feature": span.feature,
+        "platform": span.platform,
+        "status": span.status,
+        "release": span.release,
+        "environment": span.environment,
+        "durationMs": span.duration_ms,
+        "startAt": _iso(span.start_at),
+        "attributes": span.attributes or {},
+        "depth": depth,
+    }
+
+
+def _order_span_tree(spans: list) -> list[tuple]:
+    """Preorder spans into a parent→child tree with depth. A span whose parent
+    isn't in the trace (e.g. a server span whose client parent was sampled out)
+    is treated as a root. Visited-guarded so a malformed parent cycle can't loop,
+    and any span not reached from a root is appended so nothing is dropped."""
+    ids = {s.span_id for s in spans}
+    by_parent: dict = {}
+    for s in spans:
+        key = s.parent_span_id if s.parent_span_id in ids else None
+        by_parent.setdefault(key, []).append(s)
+    for children in by_parent.values():
+        children.sort(key=lambda s: s.start_at or datetime.min.replace(tzinfo=timezone.utc))
+
+    ordered: list[tuple] = []
+    visited: set = set()
+
+    def walk(parent_key, depth):
+        for s in by_parent.get(parent_key, []):
+            if s.span_id in visited:
+                continue
+            visited.add(s.span_id)
+            ordered.append((s, depth))
+            walk(s.span_id, depth + 1)
+
+    walk(None, 0)
+    for s in spans:
+        if s.span_id not in visited:
+            ordered.append((s, 0))
+    return ordered
 
 
 def _selected_mrr(source: PortfolioRevenueSource | None, engine: str) -> tuple[int | None, int | None]:
@@ -3095,6 +3150,66 @@ async def get_session_detail(
                 "errors": len(error_events),
             },
             "timeline": timeline,
+        }
+    }
+
+
+@router.get("/{pipeline_id}/traces/{trace_id}")
+async def get_trace(
+    pipeline_id: str,
+    trace_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """One trace, assembled into the incident chain: the span tree (client root →
+    fetch → server) with the errors and logs that share the trace_id pinned to
+    it, so a frontend error can be followed to the backend work that caused it."""
+    await _require_launched_product(pipeline_id, db, uid)
+
+    spans = list((await db.execute(
+        select(PortfolioSpan)
+        .where(PortfolioSpan.pipeline_id == pipeline_id, PortfolioSpan.trace_id == trace_id)
+        .order_by(PortfolioSpan.start_at.asc())
+    )).scalars().all())
+    errors = list((await db.execute(
+        select(PortfolioErrorEvent)
+        .where(PortfolioErrorEvent.pipeline_id == pipeline_id, PortfolioErrorEvent.trace_id == trace_id)
+        .order_by(PortfolioErrorEvent.occurred_at.asc())
+    )).scalars().all())
+    logs = list((await db.execute(
+        select(PortfolioLog)
+        .where(PortfolioLog.pipeline_id == pipeline_id, PortfolioLog.trace_id == trace_id)
+        .order_by(PortfolioLog.occurred_at.asc())
+    )).scalars().all())
+
+    span_payloads = [_serialize_span(span, depth) for span, depth in _order_span_tree(spans)]
+    services: list[str] = []
+    for span in spans:
+        if span.service and span.service not in services:
+            services.append(span.service)
+    durations = [s.duration_ms for s in spans if s.duration_ms is not None]
+
+    return {
+        "data": {
+            "traceId": trace_id,
+            "spans": span_payloads,
+            "errors": [_serialize_error_event(e) for e in errors],
+            "logs": [{
+                "id": log.id,
+                "level": log.level,
+                "message": log.message,
+                "url": log.url,
+                "spanId": log.span_id,
+                "occurredAt": _iso(log.occurred_at),
+            } for log in logs],
+            "summary": {
+                "spanCount": len(spans),
+                "errorCount": len(errors),
+                "logCount": len(logs),
+                "services": services,
+                "hasServer": any(s.kind == "server" for s in spans),
+                "durationMs": max(durations) if durations else None,
+            },
         }
     }
 
