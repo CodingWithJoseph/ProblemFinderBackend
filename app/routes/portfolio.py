@@ -75,6 +75,11 @@ class UsageEventBody(BaseModel):
     referrer: str | None = None
     release: str | None = Field(default=None, max_length=128)
     environment: str | None = Field(default=None, max_length=64)
+    trace_id: str | None = Field(default=None, max_length=64)
+    span_id: str | None = Field(default=None, max_length=64)
+    parent_span_id: str | None = Field(default=None, max_length=64)
+    platform: str | None = Field(default=None, max_length=20)
+    capture_mode: str | None = Field(default=None, max_length=10)
     metadata: dict | None = None
     occurred_at: datetime | None = None
 
@@ -86,9 +91,15 @@ class ErrorEventBody(BaseModel):
     stack: str | None = Field(default=None, max_length=20000)
     level: ErrorLevel = "error"
     handled: bool | None = None
+    error_type: str | None = Field(default=None, max_length=40)
     url: str | None = None
     release: str | None = Field(default=None, max_length=128)
     environment: str | None = Field(default=None, max_length=64)
+    trace_id: str | None = Field(default=None, max_length=64)
+    span_id: str | None = Field(default=None, max_length=64)
+    parent_span_id: str | None = Field(default=None, max_length=64)
+    platform: str | None = Field(default=None, max_length=20)
+    capture_mode: str | None = Field(default=None, max_length=10)
     visitor_id: str | None = None
     session_id: str | None = None
     user_id: str | None = Field(default=None, max_length=256)
@@ -126,6 +137,10 @@ class VitalBody(BaseModel):
     user_id: str | None = Field(default=None, max_length=256)
     release: str | None = Field(default=None, max_length=128)
     environment: str | None = Field(default=None, max_length=64)
+    trace_id: str | None = Field(default=None, max_length=64)
+    span_id: str | None = Field(default=None, max_length=64)
+    parent_span_id: str | None = Field(default=None, max_length=64)
+    platform: str | None = Field(default=None, max_length=20)
     occurred_at: datetime | None = None
 
 
@@ -141,6 +156,10 @@ class LogBody(BaseModel):
     user_id: str | None = Field(default=None, max_length=256)
     release: str | None = Field(default=None, max_length=128)
     environment: str | None = Field(default=None, max_length=64)
+    trace_id: str | None = Field(default=None, max_length=64)
+    span_id: str | None = Field(default=None, max_length=64)
+    parent_span_id: str | None = Field(default=None, max_length=64)
+    platform: str | None = Field(default=None, max_length=20)
     occurred_at: datetime | None = None
 
 
@@ -164,10 +183,17 @@ class BatchItem(BaseModel):
     navigation_id: str | None = Field(default=None, max_length=128)
     # log field
     log_level: LogLevel | None = None
+    # error dimension
+    error_type: str | None = Field(default=None, max_length=40)
     # shared envelope
     url: str | None = None
     release: str | None = Field(default=None, max_length=128)
     environment: str | None = Field(default=None, max_length=64)
+    trace_id: str | None = Field(default=None, max_length=64)
+    span_id: str | None = Field(default=None, max_length=64)
+    parent_span_id: str | None = Field(default=None, max_length=64)
+    platform: str | None = Field(default=None, max_length=20)
+    capture_mode: str | None = Field(default=None, max_length=10)
     visitor_id: str | None = None
     session_id: str | None = None
     user_id: str | None = Field(default=None, max_length=256)
@@ -4003,7 +4029,7 @@ def _rate_vital(metric: str, value: float | None) -> str | None:
     return "poor"
 
 
-def _record_web_vital(source, *, metric, value, rating, url, navigation_id, visitor_id, session_id, user_ref, release, environment, occurred_at, now):
+def _record_web_vital(source, *, metric, value, rating, url, navigation_id, visitor_id, session_id, user_ref, release, environment, occurred_at, now, trace_id=None, span_id=None, parent_span_id=None, platform=None):
     """Build a web-vital row (not committed). Rating falls back to the
     threshold-derived value when the client didn't send one. Shared by the
     single /vitals endpoint and /batch."""
@@ -4021,12 +4047,16 @@ def _record_web_vital(source, *, metric, value, rating, url, navigation_id, visi
         user_ref=user_ref,
         release=release,
         environment=environment,
+        trace_id=trace_id,
+        span_id=span_id,
+        parent_span_id=parent_span_id,
+        platform=platform,
         occurred_at=occurred_at or now,
         received_at=now,
     )
 
 
-def _record_log(source, *, level, message, metadata, url, visitor_id, session_id, user_ref, release, environment, occurred_at, now):
+def _record_log(source, *, level, message, metadata, url, visitor_id, session_id, user_ref, release, environment, occurred_at, now, trace_id=None, span_id=None, parent_span_id=None, platform=None):
     """Build a log row (not committed). Shared by the single /logs endpoint and
     /batch."""
     return PortfolioLog(
@@ -4042,12 +4072,16 @@ def _record_log(source, *, level, message, metadata, url, visitor_id, session_id
         user_ref=user_ref,
         release=release,
         environment=environment,
+        trace_id=trace_id,
+        span_id=span_id,
+        parent_span_id=parent_span_id,
+        platform=platform,
         occurred_at=occurred_at or now,
         received_at=now,
     )
 
 
-def _build_usage_event(source, *, event_type, visitor_id, session_id, user_ref, url, referrer, release, environment, metadata, occurred_at, now):
+def _build_usage_event(source, *, event_type, visitor_id, session_id, user_ref, url, referrer, release, environment, metadata, occurred_at, now, trace_id=None, span_id=None, parent_span_id=None, platform=None, capture_mode=None):
     """Build a usage event row (not added/committed). Shared by the single
     `/events` endpoint and `/batch` so both store identical shapes."""
     return PortfolioUsageEvent(
@@ -4062,13 +4096,18 @@ def _build_usage_event(source, *, event_type, visitor_id, session_id, user_ref, 
         referrer=referrer,
         release=release,
         environment=environment,
+        trace_id=trace_id,
+        span_id=span_id,
+        parent_span_id=parent_span_id,
+        platform=platform,
+        capture_mode=capture_mode,
         event_metadata=metadata or {},
         occurred_at=occurred_at or now,
         received_at=now,
     )
 
 
-async def _record_error_event(source, db, *, message, stack, level, handled, url, release, environment, visitor_id, session_id, user_ref, metadata, occurred_at, now):
+async def _record_error_event(source, db, *, message, stack, level, handled, url, release, environment, visitor_id, session_id, user_ref, metadata, occurred_at, now, error_type=None, trace_id=None, span_id=None, parent_span_id=None, platform=None, capture_mode=None):
     """Upsert the fingerprint group and add the error event (not committed).
     Shared by the single `/errors` endpoint and `/batch` so grouping, regression
     reopen, and first/last-seen tracking stay identical across both."""
@@ -4085,6 +4124,7 @@ async def _record_error_event(source, db, *, message, stack, level, handled, url
             fingerprint=fingerprint,
             title=title,
             level=level,
+            error_type=error_type,
             status="unresolved",
             event_count=1,
             last_release=release,
@@ -4102,6 +4142,8 @@ async def _record_error_event(source, db, *, message, stack, level, handled, url
             group.first_seen_at = occurred
         if release:
             group.last_release = release
+        if error_type and not group.error_type:
+            group.error_type = error_type
         # Regression: a previously resolved issue is happening again → reopen it.
         if group.status == "resolved":
             group.status = "unresolved"
@@ -4117,9 +4159,15 @@ async def _record_error_event(source, db, *, message, stack, level, handled, url
         stack=stack,
         level=level,
         handled=handled,
+        error_type=error_type,
         url=url,
         release=release,
         environment=environment,
+        trace_id=trace_id,
+        span_id=span_id,
+        parent_span_id=parent_span_id,
+        platform=platform,
+        capture_mode=capture_mode,
         visitor_id=visitor_id,
         session_id=session_id,
         user_ref=user_ref,
@@ -4161,6 +4209,11 @@ async def ingest_usage_event(
         referrer=body.referrer,
         release=body.release,
         environment=body.environment,
+        trace_id=body.trace_id,
+        span_id=body.span_id,
+        parent_span_id=body.parent_span_id,
+        platform=body.platform,
+        capture_mode=body.capture_mode,
         metadata=body.metadata,
         occurred_at=body.occurred_at,
         now=now,
@@ -4275,9 +4328,15 @@ async def ingest_error_event(
         stack=body.stack,
         level=body.level,
         handled=body.handled,
+        error_type=body.error_type,
         url=body.url,
         release=body.release,
         environment=body.environment,
+        trace_id=body.trace_id,
+        span_id=body.span_id,
+        parent_span_id=body.parent_span_id,
+        platform=body.platform,
+        capture_mode=body.capture_mode,
         visitor_id=body.visitor_id,
         session_id=body.session_id,
         user_ref=body.user_id,
@@ -4323,6 +4382,10 @@ async def ingest_vital(
         user_ref=body.user_id,
         release=body.release,
         environment=body.environment,
+        trace_id=body.trace_id,
+        span_id=body.span_id,
+        parent_span_id=body.parent_span_id,
+        platform=body.platform,
         occurred_at=body.occurred_at,
         now=now,
     ))
@@ -4363,6 +4426,10 @@ async def ingest_log(
         user_ref=body.user_id,
         release=body.release,
         environment=body.environment,
+        trace_id=body.trace_id,
+        span_id=body.span_id,
+        parent_span_id=body.parent_span_id,
+        platform=body.platform,
         occurred_at=body.occurred_at,
         now=now,
     ))
@@ -4413,6 +4480,11 @@ async def ingest_batch(
                 referrer=item.referrer,
                 release=item.release,
                 environment=item.environment,
+                trace_id=item.trace_id,
+                span_id=item.span_id,
+                parent_span_id=item.parent_span_id,
+                platform=item.platform,
+                capture_mode=item.capture_mode,
                 metadata=item.metadata,
                 occurred_at=item.occurred_at,
                 now=now,
@@ -4427,9 +4499,15 @@ async def ingest_batch(
                 stack=item.stack,
                 level=item.level,
                 handled=item.handled,
+                error_type=item.error_type,
                 url=item.url,
                 release=item.release,
                 environment=item.environment,
+                trace_id=item.trace_id,
+                span_id=item.span_id,
+                parent_span_id=item.parent_span_id,
+                platform=item.platform,
+                capture_mode=item.capture_mode,
                 visitor_id=item.visitor_id,
                 session_id=item.session_id,
                 user_ref=item.user_id,
@@ -4453,6 +4531,10 @@ async def ingest_batch(
                 user_ref=item.user_id,
                 release=item.release,
                 environment=item.environment,
+                trace_id=item.trace_id,
+                span_id=item.span_id,
+                parent_span_id=item.parent_span_id,
+                platform=item.platform,
                 occurred_at=item.occurred_at,
                 now=now,
             ))
@@ -4471,6 +4553,10 @@ async def ingest_batch(
                 user_ref=item.user_id,
                 release=item.release,
                 environment=item.environment,
+                trace_id=item.trace_id,
+                span_id=item.span_id,
+                parent_span_id=item.parent_span_id,
+                platform=item.platform,
                 occurred_at=item.occurred_at,
                 now=now,
             ))
