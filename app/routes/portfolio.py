@@ -3165,6 +3165,177 @@ async def get_session_detail(
     }
 
 
+def _explorer_health(error_rate: float | None, lcp_rating: str | None, loads: int) -> str:
+    """One-glance verdict per page: error rate dominates, then felt-speed."""
+    if not loads:
+        return "no-data"
+    if error_rate is not None and error_rate >= 0.05:
+        return "unhealthy"
+    if lcp_rating == "poor" or (error_rate is not None and error_rate >= 0.01):
+        return "warning"
+    return "healthy"
+
+
+@router.get("/{pipeline_id}/explorer")
+async def get_explorer(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Multi-metric explorer: one row per page with loads, error rate, felt-speed
+    (LCP p75 + rating), a health badge, and a per-row loads sparkline — the
+    sortable 'where do I look first' table."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    source = await _usage_source(pipeline_id, db)
+    usage_window = eff.analytics_usage_window_days
+    since = _now() - timedelta(days=usage_window)
+    window_dates = sorted(_empty_daily(usage_window).keys())
+
+    load_rows = (await db.execute(
+        select(PortfolioUsageEvent.url, func.count(PortfolioUsageEvent.id))
+        .where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.occurred_at >= since,
+            PortfolioUsageEvent.event_type == "pageview",
+            PortfolioUsageEvent.url != None,
+        )
+        .group_by(PortfolioUsageEvent.url)
+        .order_by(func.count(PortfolioUsageEvent.id).desc())
+        .limit(25)
+    )).all()
+    urls = [url for url, _ in load_rows]
+
+    error_rows = (await db.execute(
+        select(PortfolioErrorEvent.url, func.count(PortfolioErrorEvent.id))
+        .where(
+            PortfolioErrorEvent.pipeline_id == pipeline_id,
+            PortfolioErrorEvent.occurred_at >= since,
+            PortfolioErrorEvent.url.in_(urls) if urls else False,
+        )
+        .group_by(PortfolioErrorEvent.url)
+    )).all()
+    errors_by_url = {url: int(count) for url, count in error_rows}
+
+    lcp_rows = (await db.execute(
+        select(
+            PortfolioWebVital.url,
+            func.percentile_cont(0.75).within_group(PortfolioWebVital.value.asc()),
+        )
+        .where(
+            PortfolioWebVital.pipeline_id == pipeline_id,
+            PortfolioWebVital.occurred_at >= since,
+            PortfolioWebVital.metric == "LCP",
+            PortfolioWebVital.url.in_(urls) if urls else False,
+        )
+        .group_by(PortfolioWebVital.url)
+    )).all()
+    lcp_by_url = {url: p75 for url, p75 in lcp_rows}
+
+    spark_rows = (await db.execute(
+        select(PortfolioUsageEvent.url, func.date(PortfolioUsageEvent.occurred_at), func.count(PortfolioUsageEvent.id))
+        .where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.occurred_at >= since,
+            PortfolioUsageEvent.event_type == "pageview",
+            PortfolioUsageEvent.url.in_(urls) if urls else False,
+        )
+        .group_by(PortfolioUsageEvent.url, func.date(PortfolioUsageEvent.occurred_at))
+    )).all()
+    spark_by_url: dict[str, dict[str, int]] = {}
+    for url, day, count in spark_rows:
+        key = day.isoformat() if hasattr(day, "isoformat") else str(day)
+        spark_by_url.setdefault(url, {})[key] = int(count)
+
+    rows = []
+    for url, loads in load_rows:
+        loads = int(loads)
+        errors = errors_by_url.get(url, 0)
+        error_rate = round(errors / loads, 4) if loads else None
+        lcp_p75 = _round_vital("LCP", lcp_by_url.get(url))
+        lcp_rating = _rate_vital("LCP", lcp_p75)
+        daily = spark_by_url.get(url, {})
+        rows.append({
+            "url": url,
+            "loads": loads,
+            "errors": errors,
+            "errorRate": error_rate,
+            "lcpP75": lcp_p75,
+            "lcpRating": lcp_rating,
+            "health": _explorer_health(error_rate, lcp_rating, loads),
+            "spark": [daily.get(d, 0) for d in window_dates],
+        })
+
+    return {
+        "data": {
+            "source": _serialize_usage_source(source),
+            "connected": source is not None,
+            "windowDays": usage_window,
+            "rows": rows,
+        }
+    }
+
+
+@router.get("/{pipeline_id}/traces/{trace_id}")
+async def get_trace(
+    pipeline_id: str,
+    trace_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """One trace, assembled into the incident chain: the span tree (client root →
+    fetch → server) with the errors and logs that share the trace_id pinned to
+    it, so a frontend error can be followed to the backend work that caused it."""
+    await _require_launched_product(pipeline_id, db, uid)
+
+    spans = list((await db.execute(
+        select(PortfolioSpan)
+        .where(PortfolioSpan.pipeline_id == pipeline_id, PortfolioSpan.trace_id == trace_id)
+        .order_by(PortfolioSpan.start_at.asc())
+    )).scalars().all())
+    errors = list((await db.execute(
+        select(PortfolioErrorEvent)
+        .where(PortfolioErrorEvent.pipeline_id == pipeline_id, PortfolioErrorEvent.trace_id == trace_id)
+        .order_by(PortfolioErrorEvent.occurred_at.asc())
+    )).scalars().all())
+    logs = list((await db.execute(
+        select(PortfolioLog)
+        .where(PortfolioLog.pipeline_id == pipeline_id, PortfolioLog.trace_id == trace_id)
+        .order_by(PortfolioLog.occurred_at.asc())
+    )).scalars().all())
+
+    span_payloads = [_serialize_span(span, depth) for span, depth in _order_span_tree(spans)]
+    services: list[str] = []
+    for span in spans:
+        if span.service and span.service not in services:
+            services.append(span.service)
+    durations = [s.duration_ms for s in spans if s.duration_ms is not None]
+
+    return {
+        "data": {
+            "traceId": trace_id,
+            "spans": span_payloads,
+            "errors": [_serialize_error_event(e) for e in errors],
+            "logs": [{
+                "id": log.id,
+                "level": log.level,
+                "message": log.message,
+                "url": log.url,
+                "spanId": log.span_id,
+                "occurredAt": _iso(log.occurred_at),
+            } for log in logs],
+            "summary": {
+                "spanCount": len(spans),
+                "errorCount": len(errors),
+                "logCount": len(logs),
+                "services": services,
+                "hasServer": any(s.kind == "server" for s in spans),
+                "durationMs": max(durations) if durations else None,
+            },
+        }
+    }
+
+
 def _flow_graph(rows, *, max_nodes: int = 30, max_edges: int = 50) -> tuple[list, list]:
     """Build the journey graph from pageviews ordered by (session, time): node =
     page with its visit count, edge = a consecutive page→page hop within one
@@ -3226,66 +3397,6 @@ async def get_flow(
             "windowDays": usage_window,
             "nodes": nodes,
             "edges": edges,
-        }
-    }
-
-
-@router.get("/{pipeline_id}/traces/{trace_id}")
-async def get_trace(
-    pipeline_id: str,
-    trace_id: str,
-    db: AsyncSession = Depends(get_db),
-    uid: str = Depends(get_uid),
-):
-    """One trace, assembled into the incident chain: the span tree (client root →
-    fetch → server) with the errors and logs that share the trace_id pinned to
-    it, so a frontend error can be followed to the backend work that caused it."""
-    await _require_launched_product(pipeline_id, db, uid)
-
-    spans = list((await db.execute(
-        select(PortfolioSpan)
-        .where(PortfolioSpan.pipeline_id == pipeline_id, PortfolioSpan.trace_id == trace_id)
-        .order_by(PortfolioSpan.start_at.asc())
-    )).scalars().all())
-    errors = list((await db.execute(
-        select(PortfolioErrorEvent)
-        .where(PortfolioErrorEvent.pipeline_id == pipeline_id, PortfolioErrorEvent.trace_id == trace_id)
-        .order_by(PortfolioErrorEvent.occurred_at.asc())
-    )).scalars().all())
-    logs = list((await db.execute(
-        select(PortfolioLog)
-        .where(PortfolioLog.pipeline_id == pipeline_id, PortfolioLog.trace_id == trace_id)
-        .order_by(PortfolioLog.occurred_at.asc())
-    )).scalars().all())
-
-    span_payloads = [_serialize_span(span, depth) for span, depth in _order_span_tree(spans)]
-    services: list[str] = []
-    for span in spans:
-        if span.service and span.service not in services:
-            services.append(span.service)
-    durations = [s.duration_ms for s in spans if s.duration_ms is not None]
-
-    return {
-        "data": {
-            "traceId": trace_id,
-            "spans": span_payloads,
-            "errors": [_serialize_error_event(e) for e in errors],
-            "logs": [{
-                "id": log.id,
-                "level": log.level,
-                "message": log.message,
-                "url": log.url,
-                "spanId": log.span_id,
-                "occurredAt": _iso(log.occurred_at),
-            } for log in logs],
-            "summary": {
-                "spanCount": len(spans),
-                "errorCount": len(errors),
-                "logCount": len(logs),
-                "services": services,
-                "hasServer": any(s.kind == "server" for s in spans),
-                "durationMs": max(durations) if durations else None,
-            },
         }
     }
 
