@@ -3099,6 +3099,84 @@ async def get_session_detail(
     }
 
 
+def _series_stats(values: list[int]) -> dict:
+    """Normal-range band for the hero chart: mean +/- 1 stddev over the window
+    (lower clamped at 0). A point outside the band is the 'this is abnormal' cue."""
+    if not values:
+        return {"mean": 0.0, "lower": 0.0, "upper": 0.0}
+    n = len(values)
+    mean = sum(values) / n
+    std = (sum((v - mean) ** 2 for v in values) / n) ** 0.5
+    return {"mean": round(mean, 2), "lower": round(max(0.0, mean - std), 2), "upper": round(mean + std, 2)}
+
+
+@router.get("/{pipeline_id}/timeseries")
+async def get_timeseries(
+    pipeline_id: str,
+    metric: Literal["errors", "loads"] = "errors",
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Over-time hero chart for one metric: daily points over the window, a
+    normal-range baseline band (mean +/- stddev), and deploy markers (the first
+    day each release appeared) so a spike can be read against 'what's normal' and
+    lined up with the deploy that caused it."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    usage_window = eff.analytics_usage_window_days
+    since = _now() - timedelta(days=usage_window)
+    keys = sorted(_empty_daily(usage_window).keys())
+
+    if metric == "errors":
+        series_rows = (await db.execute(
+            select(func.date(PortfolioErrorEvent.occurred_at), func.count(PortfolioErrorEvent.id))
+            .where(PortfolioErrorEvent.pipeline_id == pipeline_id, PortfolioErrorEvent.occurred_at >= since)
+            .group_by(func.date(PortfolioErrorEvent.occurred_at))
+        )).all()
+    else:
+        series_rows = (await db.execute(
+            select(func.date(PortfolioUsageEvent.occurred_at), func.count(PortfolioUsageEvent.id))
+            .where(
+                PortfolioUsageEvent.pipeline_id == pipeline_id,
+                PortfolioUsageEvent.occurred_at >= since,
+                PortfolioUsageEvent.event_type == "pageview",
+            )
+            .group_by(func.date(PortfolioUsageEvent.occurred_at))
+        )).all()
+    counts: dict[str, int] = {}
+    for day, count in series_rows:
+        key = day.isoformat() if hasattr(day, "isoformat") else str(day)
+        counts[key] = int(count)
+    points = [{"date": key, "value": counts.get(key, 0)} for key in keys]
+    baseline = _series_stats([p["value"] for p in points])
+
+    # Deploy markers: the first day each release was seen (a release rollout).
+    marker_rows = (await db.execute(
+        select(PortfolioUsageEvent.release, func.min(func.date(PortfolioUsageEvent.occurred_at)))
+        .where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.occurred_at >= since,
+            PortfolioUsageEvent.release != None,
+        )
+        .group_by(PortfolioUsageEvent.release)
+    )).all()
+    markers = []
+    for release, first_day in marker_rows:
+        key = first_day.isoformat() if hasattr(first_day, "isoformat") else str(first_day)
+        markers.append({"date": key, "release": release})
+    markers.sort(key=lambda m: m["date"])
+
+    return {
+        "data": {
+            "metric": metric,
+            "windowDays": usage_window,
+            "points": points,
+            "baseline": baseline,
+            "markers": markers,
+        }
+    }
+
+
 def _round_vital(metric: str, value) -> float | None:
     if value is None:
         return None
