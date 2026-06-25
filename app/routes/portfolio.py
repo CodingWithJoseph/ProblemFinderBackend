@@ -3099,6 +3099,71 @@ async def get_session_detail(
     }
 
 
+def _flow_graph(rows, *, max_nodes: int = 30, max_edges: int = 50) -> tuple[list, list]:
+    """Build the journey graph from pageviews ordered by (session, time): node =
+    page with its visit count, edge = a consecutive page→page hop within one
+    session (self-hops/refreshes dropped). Edges are kept only between the top
+    nodes so the graph stays readable."""
+    visits: dict[str, int] = {}
+    edges: dict[tuple, int] = {}
+    prev_session = None
+    prev_url = None
+    for session_id, url, _ in rows:
+        visits[url] = visits.get(url, 0) + 1
+        if session_id == prev_session and prev_url is not None and prev_url != url:
+            key = (prev_url, url)
+            edges[key] = edges.get(key, 0) + 1
+        prev_session = session_id
+        prev_url = url
+
+    top = sorted(visits.items(), key=lambda kv: kv[1], reverse=True)[:max_nodes]
+    node_set = {url for url, _ in top}
+    nodes = [{"url": url, "visits": count} for url, count in top]
+    edge_list = [
+        {"from": a, "to": b, "count": count}
+        for (a, b), count in sorted(edges.items(), key=lambda kv: kv[1], reverse=True)
+        if a in node_set and b in node_set
+    ][:max_edges]
+    return nodes, edge_list
+
+
+@router.get("/{pipeline_id}/flow")
+async def get_flow(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Journey / flow graph: how one page leads into the next, aggregated from
+    the ordered pageviews within each session — the top entry pages and the most
+    common page→page paths."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    usage_window = eff.analytics_usage_window_days
+    since = _now() - timedelta(days=usage_window)
+
+    rows = (await db.execute(
+        select(PortfolioUsageEvent.session_id, PortfolioUsageEvent.url, PortfolioUsageEvent.occurred_at)
+        .where(
+            PortfolioUsageEvent.pipeline_id == pipeline_id,
+            PortfolioUsageEvent.occurred_at >= since,
+            PortfolioUsageEvent.event_type == "pageview",
+            PortfolioUsageEvent.session_id != None,
+            PortfolioUsageEvent.url != None,
+        )
+        .order_by(PortfolioUsageEvent.session_id.asc(), PortfolioUsageEvent.occurred_at.asc())
+        .limit(5000)
+    )).all()
+    nodes, edges = _flow_graph(rows)
+
+    return {
+        "data": {
+            "windowDays": usage_window,
+            "nodes": nodes,
+            "edges": edges,
+        }
+    }
+
+
 def _round_vital(metric: str, value) -> float | None:
     if value is None:
         return None
