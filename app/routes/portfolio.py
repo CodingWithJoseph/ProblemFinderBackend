@@ -34,6 +34,7 @@ from app.models import (
     PortfolioMrrMovement,
     PortfolioRevenueSource,
     PortfolioLog,
+    PortfolioSpan,
     PortfolioUsageEvent,
     PortfolioUsageSource,
     PortfolioWebVital,
@@ -167,10 +168,18 @@ class BatchItem(BaseModel):
     """One event in a batch. `kind` discriminates a usage event from an error, a
     web vital, or a log so each storage path (and error grouping) stays identical
     to the single endpoints."""
-    kind: Literal["event", "error", "vital", "log"]
+    kind: Literal["event", "error", "vital", "log", "span"]
     # usage-event field
     event_type: UsageEventType | None = None
     referrer: str | None = None
+    # span fields (kind == "span"). span_kind is the span's own client/server/
+    # internal role, distinct from the batch discriminator above.
+    name: str | None = Field(default=None, max_length=200)
+    span_kind: str | None = Field(default=None, max_length=20)
+    service: str | None = Field(default=None, max_length=60)
+    feature: str | None = Field(default=None, max_length=120)
+    status: str | None = Field(default=None, max_length=20)
+    duration_ms: float | None = None
     # error fields
     message: str | None = Field(default=None, max_length=4000)
     stack: str | None = Field(default=None, max_length=20000)
@@ -293,6 +302,7 @@ def _serialize_error_group(group: PortfolioErrorGroup, affected_sessions: int | 
         "title": group.title,
         "level": group.level,
         "status": group.status,
+        "errorType": group.error_type,
         "eventCount": int(group.event_count or 0),
         "lastRelease": group.last_release,
         "firstSeenAt": _iso(group.first_seen_at),
@@ -313,9 +323,13 @@ def _serialize_error_event(event: PortfolioErrorEvent) -> dict:
         "stack": event.stack,
         "level": event.level,
         "handled": event.handled,
+        "errorType": event.error_type,
+        "platform": event.platform,
         "url": event.url,
         "release": event.release,
         "environment": event.environment,
+        "traceId": event.trace_id,
+        "spanId": event.span_id,
         "visitorId": event.visitor_id,
         "sessionId": event.session_id,
         "userId": event.user_ref,
@@ -323,6 +337,58 @@ def _serialize_error_event(event: PortfolioErrorEvent) -> dict:
         "occurredAt": _iso(event.occurred_at),
         "receivedAt": _iso(event.received_at),
     }
+
+
+def _serialize_span(span: PortfolioSpan, depth: int = 0) -> dict:
+    return {
+        "id": span.id,
+        "traceId": span.trace_id,
+        "spanId": span.span_id,
+        "parentSpanId": span.parent_span_id,
+        "name": span.name,
+        "kind": span.kind,
+        "service": span.service,
+        "feature": span.feature,
+        "platform": span.platform,
+        "status": span.status,
+        "release": span.release,
+        "environment": span.environment,
+        "durationMs": span.duration_ms,
+        "startAt": _iso(span.start_at),
+        "attributes": span.attributes or {},
+        "depth": depth,
+    }
+
+
+def _order_span_tree(spans: list) -> list[tuple]:
+    """Preorder spans into a parent→child tree with depth. A span whose parent
+    isn't in the trace (e.g. a server span whose client parent was sampled out)
+    is treated as a root. Visited-guarded so a malformed parent cycle can't loop,
+    and any span not reached from a root is appended so nothing is dropped."""
+    ids = {s.span_id for s in spans}
+    by_parent: dict = {}
+    for s in spans:
+        key = s.parent_span_id if s.parent_span_id in ids else None
+        by_parent.setdefault(key, []).append(s)
+    for children in by_parent.values():
+        children.sort(key=lambda s: s.start_at or datetime.min.replace(tzinfo=timezone.utc))
+
+    ordered: list[tuple] = []
+    visited: set = set()
+
+    def walk(parent_key, depth):
+        for s in by_parent.get(parent_key, []):
+            if s.span_id in visited:
+                continue
+            visited.add(s.span_id)
+            ordered.append((s, depth))
+            walk(s.span_id, depth + 1)
+
+    walk(None, 0)
+    for s in spans:
+        if s.span_id not in visited:
+            ordered.append((s, 0))
+    return ordered
 
 
 def _selected_mrr(source: PortfolioRevenueSource | None, engine: str) -> tuple[int | None, int | None]:
@@ -3164,6 +3230,66 @@ async def get_flow(
     }
 
 
+@router.get("/{pipeline_id}/traces/{trace_id}")
+async def get_trace(
+    pipeline_id: str,
+    trace_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """One trace, assembled into the incident chain: the span tree (client root →
+    fetch → server) with the errors and logs that share the trace_id pinned to
+    it, so a frontend error can be followed to the backend work that caused it."""
+    await _require_launched_product(pipeline_id, db, uid)
+
+    spans = list((await db.execute(
+        select(PortfolioSpan)
+        .where(PortfolioSpan.pipeline_id == pipeline_id, PortfolioSpan.trace_id == trace_id)
+        .order_by(PortfolioSpan.start_at.asc())
+    )).scalars().all())
+    errors = list((await db.execute(
+        select(PortfolioErrorEvent)
+        .where(PortfolioErrorEvent.pipeline_id == pipeline_id, PortfolioErrorEvent.trace_id == trace_id)
+        .order_by(PortfolioErrorEvent.occurred_at.asc())
+    )).scalars().all())
+    logs = list((await db.execute(
+        select(PortfolioLog)
+        .where(PortfolioLog.pipeline_id == pipeline_id, PortfolioLog.trace_id == trace_id)
+        .order_by(PortfolioLog.occurred_at.asc())
+    )).scalars().all())
+
+    span_payloads = [_serialize_span(span, depth) for span, depth in _order_span_tree(spans)]
+    services: list[str] = []
+    for span in spans:
+        if span.service and span.service not in services:
+            services.append(span.service)
+    durations = [s.duration_ms for s in spans if s.duration_ms is not None]
+
+    return {
+        "data": {
+            "traceId": trace_id,
+            "spans": span_payloads,
+            "errors": [_serialize_error_event(e) for e in errors],
+            "logs": [{
+                "id": log.id,
+                "level": log.level,
+                "message": log.message,
+                "url": log.url,
+                "spanId": log.span_id,
+                "occurredAt": _iso(log.occurred_at),
+            } for log in logs],
+            "summary": {
+                "spanCount": len(spans),
+                "errorCount": len(errors),
+                "logCount": len(logs),
+                "services": services,
+                "hasServer": any(s.kind == "server" for s in spans),
+                "durationMs": max(durations) if durations else None,
+            },
+        }
+    }
+
+
 def _round_vital(metric: str, value) -> float | None:
     if value is None:
         return None
@@ -3523,9 +3649,61 @@ async def update_alert_settings(
     return {"data": _serialize_alert_settings(AlertPrefs.resolve(row))}
 
 
+def _error_dimension_filters(pipeline_id: str, since, *, error_type: str | None, platform: str | None) -> list:
+    """Group-level WHERE conditions for the error_type / platform dimension
+    filters, shared by the errors + issues lists. error_type is stored on the
+    group; platform lives on events, so a platform filter keeps groups that have
+    at least one occurrence on that platform in the window."""
+    conditions = []
+    if error_type:
+        conditions.append(PortfolioErrorGroup.error_type == error_type)
+    if platform:
+        conditions.append(PortfolioErrorGroup.id.in_(
+            select(PortfolioErrorEvent.group_id).where(
+                PortfolioErrorEvent.pipeline_id == pipeline_id,
+                PortfolioErrorEvent.platform == platform,
+                PortfolioErrorEvent.occurred_at >= since,
+            ).distinct()
+        ))
+    return conditions
+
+
+async def _error_dimension_facets(pipeline_id: str, since, db: AsyncSession) -> dict:
+    """Available error_type / platform values (with counts) over the window, for
+    the filter chips. Computed independent of the active filter so a chip never
+    disappears just because it's selected. error_type is group-grained; platform
+    is event-grained, counted as the distinct groups seen on each platform."""
+    error_type_rows = (await db.execute(
+        select(PortfolioErrorGroup.error_type, func.count(PortfolioErrorGroup.id))
+        .where(
+            PortfolioErrorGroup.pipeline_id == pipeline_id,
+            PortfolioErrorGroup.last_seen_at >= since,
+            PortfolioErrorGroup.error_type.isnot(None),
+        )
+        .group_by(PortfolioErrorGroup.error_type)
+        .order_by(func.count(PortfolioErrorGroup.id).desc())
+    )).all()
+    platform_rows = (await db.execute(
+        select(PortfolioErrorEvent.platform, func.count(func.distinct(PortfolioErrorEvent.group_id)))
+        .where(
+            PortfolioErrorEvent.pipeline_id == pipeline_id,
+            PortfolioErrorEvent.occurred_at >= since,
+            PortfolioErrorEvent.platform.isnot(None),
+        )
+        .group_by(PortfolioErrorEvent.platform)
+        .order_by(func.count(func.distinct(PortfolioErrorEvent.group_id)).desc())
+    )).all()
+    return {
+        "errorType": [{"value": v, "count": int(c)} for v, c in error_type_rows],
+        "platform": [{"value": v, "count": int(c)} for v, c in platform_rows],
+    }
+
+
 @router.get("/{pipeline_id}/errors")
 async def get_error_metrics(
     pipeline_id: str,
+    error_type: str | None = Query(default=None, alias="errorType", max_length=40),
+    platform: str | None = Query(default=None, max_length=20),
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
@@ -3534,6 +3712,15 @@ async def get_error_metrics(
     source = await _usage_source(pipeline_id, db)
     usage_window = eff.analytics_usage_window_days
     since = _now() - timedelta(days=usage_window)
+
+    # The dimension filters ("choose what you want to see") scope the issue list
+    # and recent-error feed; the health headline + trend stay global so the
+    # filter narrows detail without hiding the product's overall error picture.
+    event_filters = []
+    if error_type:
+        event_filters.append(PortfolioErrorEvent.error_type == error_type)
+    if platform:
+        event_filters.append(PortfolioErrorEvent.platform == platform)
 
     total_errors = await db.scalar(
         select(func.count(PortfolioErrorEvent.id)).where(PortfolioErrorEvent.pipeline_id == pipeline_id)
@@ -3587,6 +3774,7 @@ async def get_error_metrics(
         .where(
             PortfolioErrorGroup.pipeline_id == pipeline_id,
             PortfolioErrorGroup.last_seen_at >= since,
+            *_error_dimension_filters(pipeline_id, since, error_type=error_type, platform=platform),
         )
         .order_by(PortfolioErrorGroup.event_count.desc(), PortfolioErrorGroup.last_seen_at.desc())
         .limit(10)
@@ -3605,12 +3793,14 @@ async def get_error_metrics(
 
     recent_errors = list((await db.execute(
         select(PortfolioErrorEvent)
-        .where(PortfolioErrorEvent.pipeline_id == pipeline_id)
+        .where(PortfolioErrorEvent.pipeline_id == pipeline_id, *event_filters)
         .order_by(PortfolioErrorEvent.occurred_at.desc())
         .limit(20)
     )).scalars().all())
 
     errors_per_session = round(int(errors_14d) / int(usage_sessions_14d), 4) if usage_sessions_14d else None
+
+    facets = await _error_dimension_facets(pipeline_id, since, db)
 
     return {
         "data": {
@@ -3631,6 +3821,8 @@ async def get_error_metrics(
                 for group in top_groups
             ],
             "recentErrors": [_serialize_error_event(event) for event in recent_errors],
+            "facets": facets,
+            "filters": {"errorType": error_type, "platform": platform},
         }
     }
 
@@ -3658,6 +3850,7 @@ def _serialize_issue(group: PortfolioErrorGroup, *, affected_users, affected_ses
         "title": group.title,
         "level": group.level,
         "status": group.status,
+        "errorType": group.error_type,
         "lastRelease": group.last_release,
         "firstSeenAt": _iso(group.first_seen_at),
         "lastSeenAt": _iso(group.last_seen_at),
@@ -3672,6 +3865,8 @@ def _serialize_issue(group: PortfolioErrorGroup, *, affected_users, affected_ses
 @router.get("/{pipeline_id}/issues")
 async def get_issues(
     pipeline_id: str,
+    error_type: str | None = Query(default=None, alias="errorType", max_length=40),
+    platform: str | None = Query(default=None, max_length=20),
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
@@ -3736,6 +3931,7 @@ async def get_issues(
         .where(
             PortfolioErrorGroup.pipeline_id == pipeline_id,
             PortfolioErrorGroup.last_seen_at >= since,
+            *_error_dimension_filters(pipeline_id, since, error_type=error_type, platform=platform),
         )
         .limit(200)
     )).scalars().all())
@@ -3754,6 +3950,8 @@ async def get_issues(
     issues.sort(key=lambda issue: (issue["affectedUsers"], issue["occurrences"]), reverse=True)
     issues = issues[:50]
 
+    facets = await _error_dimension_facets(pipeline_id, since, db)
+
     return {
         "data": {
             "source": _serialize_usage_source(source),
@@ -3765,6 +3963,8 @@ async def get_issues(
                 "occurrences": occurrences_total,
             },
             "issues": issues,
+            "facets": facets,
+            "filters": {"errorType": error_type, "platform": platform},
         }
     }
 
@@ -4142,6 +4342,38 @@ def _record_log(source, *, level, message, metadata, url, visitor_id, session_id
         parent_span_id=parent_span_id,
         platform=platform,
         occurred_at=occurred_at or now,
+        received_at=now,
+    )
+
+
+_SPAN_KINDS = ("client", "server", "internal")
+
+
+def _record_span(source, *, trace_id, span_id, parent_span_id, name, kind, service, feature, platform, capture_mode, status, release, environment, visitor_id, session_id, user_ref, attributes, start_at, duration_ms, now):
+    """Build a span row (not committed). Shared by /spans and /batch. kind is
+    clamped to the allowed set so a malformed client can't trip the CHECK."""
+    return PortfolioSpan(
+        id=str(uuid.uuid4()),
+        pipeline_id=source.pipeline_id,
+        source_id=source.id,
+        trace_id=trace_id,
+        span_id=span_id,
+        parent_span_id=parent_span_id,
+        name=str(name)[:200],
+        kind=kind if kind in _SPAN_KINDS else "client",
+        service=service,
+        feature=feature,
+        platform=platform,
+        capture_mode=capture_mode,
+        status=status,
+        release=release,
+        environment=environment,
+        visitor_id=visitor_id,
+        session_id=session_id,
+        user_ref=user_ref,
+        attributes=attributes or {},
+        start_at=start_at or now,
+        duration_ms=duration_ms,
         received_at=now,
     )
 
@@ -4623,6 +4855,32 @@ async def ingest_batch(
                 parent_span_id=item.parent_span_id,
                 platform=item.platform,
                 occurred_at=item.occurred_at,
+                now=now,
+            ))
+            stored += 1
+        elif item.kind == "span":
+            if not item.trace_id or not item.span_id or not item.name:
+                continue
+            db.add(_record_span(
+                source,
+                trace_id=item.trace_id,
+                span_id=item.span_id,
+                parent_span_id=item.parent_span_id,
+                name=item.name,
+                kind=item.span_kind,
+                service=item.service,
+                feature=item.feature,
+                platform=item.platform,
+                capture_mode=item.capture_mode,
+                status=item.status,
+                release=item.release,
+                environment=item.environment,
+                visitor_id=item.visitor_id,
+                session_id=item.session_id,
+                user_ref=item.user_id,
+                attributes=item.metadata,
+                start_at=item.occurred_at,
+                duration_ms=item.duration_ms,
                 now=now,
             ))
             stored += 1
