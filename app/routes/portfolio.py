@@ -293,6 +293,7 @@ def _serialize_error_group(group: PortfolioErrorGroup, affected_sessions: int | 
         "title": group.title,
         "level": group.level,
         "status": group.status,
+        "errorType": group.error_type,
         "eventCount": int(group.event_count or 0),
         "lastRelease": group.last_release,
         "firstSeenAt": _iso(group.first_seen_at),
@@ -313,6 +314,8 @@ def _serialize_error_event(event: PortfolioErrorEvent) -> dict:
         "stack": event.stack,
         "level": event.level,
         "handled": event.handled,
+        "errorType": event.error_type,
+        "platform": event.platform,
         "url": event.url,
         "release": event.release,
         "environment": event.environment,
@@ -3461,6 +3464,8 @@ async def update_alert_settings(
 @router.get("/{pipeline_id}/errors")
 async def get_error_metrics(
     pipeline_id: str,
+    error_type: str | None = Query(default=None, alias="errorType", max_length=40),
+    platform: str | None = Query(default=None, max_length=20),
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
@@ -3469,6 +3474,15 @@ async def get_error_metrics(
     source = await _usage_source(pipeline_id, db)
     usage_window = eff.analytics_usage_window_days
     since = _now() - timedelta(days=usage_window)
+
+    # The dimension filters ("choose what you want to see") scope the issue list
+    # and recent-error feed; the health headline + trend stay global so the
+    # filter narrows detail without hiding the product's overall error picture.
+    event_filters = []
+    if error_type:
+        event_filters.append(PortfolioErrorEvent.error_type == error_type)
+    if platform:
+        event_filters.append(PortfolioErrorEvent.platform == platform)
 
     total_errors = await db.scalar(
         select(func.count(PortfolioErrorEvent.id)).where(PortfolioErrorEvent.pipeline_id == pipeline_id)
@@ -3517,12 +3531,25 @@ async def get_error_metrics(
         if key in daily:
             daily[key]["errors"] += int(count)
 
+    issue_conditions = [
+        PortfolioErrorGroup.pipeline_id == pipeline_id,
+        PortfolioErrorGroup.last_seen_at >= since,
+    ]
+    if error_type:
+        issue_conditions.append(PortfolioErrorGroup.error_type == error_type)
+    if platform:
+        # platform lives on events, not groups → keep groups that have at least
+        # one occurrence on the chosen platform in the window.
+        issue_conditions.append(PortfolioErrorGroup.id.in_(
+            select(PortfolioErrorEvent.group_id).where(
+                PortfolioErrorEvent.pipeline_id == pipeline_id,
+                PortfolioErrorEvent.platform == platform,
+                PortfolioErrorEvent.occurred_at >= since,
+            ).distinct()
+        ))
     top_groups = list((await db.execute(
         select(PortfolioErrorGroup)
-        .where(
-            PortfolioErrorGroup.pipeline_id == pipeline_id,
-            PortfolioErrorGroup.last_seen_at >= since,
-        )
+        .where(*issue_conditions)
         .order_by(PortfolioErrorGroup.event_count.desc(), PortfolioErrorGroup.last_seen_at.desc())
         .limit(10)
     )).scalars().all())
@@ -3540,12 +3567,36 @@ async def get_error_metrics(
 
     recent_errors = list((await db.execute(
         select(PortfolioErrorEvent)
-        .where(PortfolioErrorEvent.pipeline_id == pipeline_id)
+        .where(PortfolioErrorEvent.pipeline_id == pipeline_id, *event_filters)
         .order_by(PortfolioErrorEvent.occurred_at.desc())
         .limit(20)
     )).scalars().all())
 
     errors_per_session = round(int(errors_14d) / int(usage_sessions_14d), 4) if usage_sessions_14d else None
+
+    # Facets: the available dimension values (with counts) so the UI can render
+    # the filter chips. Always computed over the window, independent of the
+    # active filter, so a chip never disappears just because it's selected.
+    error_type_facets = (await db.execute(
+        select(PortfolioErrorGroup.error_type, func.count(PortfolioErrorGroup.id))
+        .where(
+            PortfolioErrorGroup.pipeline_id == pipeline_id,
+            PortfolioErrorGroup.last_seen_at >= since,
+            PortfolioErrorGroup.error_type.isnot(None),
+        )
+        .group_by(PortfolioErrorGroup.error_type)
+        .order_by(func.count(PortfolioErrorGroup.id).desc())
+    )).all()
+    platform_facets = (await db.execute(
+        select(PortfolioErrorEvent.platform, func.count(func.distinct(PortfolioErrorEvent.group_id)))
+        .where(
+            PortfolioErrorEvent.pipeline_id == pipeline_id,
+            PortfolioErrorEvent.occurred_at >= since,
+            PortfolioErrorEvent.platform.isnot(None),
+        )
+        .group_by(PortfolioErrorEvent.platform)
+        .order_by(func.count(func.distinct(PortfolioErrorEvent.group_id)).desc())
+    )).all()
 
     return {
         "data": {
@@ -3566,6 +3617,11 @@ async def get_error_metrics(
                 for group in top_groups
             ],
             "recentErrors": [_serialize_error_event(event) for event in recent_errors],
+            "facets": {
+                "errorType": [{"value": v, "count": int(c)} for v, c in error_type_facets],
+                "platform": [{"value": v, "count": int(c)} for v, c in platform_facets],
+            },
+            "filters": {"errorType": error_type, "platform": platform},
         }
     }
 
