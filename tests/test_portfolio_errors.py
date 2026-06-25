@@ -406,3 +406,75 @@ async def test_get_issues_handles_group_without_events(client, fake_db, auth_hea
     assert issue["affectedUsers"] == 0
     assert issue["occurrences"] == 0
     assert issue["trend"]["direction"] == "flat"
+
+
+async def test_get_error_metrics_faceting(client, fake_db, auth_headers):
+    # The errorType/platform filters scope the issue list + recent feed, and the
+    # response carries the available facet values (with counts) for the chips.
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    source = make_usage_source(pipeline_id=product.id)
+    group = make_error_group(pipeline_id=product.id, event_count=5, error_type="exception")
+    event = make_error_event(pipeline_id=product.id, group_id=group.id, error_type="exception", platform="web")
+    fake_db.stub(
+        execute=[
+            FakeResult(rows=[product]),            # launched product lookup
+            FakeResult(rows=[]),                   # app settings overlay
+            FakeResult(rows=[source]),             # usage source
+            FakeResult(rows=[("2026-05-01", 5)]),  # daily error counts
+            FakeResult(rows=[group]),              # top issues (filtered)
+            FakeResult(rows=[(group.id, 3)]),      # sessions per group
+            FakeResult(rows=[event]),              # recent errors (filtered)
+            FakeResult(rows=[("exception", 5), ("unhandled_rejection", 2)]),  # errorType facets
+            FakeResult(rows=[("web", 4)]),         # platform facets
+        ],
+        scalar=[5, 5, 3, 10, 1],  # total, errors14d, affectedSessions, usageSessions, openIssues
+    )
+
+    resp = await client.get(
+        f"/portfolio/{product.id}/errors?errorType=exception&platform=web",
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["filters"] == {"errorType": "exception", "platform": "web"}
+    assert body["facets"]["errorType"] == [
+        {"value": "exception", "count": 5},
+        {"value": "unhandled_rejection", "count": 2},
+    ]
+    assert body["facets"]["platform"] == [{"value": "web", "count": 4}]
+    assert body["issues"][0]["errorType"] == "exception"
+    assert body["recentErrors"][0]["errorType"] == "exception"
+    assert body["recentErrors"][0]["platform"] == "web"
+
+
+async def test_get_issues_faceting(client, fake_db, auth_headers):
+    # errorType/platform filters scope the promoted issue list, and the response
+    # carries the available facet values for the chips + the active selection.
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    source = make_usage_source(pipeline_id=product.id)
+    group = make_error_group(pipeline_id=product.id, event_count=40, error_type="exception")
+    fake_db.stub(
+        execute=[
+            FakeResult(rows=[product]),                 # launched product lookup
+            FakeResult(rows=[]),                        # app settings overlay
+            FakeResult(rows=[source]),                  # usage source
+            FakeResult(rows=[(group.id, 9, 12, 40, 30, 10)]),  # per-group aggregation
+            FakeResult(rows=[group]),                   # groups (filtered)
+            FakeResult(rows=[("exception", 3)]),        # errorType facets
+            FakeResult(rows=[("web", 2), ("mobile", 1)]),  # platform facets
+        ],
+        scalar=[1, 9, 40],  # openIssues, affectedUsers, occurrences
+    )
+
+    resp = await client.get(
+        f"/portfolio/{product.id}/issues?errorType=exception&platform=web",
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["filters"] == {"errorType": "exception", "platform": "web"}
+    assert body["facets"]["errorType"] == [{"value": "exception", "count": 3}]
+    assert body["facets"]["platform"] == [{"value": "web", "count": 2}, {"value": "mobile", "count": 1}]
+    assert body["issues"][0]["errorType"] == "exception"
