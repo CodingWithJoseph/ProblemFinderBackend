@@ -34,6 +34,7 @@ from app.models import (
     PortfolioMrrMovement,
     PortfolioRevenueSource,
     PortfolioLog,
+    PortfolioSpan,
     PortfolioUsageEvent,
     PortfolioUsageSource,
     PortfolioWebVital,
@@ -167,10 +168,18 @@ class BatchItem(BaseModel):
     """One event in a batch. `kind` discriminates a usage event from an error, a
     web vital, or a log so each storage path (and error grouping) stays identical
     to the single endpoints."""
-    kind: Literal["event", "error", "vital", "log"]
+    kind: Literal["event", "error", "vital", "log", "span"]
     # usage-event field
     event_type: UsageEventType | None = None
     referrer: str | None = None
+    # span fields (kind == "span"). span_kind is the span's own client/server/
+    # internal role, distinct from the batch discriminator above.
+    name: str | None = Field(default=None, max_length=200)
+    span_kind: str | None = Field(default=None, max_length=20)
+    service: str | None = Field(default=None, max_length=60)
+    feature: str | None = Field(default=None, max_length=120)
+    status: str | None = Field(default=None, max_length=20)
+    duration_ms: float | None = None
     # error fields
     message: str | None = Field(default=None, max_length=4000)
     stack: str | None = Field(default=None, max_length=20000)
@@ -4158,6 +4167,38 @@ def _record_log(source, *, level, message, metadata, url, visitor_id, session_id
     )
 
 
+_SPAN_KINDS = ("client", "server", "internal")
+
+
+def _record_span(source, *, trace_id, span_id, parent_span_id, name, kind, service, feature, platform, capture_mode, status, release, environment, visitor_id, session_id, user_ref, attributes, start_at, duration_ms, now):
+    """Build a span row (not committed). Shared by /spans and /batch. kind is
+    clamped to the allowed set so a malformed client can't trip the CHECK."""
+    return PortfolioSpan(
+        id=str(uuid.uuid4()),
+        pipeline_id=source.pipeline_id,
+        source_id=source.id,
+        trace_id=trace_id,
+        span_id=span_id,
+        parent_span_id=parent_span_id,
+        name=str(name)[:200],
+        kind=kind if kind in _SPAN_KINDS else "client",
+        service=service,
+        feature=feature,
+        platform=platform,
+        capture_mode=capture_mode,
+        status=status,
+        release=release,
+        environment=environment,
+        visitor_id=visitor_id,
+        session_id=session_id,
+        user_ref=user_ref,
+        attributes=attributes or {},
+        start_at=start_at or now,
+        duration_ms=duration_ms,
+        received_at=now,
+    )
+
+
 def _build_usage_event(source, *, event_type, visitor_id, session_id, user_ref, url, referrer, release, environment, metadata, occurred_at, now, trace_id=None, span_id=None, parent_span_id=None, platform=None, capture_mode=None):
     """Build a usage event row (not added/committed). Shared by the single
     `/events` endpoint and `/batch` so both store identical shapes."""
@@ -4635,6 +4676,32 @@ async def ingest_batch(
                 parent_span_id=item.parent_span_id,
                 platform=item.platform,
                 occurred_at=item.occurred_at,
+                now=now,
+            ))
+            stored += 1
+        elif item.kind == "span":
+            if not item.trace_id or not item.span_id or not item.name:
+                continue
+            db.add(_record_span(
+                source,
+                trace_id=item.trace_id,
+                span_id=item.span_id,
+                parent_span_id=item.parent_span_id,
+                name=item.name,
+                kind=item.span_kind,
+                service=item.service,
+                feature=item.feature,
+                platform=item.platform,
+                capture_mode=item.capture_mode,
+                status=item.status,
+                release=item.release,
+                environment=item.environment,
+                visitor_id=item.visitor_id,
+                session_id=item.session_id,
+                user_ref=item.user_id,
+                attributes=item.metadata,
+                start_at=item.occurred_at,
+                duration_ms=item.duration_ms,
                 now=now,
             ))
             stored += 1

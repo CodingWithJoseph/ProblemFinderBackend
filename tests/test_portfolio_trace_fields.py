@@ -7,6 +7,7 @@ from app.models import (
     PortfolioErrorEvent,
     PortfolioErrorGroup,
     PortfolioLog,
+    PortfolioSpan,
     PortfolioUsageEvent,
     PortfolioWebVital,
 )
@@ -107,3 +108,78 @@ async def test_batch_persists_trace_fields_across_kinds(client, fake_db):
     log = next(o for o in fake_db.added if isinstance(o, PortfolioLog))
     assert vital.trace_id == "t-vital" and vital.platform == "web"
     assert log.trace_id == "t-log" and log.platform == "web"
+
+
+async def test_batch_persists_span(client, fake_db):
+    source = make_usage_source()
+    fake_db.stub(execute=[FakeResult(rows=[source])])
+
+    resp = await client.post(
+        "/public/portfolio/batch",
+        json={
+            "product_id": source.pipeline_id,
+            "key": source.public_key,
+            "batch": [{
+                "kind": "span",
+                "trace_id": "t-1",
+                "span_id": "s-1",
+                "parent_span_id": "s-0",
+                "name": "GET /api/cart",
+                "span_kind": "client",
+                "service": "web",
+                "feature": "checkout",
+                "status": "error",
+                "duration_ms": 821.5,
+                "platform": "web",
+                "capture_mode": "auto",
+            }],
+        },
+    )
+
+    assert resp.status_code == 200
+    span = next(o for o in fake_db.added if isinstance(o, PortfolioSpan))
+    assert span.trace_id == "t-1" and span.span_id == "s-1" and span.parent_span_id == "s-0"
+    assert span.name == "GET /api/cart"
+    assert span.kind == "client"
+    assert span.service == "web" and span.feature == "checkout"
+    assert span.status == "error"
+    assert span.duration_ms == 821.5
+    assert span.platform == "web" and span.capture_mode == "auto"
+
+
+async def test_batch_span_requires_identity(client, fake_db):
+    # Missing trace_id / span_id / name → skipped, not stored.
+    source = make_usage_source()
+    fake_db.stub(execute=[FakeResult(rows=[source])])
+
+    resp = await client.post(
+        "/public/portfolio/batch",
+        json={
+            "product_id": source.pipeline_id,
+            "key": source.public_key,
+            "batch": [{"kind": "span", "name": "no ids"}],
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["stored"] == 0
+    assert not any(isinstance(o, PortfolioSpan) for o in fake_db.added)
+
+
+async def test_batch_span_clamps_unknown_kind(client, fake_db):
+    # A malformed span kind falls back to 'client' so it can't trip the CHECK.
+    source = make_usage_source()
+    fake_db.stub(execute=[FakeResult(rows=[source])])
+
+    resp = await client.post(
+        "/public/portfolio/batch",
+        json={
+            "product_id": source.pipeline_id,
+            "key": source.public_key,
+            "batch": [{"kind": "span", "trace_id": "t", "span_id": "s", "name": "x", "span_kind": "bogus"}],
+        },
+    )
+
+    assert resp.status_code == 200
+    span = next(o for o in fake_db.added if isinstance(o, PortfolioSpan))
+    assert span.kind == "client"
