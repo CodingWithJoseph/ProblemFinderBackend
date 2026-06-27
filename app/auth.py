@@ -3,7 +3,7 @@ import json
 import logging
 from pathlib import Path
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from firebase_admin import auth, credentials, initialize_app, get_app, firestore
 
@@ -63,6 +63,7 @@ def get_firestore():
 
 
 async def get_uid(
+    request: Request,
     token: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> str:
     if not token:
@@ -77,7 +78,9 @@ async def get_uid(
         # server and Google's token-issuing servers, which would otherwise
         # reject freshly-minted tokens as "used too early" / prematurely expired.
         decoded = auth.verify_id_token(token.credentials, clock_skew_seconds=10)
-        return decoded["uid"]
+        uid = decoded["uid"]
+        request.state.uid = uid
+        return uid
     except Exception as e:
         logger.info("token verification failed: %s", e)
         raise HTTPException(

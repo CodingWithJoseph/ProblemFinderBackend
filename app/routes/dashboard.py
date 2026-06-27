@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,7 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_db
 from app.auth import get_uid
 from app.config import PIPELINE_VERSION
-from app.models import Pipeline, Problem, Task, Cluster, ClusterItem, ClusterSignal
+from app.models import Pipeline, Problem, Task, Cluster, ClusterItem, ClusterSignal, UserActivityDaily
+from app.services.activity import record_user_activity
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -216,37 +219,51 @@ async def dashboard_movers(
     return {"risers": risers, "fallers": fallers, "available": True}
 
 
+class ActivityEventBody(BaseModel):
+    kind: Literal["login"]
+
+
+@router.post("/activity")
+async def create_dashboard_activity(
+    body: ActivityEventBody,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Record explicit activity that does not pass through a product mutation."""
+    await record_user_activity(db, uid, "login")
+    await db.commit()
+    return {"success": True}
+
+
 @router.get("/activity")
 async def dashboard_activity(
     weeks: int = Query(26, ge=4, le=53),
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
-    """Discovery-activity heatmap + pipeline-health stats.
-
-    There is no ``pipeline_runs`` table, so daily discovery volume is derived
-    from ``cluster_items`` post timestamps (``posted_at``, falling back to
-    ``scraped_at``) — the closest real signal of when discovery happened. Also
-    returns last-activity / clusters-refreshed times and a 7-day-vs-prior trend
-    for the data-health module.
-    """
+    """Authenticated user's login and workspace-action heatmap."""
     now = _now()
-    since = now - timedelta(weeks=weeks)
-    activity_at = func.coalesce(ClusterItem.posted_at, ClusterItem.scraped_at)
+    since = (now - timedelta(weeks=weeks)).date()
 
     daily_rows = (await db.execute(
-        select(func.date(activity_at), func.count())
-        .where(
-            ClusterItem.pipeline_version == PIPELINE_VERSION,
-            activity_at.isnot(None),
-            activity_at >= since,
+        select(
+            UserActivityDaily.activity_date,
+            UserActivityDaily.login_count,
+            UserActivityDaily.action_count,
+            UserActivityDaily.last_active_at,
         )
-        .group_by(func.date(activity_at))
-        .order_by(func.date(activity_at).asc())
+        .where(
+            UserActivityDaily.user_id == uid,
+            UserActivityDaily.activity_date >= since,
+        )
+        .order_by(UserActivityDaily.activity_date.asc())
     )).all()
     days = [
-        {"date": d.isoformat() if hasattr(d, "isoformat") else str(d), "count": int(count)}
-        for d, count in daily_rows
+        {
+            "date": activity_date.isoformat() if hasattr(activity_date, "isoformat") else str(activity_date),
+            "count": int(login_count or 0) + int(action_count or 0),
+        }
+        for activity_date, login_count, action_count, _last_active_at in daily_rows
     ]
 
     by_date = {row["date"]: row["count"] for row in days}
@@ -262,26 +279,20 @@ async def dashboard_activity(
     previous_7d = _window_sum(7, 14)
     change_pct = round((current_7d - previous_7d) / previous_7d, 4) if previous_7d else None
 
-    total_posts = int(await db.scalar(
-        select(func.count()).select_from(ClusterItem).where(ClusterItem.pipeline_version == PIPELINE_VERSION)
-    ) or 0)
-    last_activity_at = await db.scalar(
-        select(func.max(activity_at)).where(ClusterItem.pipeline_version == PIPELINE_VERSION)
+    window_actions = sum(int(action_count or 0) for _, _, action_count, _ in daily_rows)
+    window_logins = sum(int(login_count or 0) for _, login_count, _, _ in daily_rows)
+    last_activity_at = max(
+        (last_active_at for _, _, _, last_active_at in daily_rows if last_active_at),
+        default=None,
     )
-
-    clusters_refreshed_at = None
-    try:
-        clusters_refreshed_at = await db.scalar(select(func.max(ClusterSignal.generated_at)))
-    except SQLAlchemyError:
-        await db.rollback()
 
     return {
         "weeks": weeks,
         "days": days,
-        "totalPosts": total_posts,
-        "windowPosts": sum(by_date.values()),
+        "windowActions": window_actions,
+        "windowLogins": window_logins,
+        "activeDays": len([count for count in by_date.values() if count > 0]),
         "lastActivityAt": last_activity_at.isoformat() if last_activity_at else None,
-        "clustersRefreshedAt": clusters_refreshed_at.isoformat() if clusters_refreshed_at else None,
         "trend": {
             "current7d": current_7d,
             "previous7d": previous_7d,
