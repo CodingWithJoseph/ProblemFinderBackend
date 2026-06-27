@@ -16,9 +16,9 @@ from app.routes.portfolio import _compute_retention
 from app.models import (
     Pipeline,
     PlanEnum,
-    PortfolioRevenueSource,
-    PortfolioUsageEvent,
-    PortfolioUsageSource,
+    MonitorRevenueSource,
+    MonitorUsageEvent,
+    MonitorUsageSource,
 )
 
 
@@ -90,7 +90,7 @@ async def test_create_usage_source_for_launched_product(client, fake_db, auth_he
     body = resp.json()["data"]
     assert body["pipelineId"] == product.id
     assert body["publicKey"]
-    assert any(isinstance(obj, PortfolioUsageSource) and obj.pipeline_id == product.id for obj in fake_db.added)
+    assert any(isinstance(obj, MonitorUsageSource) and obj.pipeline_id == product.id for obj in fake_db.added)
 
 
 async def test_update_usage_source_setup_metadata(client, fake_db, auth_headers):
@@ -235,7 +235,7 @@ async def test_admin_can_create_monitored_product(client, fake_db, auth_headers)
     # A launched Pipeline and its usage source were persisted together.
     product = next(o for o in fake_db.added if isinstance(o, Pipeline))
     assert product.launched_at is not None
-    assert any(isinstance(o, PortfolioUsageSource) and o.pipeline_id == product.id for o in fake_db.added)
+    assert any(isinstance(o, MonitorUsageSource) and o.pipeline_id == product.id for o in fake_db.added)
 
 
 async def test_non_admin_cannot_create_monitored_product(client, fake_db, auth_headers):
@@ -281,7 +281,7 @@ async def test_create_revenue_source_for_launched_product(client, fake_db, auth_
     assert body["pipelineId"] == product.id
     assert body["provider"] == "stripe"
     assert body["status"] == "not_connected"
-    assert any(isinstance(obj, PortfolioRevenueSource) and obj.pipeline_id == product.id for obj in fake_db.added)
+    assert any(isinstance(obj, MonitorRevenueSource) and obj.pipeline_id == product.id for obj in fake_db.added)
 
 
 async def test_create_revenue_connect_url_stores_oauth_state(client, fake_db, auth_headers, monkeypatch):
@@ -525,7 +525,7 @@ async def test_public_usage_event_ingestion(client, fake_db):
 
     assert resp.status_code == 200
     assert resp.json()["success"] is True
-    event = next(obj for obj in fake_db.added if isinstance(obj, PortfolioUsageEvent))
+    event = next(obj for obj in fake_db.added if isinstance(obj, MonitorUsageEvent))
     assert event.pipeline_id == source.pipeline_id
     assert event.event_type == "signup"
     assert event.event_metadata == {"plan": "pro"}
@@ -611,7 +611,7 @@ async def test_get_sessions_rollup(client, fake_db, auth_headers):
 
 
 async def test_ingest_vital(client, fake_db):
-    from app.models import PortfolioWebVital
+    from app.models import MonitorWebVital
 
     source = make_usage_source()
     fake_db.stub(execute=[FakeResult(rows=[source])])
@@ -629,7 +629,7 @@ async def test_ingest_vital(client, fake_db):
     )
 
     assert resp.status_code == 200
-    vital = next(o for o in fake_db.added if isinstance(o, PortfolioWebVital))
+    vital = next(o for o in fake_db.added if isinstance(o, MonitorWebVital))
     assert vital.metric == "LCP"
     assert vital.value == 2300.0
     # Rating is derived from thresholds when the client doesn't send one.
@@ -677,7 +677,7 @@ async def test_get_experience_vitals(client, fake_db, auth_headers):
 
 
 async def test_ingest_log(client, fake_db):
-    from app.models import PortfolioLog
+    from app.models import MonitorLog
 
     source = make_usage_source()
     fake_db.stub(execute=[FakeResult(rows=[source])])
@@ -694,7 +694,7 @@ async def test_ingest_log(client, fake_db):
     )
 
     assert resp.status_code == 200
-    log = next(o for o in fake_db.added if isinstance(o, PortfolioLog))
+    log = next(o for o in fake_db.added if isinstance(o, MonitorLog))
     assert log.level == "warn"
     assert log.message == "slow query"
     assert source.last_seen_at is not None
@@ -865,7 +865,7 @@ async def test_public_usage_event_persists_release_and_environment(client, fake_
     )
 
     assert resp.status_code == 200
-    event = next(o for o in fake_db.added if isinstance(o, PortfolioUsageEvent))
+    event = next(o for o in fake_db.added if isinstance(o, MonitorUsageEvent))
     assert event.release == "v3.1.0"
     assert event.environment == "production"
 
@@ -891,7 +891,7 @@ async def test_ingest_rate_limit_returns_429(client, fake_db, monkeypatch):
 
 
 async def test_public_batch_ingests_mixed_events(client, fake_db):
-    from app.models import PortfolioErrorEvent, PortfolioErrorGroup
+    from app.models import MonitorErrorEvent, MonitorErrorGroup
 
     source = make_usage_source()
     fake_db.stub(execute=[
@@ -915,11 +915,11 @@ async def test_public_batch_ingests_mixed_events(client, fake_db):
 
     assert resp.status_code == 200
     assert resp.json()["stored"] == 3
-    usage = [o for o in fake_db.added if isinstance(o, PortfolioUsageEvent)]
+    usage = [o for o in fake_db.added if isinstance(o, MonitorUsageEvent)]
     assert {e.event_type for e in usage} == {"pageview", "signup"}
     # The error item routes through the shared grouping path.
-    assert any(isinstance(o, PortfolioErrorGroup) for o in fake_db.added)
-    assert any(isinstance(o, PortfolioErrorEvent) for o in fake_db.added)
+    assert any(isinstance(o, MonitorErrorGroup) for o in fake_db.added)
+    assert any(isinstance(o, MonitorErrorEvent) for o in fake_db.added)
     assert source.last_seen_at is not None
 
 
@@ -953,7 +953,7 @@ async def test_public_batch_skips_invalid_items(client, fake_db):
 
     assert resp.status_code == 200
     assert resp.json()["stored"] == 0
-    assert not any(isinstance(o, PortfolioUsageEvent) for o in fake_db.added)
+    assert not any(isinstance(o, MonitorUsageEvent) for o in fake_db.added)
 
 
 async def test_public_usage_event_rejects_unapproved_domain(client, fake_db):

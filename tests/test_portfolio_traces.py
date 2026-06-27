@@ -4,11 +4,11 @@ tree), errors, and logs that share a trace_id."""
 from datetime import datetime, timezone
 
 from conftest import FakeResult, make_error_event, make_pipeline
-from app.models import PortfolioSpan
+from app.models import MonitorSpan
 
 
 def _span(pipeline_id, span_id, parent, *, name, kind="client", service="web", status="ok", duration=10.0, minute=0):
-    return PortfolioSpan(
+    return MonitorSpan(
         id=f"id-{span_id}",
         pipeline_id=pipeline_id,
         trace_id="T",

@@ -7,7 +7,7 @@ from conftest import (
     make_pipeline,
     make_usage_source,
 )
-from app.models import PortfolioErrorEvent, PortfolioErrorGroup
+from app.models import MonitorErrorEvent, MonitorErrorGroup
 from app.routes.portfolio import _error_fingerprint, _normalize_error_message
 
 
@@ -51,8 +51,8 @@ async def test_ingest_error_creates_group_and_event(client, fake_db):
     assert resp.json()["success"] is True
     assert resp.json()["fingerprint"]
 
-    group = next(o for o in fake_db.added if isinstance(o, PortfolioErrorGroup))
-    event = next(o for o in fake_db.added if isinstance(o, PortfolioErrorEvent))
+    group = next(o for o in fake_db.added if isinstance(o, MonitorErrorGroup))
+    event = next(o for o in fake_db.added if isinstance(o, MonitorErrorEvent))
     assert group.event_count == 1
     assert group.pipeline_id == source.pipeline_id
     assert event.group_id == group.id
@@ -83,8 +83,8 @@ async def test_ingest_error_increments_existing_group_and_reopens(client, fake_d
     # Regression: a resolved issue recurring reopens it.
     assert group.status == "unresolved"
     # No second group should be created.
-    assert not any(isinstance(o, PortfolioErrorGroup) for o in fake_db.added)
-    assert any(isinstance(o, PortfolioErrorEvent) for o in fake_db.added)
+    assert not any(isinstance(o, MonitorErrorGroup) for o in fake_db.added)
+    assert any(isinstance(o, MonitorErrorEvent) for o in fake_db.added)
 
 
 async def test_ingest_error_rejects_bad_key(client, fake_db):
@@ -183,10 +183,10 @@ async def test_get_issues_promotes_groups(client, fake_db, auth_headers):
 
 
 async def test_get_problems_list(client, fake_db, auth_headers):
-    from app.models import MonitoringProblem
+    from app.models import MonitorProblem
 
     product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
-    problem = MonitoringProblem(
+    problem = MonitorProblem(
         id="prob-1", pipeline_id=product.id, kind="error_spike", dedupe_key="2026-05-20",
         title="Error spike", detail="60 vs 10", severity="critical", status="open",
         metric="errors", baseline=10.0, observed=60.0,
@@ -207,10 +207,10 @@ async def test_get_problems_list(client, fake_db, auth_headers):
 
 
 async def test_get_problem_impact(client, fake_db, auth_headers):
-    from app.models import MonitoringProblem
+    from app.models import MonitorProblem
 
     product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
-    problem = MonitoringProblem(
+    problem = MonitorProblem(
         id="prob-1", pipeline_id=product.id, kind="error_spike", dedupe_key="2026-05-20",
         title="Error spike", severity="critical", status="open",
         metric="errors", baseline=10.0, observed=60.0,

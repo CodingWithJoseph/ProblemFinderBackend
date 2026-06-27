@@ -65,11 +65,11 @@ from app.models import (  # noqa: E402
     TeamMember,
     Issue,
     IssueComment,
-    PortfolioUsageSource,
-    PortfolioUsageEvent,
-    PortfolioErrorGroup,
-    PortfolioErrorEvent,
-    PortfolioRevenueSource,
+    MonitorUsageSource,
+    MonitorUsageEvent,
+    MonitorErrorGroup,
+    MonitorErrorEvent,
+    MonitorRevenueSource,
     UserPreference,
 )
 from app.routes.clusters import router as clusters_router  # noqa: E402
@@ -441,7 +441,7 @@ def make_usage_source(**kw):
         last_seen_at=None,
     )
     defaults.update(kw)
-    return PortfolioUsageSource(**defaults)
+    return MonitorUsageSource(**defaults)
 
 
 def make_usage_event(**kw):
@@ -460,7 +460,7 @@ def make_usage_event(**kw):
         received_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
     )
     defaults.update(kw)
-    return PortfolioUsageEvent(**defaults)
+    return MonitorUsageEvent(**defaults)
 
 
 def make_error_group(**kw):
@@ -480,7 +480,7 @@ def make_error_group(**kw):
         updated_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
     )
     defaults.update(kw)
-    return PortfolioErrorGroup(**defaults)
+    return MonitorErrorGroup(**defaults)
 
 
 def make_error_event(**kw):
@@ -504,7 +504,7 @@ def make_error_event(**kw):
         received_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
     )
     defaults.update(kw)
-    return PortfolioErrorEvent(**defaults)
+    return MonitorErrorEvent(**defaults)
 
 
 def make_revenue_source(**kw):
@@ -534,7 +534,7 @@ def make_revenue_source(**kw):
         updated_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
     )
     defaults.update(kw)
-    return PortfolioRevenueSource(**defaults)
+    return MonitorRevenueSource(**defaults)
 
 
 def make_problem(**kw):

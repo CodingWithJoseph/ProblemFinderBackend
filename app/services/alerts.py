@@ -27,15 +27,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import (
-    MonitoringProblem,
+    MonitorProblem,
     Pipeline,
-    PortfolioAlert,
-    PortfolioAlertSettings,
-    PortfolioErrorEvent,
-    PortfolioErrorGroup,
-    PortfolioRevenueSource,
-    PortfolioUsageEvent,
-    PortfolioUsageSource,
+    MonitorAlert,
+    MonitorAlertSettings,
+    MonitorErrorEvent,
+    MonitorErrorGroup,
+    MonitorRevenueSource,
+    MonitorUsageEvent,
+    MonitorUsageSource,
 )
 from app.services.email import email_service
 
@@ -74,7 +74,7 @@ class AlertPrefs:
         )
 
     @classmethod
-    def resolve(cls, row: PortfolioAlertSettings | None, settings=None) -> "AlertPrefs":
+    def resolve(cls, row: MonitorAlertSettings | None, settings=None) -> "AlertPrefs":
         base = cls.from_settings(settings)
         if row is None:
             return base
@@ -217,9 +217,9 @@ def problem_from_alert(alert: dict, now: datetime) -> dict:
     }
 
 
-async def alert_settings_row(db: AsyncSession, pipeline_id: str) -> PortfolioAlertSettings | None:
+async def alert_settings_row(db: AsyncSession, pipeline_id: str) -> MonitorAlertSettings | None:
     return (await db.execute(
-        select(PortfolioAlertSettings).where(PortfolioAlertSettings.pipeline_id == pipeline_id)
+        select(MonitorAlertSettings).where(MonitorAlertSettings.pipeline_id == pipeline_id)
     )).scalar_one_or_none()
 
 
@@ -268,10 +268,10 @@ def resolve_owner_email(uid: str) -> str | None:
 
 async def already_alerted(db: AsyncSession, pipeline_id: str, alert_type: str, dedupe_key: str) -> bool:
     existing = (await db.execute(
-        select(PortfolioAlert.id).where(
-            PortfolioAlert.pipeline_id == pipeline_id,
-            PortfolioAlert.alert_type == alert_type,
-            PortfolioAlert.dedupe_key == dedupe_key,
+        select(MonitorAlert.id).where(
+            MonitorAlert.pipeline_id == pipeline_id,
+            MonitorAlert.alert_type == alert_type,
+            MonitorAlert.dedupe_key == dedupe_key,
         )
     )).scalar_one_or_none()
     return existing is not None
@@ -290,46 +290,46 @@ async def _gather_snapshot(pipeline_id: str, user_id: str, product_name: str, db
     baseline_start = now - timedelta(days=1 + baseline_days)
 
     new_issues = list((await db.execute(
-        select(PortfolioErrorGroup).where(
-            PortfolioErrorGroup.pipeline_id == pipeline_id,
-            PortfolioErrorGroup.first_seen_at >= day_ago,
+        select(MonitorErrorGroup).where(
+            MonitorErrorGroup.pipeline_id == pipeline_id,
+            MonitorErrorGroup.first_seen_at >= day_ago,
         )
     )).scalars().all())
 
     current_errors = int(await db.scalar(
-        select(func.count(PortfolioErrorEvent.id)).where(
-            PortfolioErrorEvent.pipeline_id == pipeline_id,
-            PortfolioErrorEvent.occurred_at >= day_ago,
+        select(func.count(MonitorErrorEvent.id)).where(
+            MonitorErrorEvent.pipeline_id == pipeline_id,
+            MonitorErrorEvent.occurred_at >= day_ago,
         )
     ) or 0)
     prior_errors = int(await db.scalar(
-        select(func.count(PortfolioErrorEvent.id)).where(
-            PortfolioErrorEvent.pipeline_id == pipeline_id,
-            PortfolioErrorEvent.occurred_at >= baseline_start,
-            PortfolioErrorEvent.occurred_at < day_ago,
+        select(func.count(MonitorErrorEvent.id)).where(
+            MonitorErrorEvent.pipeline_id == pipeline_id,
+            MonitorErrorEvent.occurred_at >= baseline_start,
+            MonitorErrorEvent.occurred_at < day_ago,
         )
     ) or 0)
 
     this_week_signups = int(await db.scalar(
-        select(func.count(PortfolioUsageEvent.id)).where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.event_type == "signup",
-            PortfolioUsageEvent.occurred_at >= week_ago,
+        select(func.count(MonitorUsageEvent.id)).where(
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.event_type == "signup",
+            MonitorUsageEvent.occurred_at >= week_ago,
         )
     ) or 0)
     prev_week_signups = int(await db.scalar(
-        select(func.count(PortfolioUsageEvent.id)).where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.event_type == "signup",
-            PortfolioUsageEvent.occurred_at >= prev_week,
-            PortfolioUsageEvent.occurred_at < week_ago,
+        select(func.count(MonitorUsageEvent.id)).where(
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.event_type == "signup",
+            MonitorUsageEvent.occurred_at >= prev_week,
+            MonitorUsageEvent.occurred_at < week_ago,
         )
     ) or 0)
 
     revenue = await db.scalar(
-        select(PortfolioRevenueSource).where(
-            PortfolioRevenueSource.pipeline_id == pipeline_id,
-            PortfolioRevenueSource.provider == "stripe",
+        select(MonitorRevenueSource).where(
+            MonitorRevenueSource.pipeline_id == pipeline_id,
+            MonitorRevenueSource.provider == "stripe",
         )
     )
 
@@ -353,7 +353,7 @@ async def _monitored_products(db: AsyncSession) -> list[tuple[str, str]]:
     """(pipeline_id, owner_uid) for every launched product with monitoring."""
     rows = (await db.execute(
         select(Pipeline.id, Pipeline.user_id)
-        .join(PortfolioUsageSource, PortfolioUsageSource.pipeline_id == Pipeline.id)
+        .join(MonitorUsageSource, MonitorUsageSource.pipeline_id == Pipeline.id)
         .where(Pipeline.launched_at != None)
         .distinct()
     )).all()
@@ -398,12 +398,12 @@ async def run_alert_checks() -> int:
                         continue
                     # Record the durable problem before emailing: the condition
                     # is an inspectable object even when alert email is off.
-                    db.add(MonitoringProblem(pipeline_id=pipeline_id, **problem_from_alert(alert, now)))
+                    db.add(MonitorProblem(pipeline_id=pipeline_id, **problem_from_alert(alert, now)))
                     if np.send_instantly and recipient:
                         subject, text, html = render_alert(alert["type"], alert["context"])
                         await email_service.send(to=recipient, subject=subject, text=text, html=html)
                         sent += 1
-                    db.add(PortfolioAlert(
+                    db.add(MonitorAlert(
                         pipeline_id=pipeline_id,
                         alert_type=alert["type"],
                         dedupe_key=alert["dedupe_key"],
@@ -482,10 +482,10 @@ async def run_alert_digests() -> int:
                     continue
                 since = pref.last_digest_sent_at or (now - interval)
                 rows = (await db.execute(
-                    select(PortfolioAlert.alert_type, Pipeline.name, PortfolioAlert.created_at)
-                    .join(Pipeline, Pipeline.id == PortfolioAlert.pipeline_id)
-                    .where(Pipeline.user_id == pref.uid, PortfolioAlert.created_at >= since)
-                    .order_by(PortfolioAlert.created_at.asc())
+                    select(MonitorAlert.alert_type, Pipeline.name, MonitorAlert.created_at)
+                    .join(Pipeline, Pipeline.id == MonitorAlert.pipeline_id)
+                    .where(Pipeline.user_id == pref.uid, MonitorAlert.created_at >= since)
+                    .order_by(MonitorAlert.created_at.asc())
                 )).all()
                 if rows:
                     recipient = pref.alert_email or resolve_owner_email(pref.uid)
