@@ -18,26 +18,26 @@ from app.db import get_db
 from app.auth import get_uid
 from app.config import get_settings
 from app.models import (
-    MonitoringInvestigation,
-    MonitoringInvestigationEntry,
-    MonitoringProblem,
-    MonitoringReport,
+    MonitorInvestigation,
+    MonitorInvestigationEntry,
+    MonitorProblem,
+    MonitorReport,
     Pipeline,
     PlanEnum,
-    PortfolioAlertSettings,
-    PortfolioBillingEvent,
-    PortfolioCustomer,
-    PortfolioCustomerMrr,
-    PortfolioErrorEvent,
-    PortfolioErrorGroup,
-    PortfolioIdentity,
-    PortfolioMrrMovement,
-    PortfolioRevenueSource,
-    PortfolioLog,
-    PortfolioSpan,
-    PortfolioUsageEvent,
-    PortfolioUsageSource,
-    PortfolioWebVital,
+    MonitorAlertSettings,
+    MonitorBillingEvent,
+    MonitorCustomer,
+    MonitorCustomerMrr,
+    MonitorErrorEvent,
+    MonitorErrorGroup,
+    MonitorIdentity,
+    MonitorMrrMovement,
+    MonitorRevenueSource,
+    MonitorLog,
+    MonitorSpan,
+    MonitorUsageEvent,
+    MonitorUsageSource,
+    MonitorWebVital,
     Subscription,
 )
 from app.services.alerts import AlertPrefs, alert_settings_row
@@ -258,7 +258,7 @@ def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
 
 
-def _serialize_usage_source(source: PortfolioUsageSource | None) -> dict | None:
+def _serialize_usage_source(source: MonitorUsageSource | None) -> dict | None:
     if not source:
         return None
     return {
@@ -275,7 +275,7 @@ def _serialize_usage_source(source: PortfolioUsageSource | None) -> dict | None:
     }
 
 
-def _serialize_usage_event(event: PortfolioUsageEvent) -> dict:
+def _serialize_usage_event(event: MonitorUsageEvent) -> dict:
     return {
         "id": event.id,
         "pipelineId": event.pipeline_id,
@@ -294,7 +294,7 @@ def _serialize_usage_event(event: PortfolioUsageEvent) -> dict:
     }
 
 
-def _serialize_error_group(group: PortfolioErrorGroup, affected_sessions: int | None = None) -> dict:
+def _serialize_error_group(group: MonitorErrorGroup, affected_sessions: int | None = None) -> dict:
     payload = {
         "id": group.id,
         "pipelineId": group.pipeline_id,
@@ -313,7 +313,7 @@ def _serialize_error_group(group: PortfolioErrorGroup, affected_sessions: int | 
     return payload
 
 
-def _serialize_error_event(event: PortfolioErrorEvent) -> dict:
+def _serialize_error_event(event: MonitorErrorEvent) -> dict:
     return {
         "id": event.id,
         "pipelineId": event.pipeline_id,
@@ -339,7 +339,7 @@ def _serialize_error_event(event: PortfolioErrorEvent) -> dict:
     }
 
 
-def _serialize_span(span: PortfolioSpan, depth: int = 0) -> dict:
+def _serialize_span(span: MonitorSpan, depth: int = 0) -> dict:
     return {
         "id": span.id,
         "traceId": span.trace_id,
@@ -391,7 +391,7 @@ def _order_span_tree(spans: list) -> list[tuple]:
     return ordered
 
 
-def _selected_mrr(source: PortfolioRevenueSource | None, engine: str) -> tuple[int | None, int | None]:
+def _selected_mrr(source: MonitorRevenueSource | None, engine: str) -> tuple[int | None, int | None]:
     """The (current, previous) MRR for the engine the flag selects. ``invoice``
     reads the new engine's totals; anything else stays on the legacy snapshot."""
     if not source:
@@ -401,7 +401,7 @@ def _selected_mrr(source: PortfolioRevenueSource | None, engine: str) -> tuple[i
     return source.current_mrr_cents, source.previous_mrr_cents
 
 
-def _serialize_revenue_source(source: PortfolioRevenueSource | None, engine: str = "subscription") -> dict | None:
+def _serialize_revenue_source(source: MonitorRevenueSource | None, engine: str = "subscription") -> dict | None:
     if not source:
         return None
     current_mrr, _previous_mrr = _selected_mrr(source, engine)
@@ -434,23 +434,23 @@ def _serialize_revenue_source(source: PortfolioRevenueSource | None, engine: str
     }
 
 
-async def _revenue_source(pipeline_id: str, db: AsyncSession, provider: str = "stripe") -> PortfolioRevenueSource | None:
+async def _revenue_source(pipeline_id: str, db: AsyncSession, provider: str = "stripe") -> MonitorRevenueSource | None:
     return (await db.execute(
-        select(PortfolioRevenueSource)
+        select(MonitorRevenueSource)
         .where(
-            PortfolioRevenueSource.pipeline_id == pipeline_id,
-            PortfolioRevenueSource.provider == provider,
+            MonitorRevenueSource.pipeline_id == pipeline_id,
+            MonitorRevenueSource.provider == provider,
         )
-        .order_by(PortfolioRevenueSource.created_at.asc())
+        .order_by(MonitorRevenueSource.created_at.asc())
     )).scalar_one_or_none()
 
 
-async def _revenue_source_by_oauth_state(state: str, db: AsyncSession) -> PortfolioRevenueSource | None:
+async def _revenue_source_by_oauth_state(state: str, db: AsyncSession) -> MonitorRevenueSource | None:
     return (await db.execute(
-        select(PortfolioRevenueSource)
+        select(MonitorRevenueSource)
         .where(
-            PortfolioRevenueSource.provider == "stripe",
-            PortfolioRevenueSource.oauth_state == state,
+            MonitorRevenueSource.provider == "stripe",
+            MonitorRevenueSource.oauth_state == state,
         )
     )).scalar_one_or_none()
 
@@ -490,7 +490,7 @@ def _origin_allowed(allowed_domain: str | None, request: Request, url: str | Non
     return any(_host_matches_allowed(candidate, allowed_domain) for candidate in candidates)
 
 
-def _usage_event_domain_allowed(source: PortfolioUsageSource, request: Request, body: UsageEventBody) -> bool:
+def _usage_event_domain_allowed(source: MonitorUsageSource, request: Request, body: UsageEventBody) -> bool:
     return _origin_allowed(source.allowed_domain, request, body.url)
 
 
@@ -525,11 +525,11 @@ def _error_fingerprint(message: str, stack: str | None) -> str:
     return hashlib.sha1(basis.encode("utf-8")).hexdigest()
 
 
-async def _error_group(pipeline_id: str, fingerprint: str, db: AsyncSession) -> PortfolioErrorGroup | None:
+async def _error_group(pipeline_id: str, fingerprint: str, db: AsyncSession) -> MonitorErrorGroup | None:
     return (await db.execute(
-        select(PortfolioErrorGroup).where(
-            PortfolioErrorGroup.pipeline_id == pipeline_id,
-            PortfolioErrorGroup.fingerprint == fingerprint,
+        select(MonitorErrorGroup).where(
+            MonitorErrorGroup.pipeline_id == pipeline_id,
+            MonitorErrorGroup.fingerprint == fingerprint,
         )
     )).scalar_one_or_none()
 
@@ -538,7 +538,7 @@ def _stripe_connect_redirect_url() -> str:
     return settings.stripe_connect_redirect_url or f"{settings.app_url.rstrip('/')}/api/portfolio/stripe/callback"
 
 
-def _stripe_connect_return_url(source: PortfolioRevenueSource, status: str) -> str:
+def _stripe_connect_return_url(source: MonitorRevenueSource, status: str) -> str:
     params = urlencode({"pipelineId": source.pipeline_id, "stripe": status})
     return f"{settings.app_url.rstrip('/')}/dashboard/monitor/setup?{params}"
 
@@ -586,7 +586,7 @@ def _subscription_mrr_cents(subscription: Any) -> int:
     return sum(_subscription_item_mrr_cents(item) for item in items)
 
 
-def _stripe_account_kwargs(source: PortfolioRevenueSource) -> dict:
+def _stripe_account_kwargs(source: MonitorRevenueSource) -> dict:
     """Credential routing for every Stripe read. A ``first_party`` source reads
     the platform's own account via the module-level ``STRIPE_SECRET_KEY`` (no
     ``stripe_account``); a ``connected`` source scopes the call to its Connect
@@ -597,7 +597,7 @@ def _stripe_account_kwargs(source: PortfolioRevenueSource) -> dict:
     return {"stripe_account": source.provider_account_id}
 
 
-def _credential_path_label(source: PortfolioRevenueSource) -> str:
+def _credential_path_label(source: MonitorRevenueSource) -> str:
     """Human-readable description of which account a sync pulled from, for the
     Emit log."""
     if source.account_mode == "first_party":
@@ -605,7 +605,7 @@ def _credential_path_label(source: PortfolioRevenueSource) -> str:
     return f"connected (stripe_account={source.provider_account_id})"
 
 
-def _source_is_syncable(source: PortfolioRevenueSource | None) -> bool:
+def _source_is_syncable(source: MonitorRevenueSource | None) -> bool:
     """A source can be synced when it's a connected account with a provider id,
     or a first-party (own-key) source. First-party sources have no
     ``provider_account_id`` — they read the platform account directly."""
@@ -638,11 +638,11 @@ async def _require_launched_product(pipeline_id: str, db: AsyncSession, uid: str
     return product
 
 
-async def _usage_source(pipeline_id: str, db: AsyncSession) -> PortfolioUsageSource | None:
+async def _usage_source(pipeline_id: str, db: AsyncSession) -> MonitorUsageSource | None:
     return (await db.execute(
-        select(PortfolioUsageSource)
-        .where(PortfolioUsageSource.pipeline_id == pipeline_id)
-        .order_by(PortfolioUsageSource.created_at.asc())
+        select(MonitorUsageSource)
+        .where(MonitorUsageSource.pipeline_id == pipeline_id)
+        .order_by(MonitorUsageSource.created_at.asc())
     )).scalar_one_or_none()
 
 
@@ -705,26 +705,26 @@ async def _source_health(pipeline_id: str, source, eff, now, db) -> tuple[dict, 
     since = now - timedelta(days=eff.analytics_usage_window_days)
 
     total_events = int(await db.scalar(
-        select(func.count(PortfolioUsageEvent.id)).where(PortfolioUsageEvent.pipeline_id == pipeline_id)
+        select(func.count(MonitorUsageEvent.id)).where(MonitorUsageEvent.pipeline_id == pipeline_id)
     ) or 0)
     errors = int(await db.scalar(
-        select(func.count(PortfolioErrorEvent.id)).where(
-            PortfolioErrorEvent.pipeline_id == pipeline_id,
-            PortfolioErrorEvent.occurred_at >= since,
+        select(func.count(MonitorErrorEvent.id)).where(
+            MonitorErrorEvent.pipeline_id == pipeline_id,
+            MonitorErrorEvent.occurred_at >= since,
         )
     ) or 0)
     sessions = int(await db.scalar(
-        select(func.count(func.distinct(PortfolioUsageEvent.session_id))).where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.occurred_at >= since,
-            PortfolioUsageEvent.session_id != None,
+        select(func.count(func.distinct(MonitorUsageEvent.session_id))).where(
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.occurred_at >= since,
+            MonitorUsageEvent.session_id != None,
         )
     ) or 0)
     lcp_p75 = await db.scalar(
-        select(func.percentile_cont(0.75).within_group(PortfolioWebVital.value.asc())).where(
-            PortfolioWebVital.pipeline_id == pipeline_id,
-            PortfolioWebVital.occurred_at >= since,
-            PortfolioWebVital.metric == "LCP",
+        select(func.percentile_cont(0.75).within_group(MonitorWebVital.value.asc())).where(
+            MonitorWebVital.pipeline_id == pipeline_id,
+            MonitorWebVital.occurred_at >= since,
+            MonitorWebVital.metric == "LCP",
         )
     )
     error_rate = round(errors / sessions, 4) if sessions else None
@@ -804,20 +804,20 @@ async def get_command_center(
 
     async def _distinct_visitors(start, end):
         return int(await db.scalar(
-            select(func.count(func.distinct(PortfolioUsageEvent.visitor_id))).where(
-                PortfolioUsageEvent.pipeline_id == pipeline_id,
-                PortfolioUsageEvent.occurred_at >= start,
-                PortfolioUsageEvent.occurred_at < end,
-                PortfolioUsageEvent.visitor_id != None,
+            select(func.count(func.distinct(MonitorUsageEvent.visitor_id))).where(
+                MonitorUsageEvent.pipeline_id == pipeline_id,
+                MonitorUsageEvent.occurred_at >= start,
+                MonitorUsageEvent.occurred_at < end,
+                MonitorUsageEvent.visitor_id != None,
             )
         ) or 0)
 
     visitors_cur = await _distinct_visitors(week_start, now)
     visitors_prev = await _distinct_visitors(prev_week_start, week_start)
-    signups_cur = await _count(PortfolioUsageEvent, week_start, now, PortfolioUsageEvent.event_type == "signup")
-    signups_prev = await _count(PortfolioUsageEvent, prev_week_start, week_start, PortfolioUsageEvent.event_type == "signup")
-    errors_cur = await _count(PortfolioErrorEvent, week_start, now)
-    errors_prev = await _count(PortfolioErrorEvent, prev_week_start, week_start)
+    signups_cur = await _count(MonitorUsageEvent, week_start, now, MonitorUsageEvent.event_type == "signup")
+    signups_prev = await _count(MonitorUsageEvent, prev_week_start, week_start, MonitorUsageEvent.event_type == "signup")
+    errors_cur = await _count(MonitorErrorEvent, week_start, now)
+    errors_prev = await _count(MonitorErrorEvent, prev_week_start, week_start)
 
     def trend(current, previous):
         return {"current": int(current), "previous": int(previous), "changePct": _pct_change(current, previous)}
@@ -826,12 +826,12 @@ async def get_command_center(
     rev_prev = revenue.previous_mrr_cents if revenue else None
 
     top_groups = list((await db.execute(
-        select(PortfolioErrorGroup)
+        select(MonitorErrorGroup)
         .where(
-            PortfolioErrorGroup.pipeline_id == pipeline_id,
-            PortfolioErrorGroup.status == "unresolved",
+            MonitorErrorGroup.pipeline_id == pipeline_id,
+            MonitorErrorGroup.status == "unresolved",
         )
-        .order_by(PortfolioErrorGroup.last_seen_at.desc())
+        .order_by(MonitorErrorGroup.last_seen_at.desc())
         .limit(3)
     )).scalars().all())
 
@@ -868,7 +868,7 @@ async def get_command_center(
     }
 
 
-def _serialize_problem(problem: MonitoringProblem) -> dict:
+def _serialize_problem(problem: MonitorProblem) -> dict:
     return {
         "id": problem.id,
         "kind": problem.kind,
@@ -894,9 +894,9 @@ async def get_problems(
     writes when a condition fires (3.4), most recent first."""
     await _require_launched_product(pipeline_id, db, uid)
     problems = list((await db.execute(
-        select(MonitoringProblem)
-        .where(MonitoringProblem.pipeline_id == pipeline_id)
-        .order_by(MonitoringProblem.detected_at.desc())
+        select(MonitorProblem)
+        .where(MonitorProblem.pipeline_id == pipeline_id)
+        .order_by(MonitorProblem.detected_at.desc())
         .limit(50)
     )).scalars().all())
     return {"data": {"problems": [_serialize_problem(p) for p in problems]}}
@@ -915,9 +915,9 @@ async def get_problem_impact(
     blast radius — was it a blip or a sustained regression?"""
     await _require_launched_product(pipeline_id, db, uid)
     problem = (await db.execute(
-        select(MonitoringProblem).where(
-            MonitoringProblem.id == problem_id,
-            MonitoringProblem.pipeline_id == pipeline_id,
+        select(MonitorProblem).where(
+            MonitorProblem.id == problem_id,
+            MonitorProblem.pipeline_id == pipeline_id,
         )
     )).scalar_one_or_none()
     if not problem:
@@ -930,8 +930,8 @@ async def get_problem_impact(
 
     impact = {"metric": problem.metric, "windowHours": window_hours, "before": None, "during": None, "after": None}
     model_extra = {
-        "errors": (PortfolioErrorEvent, ()),
-        "signups": (PortfolioUsageEvent, (PortfolioUsageEvent.event_type == "signup",)),
+        "errors": (MonitorErrorEvent, ()),
+        "signups": (MonitorUsageEvent, (MonitorUsageEvent.event_type == "signup",)),
     }.get(problem.metric or "")
     if model_extra:
         model, extra = model_extra
@@ -979,7 +979,7 @@ class ReportCreate(BaseModel):
     investigation_id: str | None = None
 
 
-def _serialize_investigation(inv: MonitoringInvestigation) -> dict:
+def _serialize_investigation(inv: MonitorInvestigation) -> dict:
     return {
         "id": inv.id,
         "title": inv.title,
@@ -990,7 +990,7 @@ def _serialize_investigation(inv: MonitoringInvestigation) -> dict:
     }
 
 
-def _serialize_entry(entry: MonitoringInvestigationEntry) -> dict:
+def _serialize_entry(entry: MonitorInvestigationEntry) -> dict:
     return {
         "id": entry.id,
         "kind": entry.kind,
@@ -1001,7 +1001,7 @@ def _serialize_entry(entry: MonitoringInvestigationEntry) -> dict:
     }
 
 
-def _serialize_report(report: MonitoringReport) -> dict:
+def _serialize_report(report: MonitorReport) -> dict:
     return {
         "id": report.id,
         "title": report.title,
@@ -1012,11 +1012,11 @@ def _serialize_report(report: MonitoringReport) -> dict:
     }
 
 
-async def _get_investigation(pipeline_id: str, investigation_id: str, db) -> MonitoringInvestigation:
+async def _get_investigation(pipeline_id: str, investigation_id: str, db) -> MonitorInvestigation:
     inv = (await db.execute(
-        select(MonitoringInvestigation).where(
-            MonitoringInvestigation.id == investigation_id,
-            MonitoringInvestigation.pipeline_id == pipeline_id,
+        select(MonitorInvestigation).where(
+            MonitorInvestigation.id == investigation_id,
+            MonitorInvestigation.pipeline_id == pipeline_id,
         )
     )).scalar_one_or_none()
     if not inv:
@@ -1033,7 +1033,7 @@ async def create_investigation(
 ):
     await _require_launched_product(pipeline_id, db, uid)
     now = _now()
-    inv = MonitoringInvestigation(
+    inv = MonitorInvestigation(
         id=str(uuid.uuid4()), pipeline_id=pipeline_id,
         title=body.title, summary=body.summary, status="open",
         created_at=now, updated_at=now,
@@ -1051,9 +1051,9 @@ async def list_investigations(
 ):
     await _require_launched_product(pipeline_id, db, uid)
     rows = list((await db.execute(
-        select(MonitoringInvestigation)
-        .where(MonitoringInvestigation.pipeline_id == pipeline_id)
-        .order_by(MonitoringInvestigation.created_at.desc())
+        select(MonitorInvestigation)
+        .where(MonitorInvestigation.pipeline_id == pipeline_id)
+        .order_by(MonitorInvestigation.created_at.desc())
         .limit(100)
     )).scalars().all())
     return {"data": {"investigations": [_serialize_investigation(i) for i in rows]}}
@@ -1070,9 +1070,9 @@ async def get_investigation(
     await _require_launched_product(pipeline_id, db, uid)
     inv = await _get_investigation(pipeline_id, investigation_id, db)
     entries = list((await db.execute(
-        select(MonitoringInvestigationEntry)
-        .where(MonitoringInvestigationEntry.investigation_id == investigation_id)
-        .order_by(MonitoringInvestigationEntry.created_at.asc())
+        select(MonitorInvestigationEntry)
+        .where(MonitorInvestigationEntry.investigation_id == investigation_id)
+        .order_by(MonitorInvestigationEntry.created_at.asc())
     )).scalars().all())
     return {
         "data": {
@@ -1119,7 +1119,7 @@ async def add_investigation_entry(
     if body.kind != "note" and not body.ref_id:
         raise HTTPException(status_code=422, detail="Evidence needs a ref_id")
     now = _now()
-    entry = MonitoringInvestigationEntry(
+    entry = MonitorInvestigationEntry(
         id=str(uuid.uuid4()), investigation_id=investigation_id,
         kind=body.kind, ref_id=body.ref_id, body=body.body,
         event_metadata=body.metadata or {}, created_at=now,
@@ -1139,7 +1139,7 @@ async def create_report(
 ):
     await _require_launched_product(pipeline_id, db, uid)
     now = _now()
-    report = MonitoringReport(
+    report = MonitorReport(
         id=str(uuid.uuid4()), pipeline_id=pipeline_id,
         investigation_id=body.investigation_id, title=body.title,
         body=body.body or "", created_at=now, updated_at=now,
@@ -1157,19 +1157,19 @@ async def list_reports(
 ):
     await _require_launched_product(pipeline_id, db, uid)
     rows = list((await db.execute(
-        select(MonitoringReport)
-        .where(MonitoringReport.pipeline_id == pipeline_id)
-        .order_by(MonitoringReport.created_at.desc())
+        select(MonitorReport)
+        .where(MonitorReport.pipeline_id == pipeline_id)
+        .order_by(MonitorReport.created_at.desc())
         .limit(100)
     )).scalars().all())
     return {"data": {"reports": [_serialize_report(r) for r in rows]}}
 
 
-async def _get_report(pipeline_id: str, report_id: str, db) -> MonitoringReport:
+async def _get_report(pipeline_id: str, report_id: str, db) -> MonitorReport:
     report = (await db.execute(
-        select(MonitoringReport).where(
-            MonitoringReport.id == report_id,
-            MonitoringReport.pipeline_id == pipeline_id,
+        select(MonitorReport).where(
+            MonitorReport.id == report_id,
+            MonitorReport.pipeline_id == pipeline_id,
         )
     )).scalar_one_or_none()
     if not report:
@@ -1304,7 +1304,7 @@ async def create_monitored_product(
     )
     db.add(product)
 
-    source = PortfolioUsageSource(
+    source = MonitorUsageSource(
         id=str(uuid.uuid4()),
         pipeline_id=product.id,
         user_id=uid,
@@ -1367,7 +1367,7 @@ async def create_usage_source(
         return {"data": _serialize_usage_source(existing)}
 
     now = _now()
-    source = PortfolioUsageSource(
+    source = MonitorUsageSource(
         id=str(uuid.uuid4()),
         pipeline_id=product.id,
         user_id=uid,
@@ -1417,7 +1417,7 @@ async def create_revenue_source(
         return {"data": _serialize_revenue_source(existing)}
 
     now = _now()
-    source = PortfolioRevenueSource(
+    source = MonitorRevenueSource(
         id=str(uuid.uuid4()),
         pipeline_id=product.id,
         user_id=uid,
@@ -1455,7 +1455,7 @@ async def create_first_party_revenue_source(
             detail="This product already has a connected revenue source; remove it before switching to first-party",
         )
     if not source:
-        source = PortfolioRevenueSource(
+        source = MonitorRevenueSource(
             id=str(uuid.uuid4()),
             pipeline_id=product.id,
             user_id=uid,
@@ -1497,7 +1497,7 @@ async def create_revenue_connect_url(
     source = await _revenue_source(product.id, db, body.provider)
     now = _now()
     if not source:
-        source = PortfolioRevenueSource(
+        source = MonitorRevenueSource(
             id=str(uuid.uuid4()),
             pipeline_id=product.id,
             user_id=uid,
@@ -1689,9 +1689,9 @@ async def get_revenue_correlation(
     customer_by_ref = {
         ref: cid
         for ref, cid in (await db.execute(
-            select(PortfolioIdentity.user_ref, PortfolioIdentity.stripe_customer_id).where(
-                PortfolioIdentity.pipeline_id == pipeline_id,
-                PortfolioIdentity.stripe_customer_id != None,
+            select(MonitorIdentity.user_ref, MonitorIdentity.stripe_customer_id).where(
+                MonitorIdentity.pipeline_id == pipeline_id,
+                MonitorIdentity.stripe_customer_id != None,
             )
         )).all()
     }
@@ -1699,10 +1699,10 @@ async def get_revenue_correlation(
     # Behaviors: event types each joined customer fired in the observation window.
     behaviors_by_customer: dict[str, set] = {}
     for ref, event_type in (await db.execute(
-        select(PortfolioUsageEvent.user_ref, PortfolioUsageEvent.event_type).where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.occurred_at >= observation_since,
-            PortfolioUsageEvent.user_ref != None,
+        select(MonitorUsageEvent.user_ref, MonitorUsageEvent.event_type).where(
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.occurred_at >= observation_since,
+            MonitorUsageEvent.user_ref != None,
         )
     )).all():
         customer_id = customer_by_ref.get(ref)
@@ -1716,12 +1716,12 @@ async def get_revenue_correlation(
         customer_rows = [
             (row.stripe_customer_id, row.as_of_date, row.mrr_cents, row.currency)
             for row in (await db.execute(
-                select(PortfolioCustomerMrr).where(PortfolioCustomerMrr.revenue_source_id == source.id)
+                select(MonitorCustomerMrr).where(MonitorCustomerMrr.revenue_source_id == source.id)
             )).scalars().all()
         ]
         net_by_customer: dict[str, int] = {}
         for row in (await db.execute(
-            select(PortfolioMrrMovement).where(PortfolioMrrMovement.revenue_source_id == source.id)
+            select(MonitorMrrMovement).where(MonitorMrrMovement.revenue_source_id == source.id)
         )).scalars().all():
             if outcome_start < row.effective_date <= now.date():
                 net_by_customer[row.stripe_customer_id] = net_by_customer.get(row.stripe_customer_id, 0) + row.mrr_delta_cents
@@ -2163,18 +2163,18 @@ def _revenue_metrics(
     }
 
 
-async def _compute_revenue_metrics(source: PortfolioRevenueSource, db: AsyncSession, eff: Any, window_days: int) -> dict:
+async def _compute_revenue_metrics(source: MonitorRevenueSource, db: AsyncSession, eff: Any, window_days: int) -> dict:
     """Load the source's movement + customer-MRR rows and derive the PR2 metrics."""
     customer_rows = [
         (row.stripe_customer_id, row.as_of_date, row.mrr_cents, row.currency)
         for row in (await db.execute(
-            select(PortfolioCustomerMrr).where(PortfolioCustomerMrr.revenue_source_id == source.id)
+            select(MonitorCustomerMrr).where(MonitorCustomerMrr.revenue_source_id == source.id)
         )).scalars().all()
     ]
     movements = [
         (row.stripe_customer_id, row.effective_date, row.movement_type, row.mrr_delta_cents, row.currency)
         for row in (await db.execute(
-            select(PortfolioMrrMovement).where(PortfolioMrrMovement.revenue_source_id == source.id)
+            select(MonitorMrrMovement).where(MonitorMrrMovement.revenue_source_id == source.id)
         )).scalars().all()
     ]
     now = _now()
@@ -2317,7 +2317,7 @@ async def _persist_billing_events(db: AsyncSession, events: list[dict]) -> int:
     if not events:
         return 0
     now = _now()
-    table = PortfolioBillingEvent.__table__
+    table = MonitorBillingEvent.__table__
     for event in events:
         await db.execute(
             pg_insert(table)
@@ -2330,7 +2330,7 @@ async def _persist_billing_events(db: AsyncSession, events: list[dict]) -> int:
 
 async def _persist_customer_mrr(db: AsyncSession, source_id: str, rows: list[tuple]) -> None:
     now = _now()
-    table = PortfolioCustomerMrr.__table__
+    table = MonitorCustomerMrr.__table__
     for customer, when, mrr, currency in rows:
         await db.execute(
             pg_insert(table)
@@ -2348,7 +2348,7 @@ async def _persist_customer_mrr(db: AsyncSession, source_id: str, rows: list[tup
 
 async def _persist_movements(db: AsyncSession, source_id: str, movements: list[dict]) -> None:
     now = _now()
-    table = PortfolioMrrMovement.__table__
+    table = MonitorMrrMovement.__table__
     for movement in movements:
         await db.execute(
             pg_insert(table)
@@ -2382,7 +2382,7 @@ def _active_subs_by_customer(active_subscriptions: list[Any], base_currency: str
     return by_customer
 
 
-async def _run_invoice_engine(source: PortfolioRevenueSource, db: AsyncSession, eff: Any) -> dict:
+async def _run_invoice_engine(source: MonitorRevenueSource, db: AsyncSession, eff: Any) -> dict:
     """Backfill billing events from the connected account's full invoice history,
     rebuild the per-customer MRR series + movements, and store the invoice-engine
     totals on ``source`` alongside the legacy snapshot. Returns a small summary
@@ -2447,7 +2447,7 @@ async def _run_invoice_engine(source: PortfolioRevenueSource, db: AsyncSession, 
     return {"current_total": current_total, "previous_total": previous_total, "warnings": warnings}
 
 
-def _log_engine_comparison(source: PortfolioRevenueSource, invoice_result: dict) -> None:
+def _log_engine_comparison(source: MonitorRevenueSource, invoice_result: dict) -> None:
     """Validation log: invoice-engine MRR vs the legacy subscription snapshot.
     The invoice figure is the more correct one; deltas come from prorations,
     discounts/refunds, and reconstructed history rather than current state only."""
@@ -2472,7 +2472,7 @@ def _log_engine_comparison(source: PortfolioRevenueSource, invoice_result: dict)
 async def _persist_customers(db: AsyncSession, source_id: str, customers: list[Any]) -> int:
     """Upsert the Stripe customer directory (id + email) for a source."""
     now = _now()
-    table = PortfolioCustomer.__table__
+    table = MonitorCustomer.__table__
     written = 0
     for customer in customers:
         customer_id = _stripe_value(customer, "id")
@@ -2510,20 +2510,20 @@ def _resolve_identity(stripe_customer_id: str | None, email: str | None, custome
 
 async def _customer_email_index(db: AsyncSession, source_id: str) -> dict[str, str]:
     rows = (await db.execute(
-        select(PortfolioCustomer.stripe_customer_id, PortfolioCustomer.email)
-        .where(PortfolioCustomer.revenue_source_id == source_id)
+        select(MonitorCustomer.stripe_customer_id, MonitorCustomer.email)
+        .where(MonitorCustomer.revenue_source_id == source_id)
     )).all()
     return {email.strip().lower(): cid for cid, email in rows if email}
 
 
-async def _resolve_pending_identities(db: AsyncSession, source: PortfolioRevenueSource) -> int:
+async def _resolve_pending_identities(db: AsyncSession, source: MonitorRevenueSource) -> int:
     """Re-resolve identities for this product that aren't explicitly joined yet,
     now that the customer directory is fresh. Returns how many became resolved."""
     email_index = await _customer_email_index(db, source.id)
     pending = (await db.execute(
-        select(PortfolioIdentity).where(
-            PortfolioIdentity.pipeline_id == source.pipeline_id,
-            PortfolioIdentity.resolution_method != "explicit",
+        select(MonitorIdentity).where(
+            MonitorIdentity.pipeline_id == source.pipeline_id,
+            MonitorIdentity.resolution_method != "explicit",
         )
     )).scalars().all()
     newly_resolved = 0
@@ -2546,9 +2546,9 @@ async def _join_coverage(db: AsyncSession, pipeline_id: str) -> dict:
     explicit id vs email vs unresolved. Validates the layer and predicts how
     strong the correlation inputs will be."""
     rows = (await db.execute(
-        select(PortfolioIdentity.resolution_method, func.count(PortfolioIdentity.id))
-        .where(PortfolioIdentity.pipeline_id == pipeline_id)
-        .group_by(PortfolioIdentity.resolution_method)
+        select(MonitorIdentity.resolution_method, func.count(MonitorIdentity.id))
+        .where(MonitorIdentity.pipeline_id == pipeline_id)
+        .group_by(MonitorIdentity.resolution_method)
     )).all()
     counts = {method: int(count) for method, count in rows}
     explicit = counts.get("explicit", 0)
@@ -2564,7 +2564,7 @@ async def _join_coverage(db: AsyncSession, pipeline_id: str) -> dict:
     }
 
 
-async def _perform_revenue_sync(source: PortfolioRevenueSource, db: AsyncSession, window_days: int | None = None) -> None:
+async def _perform_revenue_sync(source: MonitorRevenueSource, db: AsyncSession, window_days: int | None = None) -> None:
     """Pull fresh metrics from the connected Stripe account onto ``source`` and
     commit. Raises on Stripe failure; callers decide how to surface it."""
     window = window_days if window_days is not None else settings.revenue_sync_window_days
@@ -2635,11 +2635,11 @@ async def _sync_connected_revenue_sources(db: AsyncSession) -> int:
     # Connected sources need a provider account id; first-party sources read the
     # platform account directly and have none, so they're included unconditionally.
     sources = list((await db.execute(
-        select(PortfolioRevenueSource).where(
-            PortfolioRevenueSource.status == "connected",
+        select(MonitorRevenueSource).where(
+            MonitorRevenueSource.status == "connected",
             (
-                (PortfolioRevenueSource.account_mode == "first_party")
-                | (PortfolioRevenueSource.provider_account_id != None)
+                (MonitorRevenueSource.account_mode == "first_party")
+                | (MonitorRevenueSource.provider_account_id != None)
             ),
         )
     )).scalars().all())
@@ -2750,47 +2750,47 @@ async def get_usage_metrics(
     prev_week_start = now - timedelta(days=2 * growth_window)
 
     total_events = await db.scalar(
-        select(func.count(PortfolioUsageEvent.id)).where(PortfolioUsageEvent.pipeline_id == pipeline_id)
+        select(func.count(MonitorUsageEvent.id)).where(MonitorUsageEvent.pipeline_id == pipeline_id)
     ) or 0
 
     window_rows = (await db.execute(
-        select(PortfolioUsageEvent.event_type, func.count(PortfolioUsageEvent.id))
+        select(MonitorUsageEvent.event_type, func.count(MonitorUsageEvent.id))
         .where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.occurred_at >= since,
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.occurred_at >= since,
         )
-        .group_by(PortfolioUsageEvent.event_type)
+        .group_by(MonitorUsageEvent.event_type)
     )).all()
     counts = {event_type: int(count) for event_type, count in window_rows}
 
     visitors_14d = await db.scalar(
-        select(func.count(func.distinct(PortfolioUsageEvent.visitor_id))).where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.occurred_at >= since,
-            PortfolioUsageEvent.visitor_id != None,
+        select(func.count(func.distinct(MonitorUsageEvent.visitor_id))).where(
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.occurred_at >= since,
+            MonitorUsageEvent.visitor_id != None,
         )
     ) or 0
     active_users_14d = await db.scalar(
-        select(func.count(func.distinct(func.coalesce(PortfolioUsageEvent.user_ref, PortfolioUsageEvent.visitor_id)))).where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.occurred_at >= since,
+        select(func.count(func.distinct(func.coalesce(MonitorUsageEvent.user_ref, MonitorUsageEvent.visitor_id)))).where(
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.occurred_at >= since,
         )
     ) or 0
 
     daily = _empty_daily(usage_window)
     daily_rows = (await db.execute(
         select(
-            func.date(PortfolioUsageEvent.occurred_at),
-            PortfolioUsageEvent.event_type,
-            func.count(PortfolioUsageEvent.id),
-            func.count(func.distinct(PortfolioUsageEvent.visitor_id)),
+            func.date(MonitorUsageEvent.occurred_at),
+            MonitorUsageEvent.event_type,
+            func.count(MonitorUsageEvent.id),
+            func.count(func.distinct(MonitorUsageEvent.visitor_id)),
         )
         .where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.occurred_at >= since,
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.occurred_at >= since,
         )
-        .group_by(func.date(PortfolioUsageEvent.occurred_at), PortfolioUsageEvent.event_type)
-        .order_by(func.date(PortfolioUsageEvent.occurred_at).asc())
+        .group_by(func.date(MonitorUsageEvent.occurred_at), MonitorUsageEvent.event_type)
+        .order_by(func.date(MonitorUsageEvent.occurred_at).asc())
     )).all()
     for day, event_type, count, visitors in daily_rows:
         key = day.isoformat() if hasattr(day, "isoformat") else str(day)
@@ -2806,9 +2806,9 @@ async def get_usage_metrics(
             daily[key]["activations"] += int(count)
 
     recent_events = list((await db.execute(
-        select(PortfolioUsageEvent)
-        .where(PortfolioUsageEvent.pipeline_id == pipeline_id)
-        .order_by(PortfolioUsageEvent.occurred_at.desc())
+        select(MonitorUsageEvent)
+        .where(MonitorUsageEvent.pipeline_id == pipeline_id)
+        .order_by(MonitorUsageEvent.occurred_at.desc())
         .limit(20)
     )).scalars().all())
 
@@ -2823,19 +2823,19 @@ async def get_usage_metrics(
         }
         for url, views, visitors, last_seen in (await db.execute(
             select(
-                PortfolioUsageEvent.url,
-                func.count(PortfolioUsageEvent.id),
-                func.count(func.distinct(PortfolioUsageEvent.visitor_id)),
-                func.max(PortfolioUsageEvent.occurred_at),
+                MonitorUsageEvent.url,
+                func.count(MonitorUsageEvent.id),
+                func.count(func.distinct(MonitorUsageEvent.visitor_id)),
+                func.max(MonitorUsageEvent.occurred_at),
             )
             .where(
-                PortfolioUsageEvent.pipeline_id == pipeline_id,
-                PortfolioUsageEvent.occurred_at >= since,
-                PortfolioUsageEvent.event_type == "pageview",
-                PortfolioUsageEvent.url != None,
+                MonitorUsageEvent.pipeline_id == pipeline_id,
+                MonitorUsageEvent.occurred_at >= since,
+                MonitorUsageEvent.event_type == "pageview",
+                MonitorUsageEvent.url != None,
             )
-            .group_by(PortfolioUsageEvent.url)
-            .order_by(func.count(PortfolioUsageEvent.id).desc())
+            .group_by(MonitorUsageEvent.url)
+            .order_by(func.count(MonitorUsageEvent.id).desc())
             .limit(10)
         )).all()
     ]
@@ -2843,7 +2843,7 @@ async def get_usage_metrics(
     # Top events by frequency ranks actions, not pageviews. A custom event's name
     # lives in metadata.name; typed events (signup/login/activation) fall back to
     # their event_type. Pageviews are excluded — they're the top-pages rollup.
-    event_name = func.coalesce(PortfolioUsageEvent.event_metadata["name"].astext, PortfolioUsageEvent.event_type)
+    event_name = func.coalesce(MonitorUsageEvent.event_metadata["name"].astext, MonitorUsageEvent.event_type)
     top_events = [
         {
             "name": name,
@@ -2854,17 +2854,17 @@ async def get_usage_metrics(
         for name, count, visitors, last_seen in (await db.execute(
             select(
                 event_name.label("name"),
-                func.count(PortfolioUsageEvent.id),
-                func.count(func.distinct(PortfolioUsageEvent.visitor_id)),
-                func.max(PortfolioUsageEvent.occurred_at),
+                func.count(MonitorUsageEvent.id),
+                func.count(func.distinct(MonitorUsageEvent.visitor_id)),
+                func.max(MonitorUsageEvent.occurred_at),
             )
             .where(
-                PortfolioUsageEvent.pipeline_id == pipeline_id,
-                PortfolioUsageEvent.occurred_at >= since,
-                PortfolioUsageEvent.event_type != "pageview",
+                MonitorUsageEvent.pipeline_id == pipeline_id,
+                MonitorUsageEvent.occurred_at >= since,
+                MonitorUsageEvent.event_type != "pageview",
             )
             .group_by(event_name)
-            .order_by(func.count(PortfolioUsageEvent.id).desc())
+            .order_by(func.count(MonitorUsageEvent.id).desc())
             .limit(10)
         )).all()
     ]
@@ -2872,14 +2872,14 @@ async def get_usage_metrics(
     # Conversion funnel (14d): distinct visitors at each stage, so a few noisy
     # visitors firing many events don't distort the rates.
     stage_rows = (await db.execute(
-        select(PortfolioUsageEvent.event_type, func.count(func.distinct(PortfolioUsageEvent.visitor_id)))
+        select(MonitorUsageEvent.event_type, func.count(func.distinct(MonitorUsageEvent.visitor_id)))
         .where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.occurred_at >= since,
-            PortfolioUsageEvent.visitor_id != None,
-            PortfolioUsageEvent.event_type.in_(["signup", "activation"]),
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.occurred_at >= since,
+            MonitorUsageEvent.visitor_id != None,
+            MonitorUsageEvent.event_type.in_(["signup", "activation"]),
         )
-        .group_by(PortfolioUsageEvent.event_type)
+        .group_by(MonitorUsageEvent.event_type)
     )).all()
     stage_visitors = {event_type: int(count) for event_type, count in stage_rows}
     visited = int(visitors_14d)
@@ -2895,33 +2895,33 @@ async def get_usage_metrics(
 
     # Week-over-week growth: this 7d window vs the prior 7d window.
     this_week_visitors = int(await db.scalar(
-        select(func.count(func.distinct(PortfolioUsageEvent.visitor_id))).where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.occurred_at >= week_start,
-            PortfolioUsageEvent.visitor_id != None,
+        select(func.count(func.distinct(MonitorUsageEvent.visitor_id))).where(
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.occurred_at >= week_start,
+            MonitorUsageEvent.visitor_id != None,
         )
     ) or 0)
     prev_week_visitors = int(await db.scalar(
-        select(func.count(func.distinct(PortfolioUsageEvent.visitor_id))).where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.occurred_at >= prev_week_start,
-            PortfolioUsageEvent.occurred_at < week_start,
-            PortfolioUsageEvent.visitor_id != None,
+        select(func.count(func.distinct(MonitorUsageEvent.visitor_id))).where(
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.occurred_at >= prev_week_start,
+            MonitorUsageEvent.occurred_at < week_start,
+            MonitorUsageEvent.visitor_id != None,
         )
     ) or 0)
     this_week_signups = int(await db.scalar(
-        select(func.count(PortfolioUsageEvent.id)).where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.occurred_at >= week_start,
-            PortfolioUsageEvent.event_type == "signup",
+        select(func.count(MonitorUsageEvent.id)).where(
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.occurred_at >= week_start,
+            MonitorUsageEvent.event_type == "signup",
         )
     ) or 0)
     prev_week_signups = int(await db.scalar(
-        select(func.count(PortfolioUsageEvent.id)).where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.occurred_at >= prev_week_start,
-            PortfolioUsageEvent.occurred_at < week_start,
-            PortfolioUsageEvent.event_type == "signup",
+        select(func.count(MonitorUsageEvent.id)).where(
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.occurred_at >= prev_week_start,
+            MonitorUsageEvent.occurred_at < week_start,
+            MonitorUsageEvent.event_type == "signup",
         )
     ) or 0)
     growth = {
@@ -2942,20 +2942,20 @@ async def get_usage_metrics(
     retention_window_days = eff.analytics_retention_window_days
     retention_since = now - timedelta(days=retention_window_days)
     first_seen_rows = (await db.execute(
-        select(PortfolioUsageEvent.visitor_id, func.min(func.date(PortfolioUsageEvent.occurred_at)))
+        select(MonitorUsageEvent.visitor_id, func.min(func.date(MonitorUsageEvent.occurred_at)))
         .where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.occurred_at >= retention_since,
-            PortfolioUsageEvent.visitor_id != None,
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.occurred_at >= retention_since,
+            MonitorUsageEvent.visitor_id != None,
         )
-        .group_by(PortfolioUsageEvent.visitor_id)
+        .group_by(MonitorUsageEvent.visitor_id)
     )).all()
     active_rows = (await db.execute(
-        select(PortfolioUsageEvent.visitor_id, func.date(PortfolioUsageEvent.occurred_at))
+        select(MonitorUsageEvent.visitor_id, func.date(MonitorUsageEvent.occurred_at))
         .where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.occurred_at >= retention_since,
-            PortfolioUsageEvent.visitor_id != None,
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.occurred_at >= retention_since,
+            MonitorUsageEvent.visitor_id != None,
         )
         .distinct()
     )).all()
@@ -3014,37 +3014,37 @@ async def get_sessions(
     since = _now() - timedelta(days=usage_window)
 
     base = (
-        PortfolioUsageEvent.pipeline_id == pipeline_id,
-        PortfolioUsageEvent.occurred_at >= since,
-        PortfolioUsageEvent.session_id != None,
+        MonitorUsageEvent.pipeline_id == pipeline_id,
+        MonitorUsageEvent.occurred_at >= since,
+        MonitorUsageEvent.session_id != None,
     )
     total_sessions = int(await db.scalar(
-        select(func.count(func.distinct(PortfolioUsageEvent.session_id))).where(*base)
+        select(func.count(func.distinct(MonitorUsageEvent.session_id))).where(*base)
     ) or 0)
     identified_sessions = int(await db.scalar(
-        select(func.count(func.distinct(PortfolioUsageEvent.session_id))).where(
-            *base, PortfolioUsageEvent.user_ref != None
+        select(func.count(func.distinct(MonitorUsageEvent.session_id))).where(
+            *base, MonitorUsageEvent.user_ref != None
         )
     ) or 0)
     total_events = int(await db.scalar(
-        select(func.count(PortfolioUsageEvent.id)).where(*base)
+        select(func.count(MonitorUsageEvent.id)).where(*base)
     ) or 0)
 
     # The rollup: one aggregated row per session, most-recently-active first.
-    pageviews = func.sum(case((PortfolioUsageEvent.event_type == "pageview", 1), else_=0))
+    pageviews = func.sum(case((MonitorUsageEvent.event_type == "pageview", 1), else_=0))
     rows = (await db.execute(
         select(
-            PortfolioUsageEvent.session_id,
-            func.max(PortfolioUsageEvent.visitor_id),
-            func.max(PortfolioUsageEvent.user_ref),
-            func.min(PortfolioUsageEvent.occurred_at),
-            func.max(PortfolioUsageEvent.occurred_at),
-            func.count(PortfolioUsageEvent.id),
+            MonitorUsageEvent.session_id,
+            func.max(MonitorUsageEvent.visitor_id),
+            func.max(MonitorUsageEvent.user_ref),
+            func.min(MonitorUsageEvent.occurred_at),
+            func.max(MonitorUsageEvent.occurred_at),
+            func.count(MonitorUsageEvent.id),
             pageviews,
         )
         .where(*base)
-        .group_by(PortfolioUsageEvent.session_id)
-        .order_by(func.max(PortfolioUsageEvent.occurred_at).desc())
+        .group_by(MonitorUsageEvent.session_id)
+        .order_by(func.max(MonitorUsageEvent.occurred_at).desc())
         .limit(50)
     )).all()
 
@@ -3092,21 +3092,21 @@ async def get_session_detail(
     source = await _usage_source(pipeline_id, db)
 
     usage_events = list((await db.execute(
-        select(PortfolioUsageEvent)
+        select(MonitorUsageEvent)
         .where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.session_id == session_id,
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.session_id == session_id,
         )
-        .order_by(PortfolioUsageEvent.occurred_at.asc())
+        .order_by(MonitorUsageEvent.occurred_at.asc())
         .limit(500)
     )).scalars().all())
     error_events = list((await db.execute(
-        select(PortfolioErrorEvent)
+        select(MonitorErrorEvent)
         .where(
-            PortfolioErrorEvent.pipeline_id == pipeline_id,
-            PortfolioErrorEvent.session_id == session_id,
+            MonitorErrorEvent.pipeline_id == pipeline_id,
+            MonitorErrorEvent.session_id == session_id,
         )
-        .order_by(PortfolioErrorEvent.occurred_at.asc())
+        .order_by(MonitorErrorEvent.occurred_at.asc())
         .limit(500)
     )).scalars().all())
 
@@ -3195,19 +3195,19 @@ async def get_timeseries(
 
     if metric == "errors":
         series_rows = (await db.execute(
-            select(func.date(PortfolioErrorEvent.occurred_at), func.count(PortfolioErrorEvent.id))
-            .where(PortfolioErrorEvent.pipeline_id == pipeline_id, PortfolioErrorEvent.occurred_at >= since)
-            .group_by(func.date(PortfolioErrorEvent.occurred_at))
+            select(func.date(MonitorErrorEvent.occurred_at), func.count(MonitorErrorEvent.id))
+            .where(MonitorErrorEvent.pipeline_id == pipeline_id, MonitorErrorEvent.occurred_at >= since)
+            .group_by(func.date(MonitorErrorEvent.occurred_at))
         )).all()
     else:
         series_rows = (await db.execute(
-            select(func.date(PortfolioUsageEvent.occurred_at), func.count(PortfolioUsageEvent.id))
+            select(func.date(MonitorUsageEvent.occurred_at), func.count(MonitorUsageEvent.id))
             .where(
-                PortfolioUsageEvent.pipeline_id == pipeline_id,
-                PortfolioUsageEvent.occurred_at >= since,
-                PortfolioUsageEvent.event_type == "pageview",
+                MonitorUsageEvent.pipeline_id == pipeline_id,
+                MonitorUsageEvent.occurred_at >= since,
+                MonitorUsageEvent.event_type == "pageview",
             )
-            .group_by(func.date(PortfolioUsageEvent.occurred_at))
+            .group_by(func.date(MonitorUsageEvent.occurred_at))
         )).all()
     counts: dict[str, int] = {}
     for day, count in series_rows:
@@ -3218,13 +3218,13 @@ async def get_timeseries(
 
     # Deploy markers: the first day each release was seen (a release rollout).
     marker_rows = (await db.execute(
-        select(PortfolioUsageEvent.release, func.min(func.date(PortfolioUsageEvent.occurred_at)))
+        select(MonitorUsageEvent.release, func.min(func.date(MonitorUsageEvent.occurred_at)))
         .where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.occurred_at >= since,
-            PortfolioUsageEvent.release != None,
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.occurred_at >= since,
+            MonitorUsageEvent.release != None,
         )
-        .group_by(PortfolioUsageEvent.release)
+        .group_by(MonitorUsageEvent.release)
     )).all()
     markers = []
     for release, first_day in marker_rows:
@@ -3271,54 +3271,54 @@ async def get_explorer(
     window_dates = sorted(_empty_daily(usage_window).keys())
 
     load_rows = (await db.execute(
-        select(PortfolioUsageEvent.url, func.count(PortfolioUsageEvent.id))
+        select(MonitorUsageEvent.url, func.count(MonitorUsageEvent.id))
         .where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.occurred_at >= since,
-            PortfolioUsageEvent.event_type == "pageview",
-            PortfolioUsageEvent.url != None,
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.occurred_at >= since,
+            MonitorUsageEvent.event_type == "pageview",
+            MonitorUsageEvent.url != None,
         )
-        .group_by(PortfolioUsageEvent.url)
-        .order_by(func.count(PortfolioUsageEvent.id).desc())
+        .group_by(MonitorUsageEvent.url)
+        .order_by(func.count(MonitorUsageEvent.id).desc())
         .limit(25)
     )).all()
     urls = [url for url, _ in load_rows]
 
     error_rows = (await db.execute(
-        select(PortfolioErrorEvent.url, func.count(PortfolioErrorEvent.id))
+        select(MonitorErrorEvent.url, func.count(MonitorErrorEvent.id))
         .where(
-            PortfolioErrorEvent.pipeline_id == pipeline_id,
-            PortfolioErrorEvent.occurred_at >= since,
-            PortfolioErrorEvent.url.in_(urls) if urls else False,
+            MonitorErrorEvent.pipeline_id == pipeline_id,
+            MonitorErrorEvent.occurred_at >= since,
+            MonitorErrorEvent.url.in_(urls) if urls else False,
         )
-        .group_by(PortfolioErrorEvent.url)
+        .group_by(MonitorErrorEvent.url)
     )).all()
     errors_by_url = {url: int(count) for url, count in error_rows}
 
     lcp_rows = (await db.execute(
         select(
-            PortfolioWebVital.url,
-            func.percentile_cont(0.75).within_group(PortfolioWebVital.value.asc()),
+            MonitorWebVital.url,
+            func.percentile_cont(0.75).within_group(MonitorWebVital.value.asc()),
         )
         .where(
-            PortfolioWebVital.pipeline_id == pipeline_id,
-            PortfolioWebVital.occurred_at >= since,
-            PortfolioWebVital.metric == "LCP",
-            PortfolioWebVital.url.in_(urls) if urls else False,
+            MonitorWebVital.pipeline_id == pipeline_id,
+            MonitorWebVital.occurred_at >= since,
+            MonitorWebVital.metric == "LCP",
+            MonitorWebVital.url.in_(urls) if urls else False,
         )
-        .group_by(PortfolioWebVital.url)
+        .group_by(MonitorWebVital.url)
     )).all()
     lcp_by_url = {url: p75 for url, p75 in lcp_rows}
 
     spark_rows = (await db.execute(
-        select(PortfolioUsageEvent.url, func.date(PortfolioUsageEvent.occurred_at), func.count(PortfolioUsageEvent.id))
+        select(MonitorUsageEvent.url, func.date(MonitorUsageEvent.occurred_at), func.count(MonitorUsageEvent.id))
         .where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.occurred_at >= since,
-            PortfolioUsageEvent.event_type == "pageview",
-            PortfolioUsageEvent.url.in_(urls) if urls else False,
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.occurred_at >= since,
+            MonitorUsageEvent.event_type == "pageview",
+            MonitorUsageEvent.url.in_(urls) if urls else False,
         )
-        .group_by(PortfolioUsageEvent.url, func.date(PortfolioUsageEvent.occurred_at))
+        .group_by(MonitorUsageEvent.url, func.date(MonitorUsageEvent.occurred_at))
     )).all()
     spark_by_url: dict[str, dict[str, int]] = {}
     for url, day, count in spark_rows:
@@ -3367,19 +3367,19 @@ async def get_trace(
     await _require_launched_product(pipeline_id, db, uid)
 
     spans = list((await db.execute(
-        select(PortfolioSpan)
-        .where(PortfolioSpan.pipeline_id == pipeline_id, PortfolioSpan.trace_id == trace_id)
-        .order_by(PortfolioSpan.start_at.asc())
+        select(MonitorSpan)
+        .where(MonitorSpan.pipeline_id == pipeline_id, MonitorSpan.trace_id == trace_id)
+        .order_by(MonitorSpan.start_at.asc())
     )).scalars().all())
     errors = list((await db.execute(
-        select(PortfolioErrorEvent)
-        .where(PortfolioErrorEvent.pipeline_id == pipeline_id, PortfolioErrorEvent.trace_id == trace_id)
-        .order_by(PortfolioErrorEvent.occurred_at.asc())
+        select(MonitorErrorEvent)
+        .where(MonitorErrorEvent.pipeline_id == pipeline_id, MonitorErrorEvent.trace_id == trace_id)
+        .order_by(MonitorErrorEvent.occurred_at.asc())
     )).scalars().all())
     logs = list((await db.execute(
-        select(PortfolioLog)
-        .where(PortfolioLog.pipeline_id == pipeline_id, PortfolioLog.trace_id == trace_id)
-        .order_by(PortfolioLog.occurred_at.asc())
+        select(MonitorLog)
+        .where(MonitorLog.pipeline_id == pipeline_id, MonitorLog.trace_id == trace_id)
+        .order_by(MonitorLog.occurred_at.asc())
     )).scalars().all())
 
     span_payloads = [_serialize_span(span, depth) for span, depth in _order_span_tree(spans)]
@@ -3457,15 +3457,15 @@ async def get_flow(
     since = _now() - timedelta(days=usage_window)
 
     rows = (await db.execute(
-        select(PortfolioUsageEvent.session_id, PortfolioUsageEvent.url, PortfolioUsageEvent.occurred_at)
+        select(MonitorUsageEvent.session_id, MonitorUsageEvent.url, MonitorUsageEvent.occurred_at)
         .where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.occurred_at >= since,
-            PortfolioUsageEvent.event_type == "pageview",
-            PortfolioUsageEvent.session_id != None,
-            PortfolioUsageEvent.url != None,
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.occurred_at >= since,
+            MonitorUsageEvent.event_type == "pageview",
+            MonitorUsageEvent.session_id != None,
+            MonitorUsageEvent.url != None,
         )
-        .order_by(PortfolioUsageEvent.session_id.asc(), PortfolioUsageEvent.occurred_at.asc())
+        .order_by(MonitorUsageEvent.session_id.asc(), MonitorUsageEvent.occurred_at.asc())
         .limit(5000)
     )).all()
     nodes, edges = _flow_graph(rows)
@@ -3503,34 +3503,34 @@ async def get_experience_vitals(
 
     metric_rows = (await db.execute(
         select(
-            PortfolioWebVital.metric,
-            func.count(PortfolioWebVital.id),
-            func.percentile_cont(0.75).within_group(PortfolioWebVital.value.asc()),
+            MonitorWebVital.metric,
+            func.count(MonitorWebVital.id),
+            func.percentile_cont(0.75).within_group(MonitorWebVital.value.asc()),
         )
-        .where(PortfolioWebVital.pipeline_id == pipeline_id, PortfolioWebVital.occurred_at >= since)
-        .group_by(PortfolioWebVital.metric)
+        .where(MonitorWebVital.pipeline_id == pipeline_id, MonitorWebVital.occurred_at >= since)
+        .group_by(MonitorWebVital.metric)
     )).all()
 
     rating_rows = (await db.execute(
-        select(PortfolioWebVital.metric, PortfolioWebVital.rating, func.count(PortfolioWebVital.id))
-        .where(PortfolioWebVital.pipeline_id == pipeline_id, PortfolioWebVital.occurred_at >= since)
-        .group_by(PortfolioWebVital.metric, PortfolioWebVital.rating)
+        select(MonitorWebVital.metric, MonitorWebVital.rating, func.count(MonitorWebVital.id))
+        .where(MonitorWebVital.pipeline_id == pipeline_id, MonitorWebVital.occurred_at >= since)
+        .group_by(MonitorWebVital.metric, MonitorWebVital.rating)
     )).all()
 
     url_rows = (await db.execute(
         select(
-            PortfolioWebVital.url,
-            PortfolioWebVital.metric,
-            func.count(PortfolioWebVital.id),
-            func.percentile_cont(0.75).within_group(PortfolioWebVital.value.asc()),
+            MonitorWebVital.url,
+            MonitorWebVital.metric,
+            func.count(MonitorWebVital.id),
+            func.percentile_cont(0.75).within_group(MonitorWebVital.value.asc()),
         )
         .where(
-            PortfolioWebVital.pipeline_id == pipeline_id,
-            PortfolioWebVital.occurred_at >= since,
-            PortfolioWebVital.url != None,
+            MonitorWebVital.pipeline_id == pipeline_id,
+            MonitorWebVital.occurred_at >= since,
+            MonitorWebVital.url != None,
         )
-        .group_by(PortfolioWebVital.url, PortfolioWebVital.metric)
-        .order_by(func.count(PortfolioWebVital.id).desc())
+        .group_by(MonitorWebVital.url, MonitorWebVital.metric)
+        .order_by(func.count(MonitorWebVital.id).desc())
         .limit(60)
     )).all()
 
@@ -3597,16 +3597,16 @@ async def get_logs(
 
     # Filters other than level apply to both the level facet and the lines, so
     # the facet shows the level distribution within the current context.
-    base = [PortfolioLog.pipeline_id == pipeline_id, PortfolioLog.occurred_at >= since]
+    base = [MonitorLog.pipeline_id == pipeline_id, MonitorLog.occurred_at >= since]
     if q:
-        base.append(PortfolioLog.message.ilike(f"%{q}%"))
+        base.append(MonitorLog.message.ilike(f"%{q}%"))
     if session:
-        base.append(PortfolioLog.session_id == session)
+        base.append(MonitorLog.session_id == session)
     if release:
-        base.append(PortfolioLog.release == release)
+        base.append(MonitorLog.release == release)
 
     level_rows = (await db.execute(
-        select(PortfolioLog.level, func.count(PortfolioLog.id)).where(*base).group_by(PortfolioLog.level)
+        select(MonitorLog.level, func.count(MonitorLog.id)).where(*base).group_by(MonitorLog.level)
     )).all()
     level_counts = {lvl: 0 for lvl in ("debug", "info", "warn", "error")}
     for lvl, count in level_rows:
@@ -3615,11 +3615,11 @@ async def get_logs(
 
     line_filters = list(base)
     if level:
-        line_filters.append(PortfolioLog.level == level)
+        line_filters.append(MonitorLog.level == level)
     logs = list((await db.execute(
-        select(PortfolioLog)
+        select(MonitorLog)
         .where(*line_filters)
-        .order_by(PortfolioLog.occurred_at.desc())
+        .order_by(MonitorLog.occurred_at.desc())
         .limit(limit)
     )).scalars().all())
 
@@ -3719,61 +3719,61 @@ async def get_correlation(
 
     usage_rows = (await db.execute(
         select(
-            func.date(PortfolioUsageEvent.occurred_at),
-            PortfolioUsageEvent.event_type,
-            func.count(PortfolioUsageEvent.id),
-            func.count(func.distinct(PortfolioUsageEvent.visitor_id)),
+            func.date(MonitorUsageEvent.occurred_at),
+            MonitorUsageEvent.event_type,
+            func.count(MonitorUsageEvent.id),
+            func.count(func.distinct(MonitorUsageEvent.visitor_id)),
         )
         .where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.occurred_at >= since,
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.occurred_at >= since,
         )
-        .group_by(func.date(PortfolioUsageEvent.occurred_at), PortfolioUsageEvent.event_type)
+        .group_by(func.date(MonitorUsageEvent.occurred_at), MonitorUsageEvent.event_type)
     )).all()
     error_rows = (await db.execute(
-        select(func.date(PortfolioErrorEvent.occurred_at), func.count(PortfolioErrorEvent.id))
+        select(func.date(MonitorErrorEvent.occurred_at), func.count(MonitorErrorEvent.id))
         .where(
-            PortfolioErrorEvent.pipeline_id == pipeline_id,
-            PortfolioErrorEvent.occurred_at >= since,
+            MonitorErrorEvent.pipeline_id == pipeline_id,
+            MonitorErrorEvent.occurred_at >= since,
         )
-        .group_by(func.date(PortfolioErrorEvent.occurred_at))
+        .group_by(func.date(MonitorErrorEvent.occurred_at))
     )).all()
 
     days = _build_correlation_days(list(usage_rows), list(error_rows), days=correlation_window, today=now.date())
     insights = _correlation_insights(days)
 
     revenue = await db.scalar(
-        select(PortfolioRevenueSource).where(
-            PortfolioRevenueSource.pipeline_id == pipeline_id,
-            PortfolioRevenueSource.provider == "stripe",
+        select(MonitorRevenueSource).where(
+            MonitorRevenueSource.pipeline_id == pipeline_id,
+            MonitorRevenueSource.provider == "stripe",
         )
     )
     this_week_signups = int(await db.scalar(
-        select(func.count(PortfolioUsageEvent.id)).where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.event_type == "signup",
-            PortfolioUsageEvent.occurred_at >= week_start,
+        select(func.count(MonitorUsageEvent.id)).where(
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.event_type == "signup",
+            MonitorUsageEvent.occurred_at >= week_start,
         )
     ) or 0)
     prev_week_signups = int(await db.scalar(
-        select(func.count(PortfolioUsageEvent.id)).where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.event_type == "signup",
-            PortfolioUsageEvent.occurred_at >= prev_week_start,
-            PortfolioUsageEvent.occurred_at < week_start,
+        select(func.count(MonitorUsageEvent.id)).where(
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.event_type == "signup",
+            MonitorUsageEvent.occurred_at >= prev_week_start,
+            MonitorUsageEvent.occurred_at < week_start,
         )
     ) or 0)
     errors_14d = int(await db.scalar(
-        select(func.count(PortfolioErrorEvent.id)).where(
-            PortfolioErrorEvent.pipeline_id == pipeline_id,
-            PortfolioErrorEvent.occurred_at >= usage_window_ago,
+        select(func.count(MonitorErrorEvent.id)).where(
+            MonitorErrorEvent.pipeline_id == pipeline_id,
+            MonitorErrorEvent.occurred_at >= usage_window_ago,
         )
     ) or 0)
     sessions_14d = int(await db.scalar(
-        select(func.count(func.distinct(PortfolioUsageEvent.session_id))).where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.occurred_at >= usage_window_ago,
-            PortfolioUsageEvent.session_id != None,
+        select(func.count(func.distinct(MonitorUsageEvent.session_id))).where(
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.occurred_at >= usage_window_ago,
+            MonitorUsageEvent.session_id != None,
         )
     ) or 0)
 
@@ -3828,7 +3828,7 @@ async def update_alert_settings(
     await _require_launched_product(pipeline_id, db, uid)
     row = await alert_settings_row(db, pipeline_id)
     if row is None:
-        row = PortfolioAlertSettings(pipeline_id=pipeline_id)
+        row = MonitorAlertSettings(pipeline_id=pipeline_id)
         db.add(row)
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(row, field, value)
@@ -3845,13 +3845,13 @@ def _error_dimension_filters(pipeline_id: str, since, *, error_type: str | None,
     at least one occurrence on that platform in the window."""
     conditions = []
     if error_type:
-        conditions.append(PortfolioErrorGroup.error_type == error_type)
+        conditions.append(MonitorErrorGroup.error_type == error_type)
     if platform:
-        conditions.append(PortfolioErrorGroup.id.in_(
-            select(PortfolioErrorEvent.group_id).where(
-                PortfolioErrorEvent.pipeline_id == pipeline_id,
-                PortfolioErrorEvent.platform == platform,
-                PortfolioErrorEvent.occurred_at >= since,
+        conditions.append(MonitorErrorGroup.id.in_(
+            select(MonitorErrorEvent.group_id).where(
+                MonitorErrorEvent.pipeline_id == pipeline_id,
+                MonitorErrorEvent.platform == platform,
+                MonitorErrorEvent.occurred_at >= since,
             ).distinct()
         ))
     return conditions
@@ -3863,24 +3863,24 @@ async def _error_dimension_facets(pipeline_id: str, since, db: AsyncSession) -> 
     disappears just because it's selected. error_type is group-grained; platform
     is event-grained, counted as the distinct groups seen on each platform."""
     error_type_rows = (await db.execute(
-        select(PortfolioErrorGroup.error_type, func.count(PortfolioErrorGroup.id))
+        select(MonitorErrorGroup.error_type, func.count(MonitorErrorGroup.id))
         .where(
-            PortfolioErrorGroup.pipeline_id == pipeline_id,
-            PortfolioErrorGroup.last_seen_at >= since,
-            PortfolioErrorGroup.error_type.isnot(None),
+            MonitorErrorGroup.pipeline_id == pipeline_id,
+            MonitorErrorGroup.last_seen_at >= since,
+            MonitorErrorGroup.error_type.isnot(None),
         )
-        .group_by(PortfolioErrorGroup.error_type)
-        .order_by(func.count(PortfolioErrorGroup.id).desc())
+        .group_by(MonitorErrorGroup.error_type)
+        .order_by(func.count(MonitorErrorGroup.id).desc())
     )).all()
     platform_rows = (await db.execute(
-        select(PortfolioErrorEvent.platform, func.count(func.distinct(PortfolioErrorEvent.group_id)))
+        select(MonitorErrorEvent.platform, func.count(func.distinct(MonitorErrorEvent.group_id)))
         .where(
-            PortfolioErrorEvent.pipeline_id == pipeline_id,
-            PortfolioErrorEvent.occurred_at >= since,
-            PortfolioErrorEvent.platform.isnot(None),
+            MonitorErrorEvent.pipeline_id == pipeline_id,
+            MonitorErrorEvent.occurred_at >= since,
+            MonitorErrorEvent.platform.isnot(None),
         )
-        .group_by(PortfolioErrorEvent.platform)
-        .order_by(func.count(func.distinct(PortfolioErrorEvent.group_id)).desc())
+        .group_by(MonitorErrorEvent.platform)
+        .order_by(func.count(func.distinct(MonitorErrorEvent.group_id)).desc())
     )).all()
     return {
         "errorType": [{"value": v, "count": int(c)} for v, c in error_type_rows],
@@ -3907,51 +3907,51 @@ async def get_error_metrics(
     # filter narrows detail without hiding the product's overall error picture.
     event_filters = []
     if error_type:
-        event_filters.append(PortfolioErrorEvent.error_type == error_type)
+        event_filters.append(MonitorErrorEvent.error_type == error_type)
     if platform:
-        event_filters.append(PortfolioErrorEvent.platform == platform)
+        event_filters.append(MonitorErrorEvent.platform == platform)
 
     total_errors = await db.scalar(
-        select(func.count(PortfolioErrorEvent.id)).where(PortfolioErrorEvent.pipeline_id == pipeline_id)
+        select(func.count(MonitorErrorEvent.id)).where(MonitorErrorEvent.pipeline_id == pipeline_id)
     ) or 0
     errors_14d = await db.scalar(
-        select(func.count(PortfolioErrorEvent.id)).where(
-            PortfolioErrorEvent.pipeline_id == pipeline_id,
-            PortfolioErrorEvent.occurred_at >= since,
+        select(func.count(MonitorErrorEvent.id)).where(
+            MonitorErrorEvent.pipeline_id == pipeline_id,
+            MonitorErrorEvent.occurred_at >= since,
         )
     ) or 0
     affected_sessions_14d = await db.scalar(
-        select(func.count(func.distinct(PortfolioErrorEvent.session_id))).where(
-            PortfolioErrorEvent.pipeline_id == pipeline_id,
-            PortfolioErrorEvent.occurred_at >= since,
-            PortfolioErrorEvent.session_id != None,
+        select(func.count(func.distinct(MonitorErrorEvent.session_id))).where(
+            MonitorErrorEvent.pipeline_id == pipeline_id,
+            MonitorErrorEvent.occurred_at >= since,
+            MonitorErrorEvent.session_id != None,
         )
     ) or 0
     # Denominator for a rate (not a raw count): a traffic spike shouldn't read
     # as an error spike. Uses the usage sessions already collected for the product.
     usage_sessions_14d = await db.scalar(
-        select(func.count(func.distinct(PortfolioUsageEvent.session_id))).where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.occurred_at >= since,
-            PortfolioUsageEvent.session_id != None,
+        select(func.count(func.distinct(MonitorUsageEvent.session_id))).where(
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.occurred_at >= since,
+            MonitorUsageEvent.session_id != None,
         )
     ) or 0
     open_issues = await db.scalar(
-        select(func.count(PortfolioErrorGroup.id)).where(
-            PortfolioErrorGroup.pipeline_id == pipeline_id,
-            PortfolioErrorGroup.status == "unresolved",
+        select(func.count(MonitorErrorGroup.id)).where(
+            MonitorErrorGroup.pipeline_id == pipeline_id,
+            MonitorErrorGroup.status == "unresolved",
         )
     ) or 0
 
     daily = _empty_error_daily(usage_window)
     daily_rows = (await db.execute(
-        select(func.date(PortfolioErrorEvent.occurred_at), func.count(PortfolioErrorEvent.id))
+        select(func.date(MonitorErrorEvent.occurred_at), func.count(MonitorErrorEvent.id))
         .where(
-            PortfolioErrorEvent.pipeline_id == pipeline_id,
-            PortfolioErrorEvent.occurred_at >= since,
+            MonitorErrorEvent.pipeline_id == pipeline_id,
+            MonitorErrorEvent.occurred_at >= since,
         )
-        .group_by(func.date(PortfolioErrorEvent.occurred_at))
-        .order_by(func.date(PortfolioErrorEvent.occurred_at).asc())
+        .group_by(func.date(MonitorErrorEvent.occurred_at))
+        .order_by(func.date(MonitorErrorEvent.occurred_at).asc())
     )).all()
     for day, count in daily_rows:
         key = day.isoformat() if hasattr(day, "isoformat") else str(day)
@@ -3959,31 +3959,31 @@ async def get_error_metrics(
             daily[key]["errors"] += int(count)
 
     top_groups = list((await db.execute(
-        select(PortfolioErrorGroup)
+        select(MonitorErrorGroup)
         .where(
-            PortfolioErrorGroup.pipeline_id == pipeline_id,
-            PortfolioErrorGroup.last_seen_at >= since,
+            MonitorErrorGroup.pipeline_id == pipeline_id,
+            MonitorErrorGroup.last_seen_at >= since,
             *_error_dimension_filters(pipeline_id, since, error_type=error_type, platform=platform),
         )
-        .order_by(PortfolioErrorGroup.event_count.desc(), PortfolioErrorGroup.last_seen_at.desc())
+        .order_by(MonitorErrorGroup.event_count.desc(), MonitorErrorGroup.last_seen_at.desc())
         .limit(10)
     )).scalars().all())
 
     session_rows = (await db.execute(
-        select(PortfolioErrorEvent.group_id, func.count(func.distinct(PortfolioErrorEvent.session_id)))
+        select(MonitorErrorEvent.group_id, func.count(func.distinct(MonitorErrorEvent.session_id)))
         .where(
-            PortfolioErrorEvent.pipeline_id == pipeline_id,
-            PortfolioErrorEvent.occurred_at >= since,
-            PortfolioErrorEvent.session_id != None,
+            MonitorErrorEvent.pipeline_id == pipeline_id,
+            MonitorErrorEvent.occurred_at >= since,
+            MonitorErrorEvent.session_id != None,
         )
-        .group_by(PortfolioErrorEvent.group_id)
+        .group_by(MonitorErrorEvent.group_id)
     )).all()
     sessions_by_group = {group_id: int(count) for group_id, count in session_rows}
 
     recent_errors = list((await db.execute(
-        select(PortfolioErrorEvent)
-        .where(PortfolioErrorEvent.pipeline_id == pipeline_id, *event_filters)
-        .order_by(PortfolioErrorEvent.occurred_at.desc())
+        select(MonitorErrorEvent)
+        .where(MonitorErrorEvent.pipeline_id == pipeline_id, *event_filters)
+        .order_by(MonitorErrorEvent.occurred_at.desc())
         .limit(20)
     )).scalars().all())
 
@@ -4029,7 +4029,7 @@ def _issue_trend(recent: int, prior: int) -> dict:
     return {"direction": direction, "recent": int(recent), "prior": int(prior), "changePct": change_pct}
 
 
-def _serialize_issue(group: PortfolioErrorGroup, *, affected_users, affected_sessions, occurrences, trend) -> dict:
+def _serialize_issue(group: MonitorErrorGroup, *, affected_users, affected_sessions, occurrences, trend) -> dict:
     """A fingerprint group promoted to an issue object: the group's identity plus
     the impact metrics the engine computes (affected users/sessions, windowed
     occurrences, trend). affected-users is net-new — it isn't stored anywhere."""
@@ -4070,25 +4070,25 @@ async def get_issues(
     usage_window = eff.analytics_usage_window_days
     since = now - timedelta(days=usage_window)
     midpoint = now - timedelta(days=usage_window / 2)
-    actor = func.coalesce(PortfolioErrorEvent.user_ref, PortfolioErrorEvent.visitor_id)
+    actor = func.coalesce(MonitorErrorEvent.user_ref, MonitorErrorEvent.visitor_id)
 
     open_issues = int(await db.scalar(
-        select(func.count(PortfolioErrorGroup.id)).where(
-            PortfolioErrorGroup.pipeline_id == pipeline_id,
-            PortfolioErrorGroup.status == "unresolved",
-            PortfolioErrorGroup.last_seen_at >= since,
+        select(func.count(MonitorErrorGroup.id)).where(
+            MonitorErrorGroup.pipeline_id == pipeline_id,
+            MonitorErrorGroup.status == "unresolved",
+            MonitorErrorGroup.last_seen_at >= since,
         )
     ) or 0)
     affected_users_total = int(await db.scalar(
         select(func.count(func.distinct(actor))).where(
-            PortfolioErrorEvent.pipeline_id == pipeline_id,
-            PortfolioErrorEvent.occurred_at >= since,
+            MonitorErrorEvent.pipeline_id == pipeline_id,
+            MonitorErrorEvent.occurred_at >= since,
         )
     ) or 0)
     occurrences_total = int(await db.scalar(
-        select(func.count(PortfolioErrorEvent.id)).where(
-            PortfolioErrorEvent.pipeline_id == pipeline_id,
-            PortfolioErrorEvent.occurred_at >= since,
+        select(func.count(MonitorErrorEvent.id)).where(
+            MonitorErrorEvent.pipeline_id == pipeline_id,
+            MonitorErrorEvent.occurred_at >= since,
         )
     ) or 0)
 
@@ -4096,19 +4096,19 @@ async def get_issues(
     # half / prior half for the trend.
     agg_rows = (await db.execute(
         select(
-            PortfolioErrorEvent.group_id,
+            MonitorErrorEvent.group_id,
             func.count(func.distinct(actor)),
-            func.count(func.distinct(PortfolioErrorEvent.session_id)),
-            func.count(PortfolioErrorEvent.id),
-            func.sum(case((PortfolioErrorEvent.occurred_at >= midpoint, 1), else_=0)),
-            func.sum(case((PortfolioErrorEvent.occurred_at < midpoint, 1), else_=0)),
+            func.count(func.distinct(MonitorErrorEvent.session_id)),
+            func.count(MonitorErrorEvent.id),
+            func.sum(case((MonitorErrorEvent.occurred_at >= midpoint, 1), else_=0)),
+            func.sum(case((MonitorErrorEvent.occurred_at < midpoint, 1), else_=0)),
         )
         .where(
-            PortfolioErrorEvent.pipeline_id == pipeline_id,
-            PortfolioErrorEvent.occurred_at >= since,
-            PortfolioErrorEvent.group_id != None,
+            MonitorErrorEvent.pipeline_id == pipeline_id,
+            MonitorErrorEvent.occurred_at >= since,
+            MonitorErrorEvent.group_id != None,
         )
-        .group_by(PortfolioErrorEvent.group_id)
+        .group_by(MonitorErrorEvent.group_id)
     )).all()
     agg = {
         group_id: (int(users), int(sessions), int(occ), int(recent or 0), int(prior or 0))
@@ -4116,10 +4116,10 @@ async def get_issues(
     }
 
     groups = list((await db.execute(
-        select(PortfolioErrorGroup)
+        select(MonitorErrorGroup)
         .where(
-            PortfolioErrorGroup.pipeline_id == pipeline_id,
-            PortfolioErrorGroup.last_seen_at >= since,
+            MonitorErrorGroup.pipeline_id == pipeline_id,
+            MonitorErrorGroup.last_seen_at >= since,
             *_error_dimension_filters(pipeline_id, since, error_type=error_type, platform=platform),
         )
         .limit(200)
@@ -4174,29 +4174,29 @@ async def get_issue_detail(
     usage_window = eff.analytics_usage_window_days
     since = now - timedelta(days=usage_window)
     midpoint = now - timedelta(days=usage_window / 2)
-    actor = func.coalesce(PortfolioErrorEvent.user_ref, PortfolioErrorEvent.visitor_id)
+    actor = func.coalesce(MonitorErrorEvent.user_ref, MonitorErrorEvent.visitor_id)
 
     group = (await db.execute(
-        select(PortfolioErrorGroup).where(
-            PortfolioErrorGroup.id == group_id,
-            PortfolioErrorGroup.pipeline_id == pipeline_id,
+        select(MonitorErrorGroup).where(
+            MonitorErrorGroup.id == group_id,
+            MonitorErrorGroup.pipeline_id == pipeline_id,
         )
     )).scalar_one_or_none()
     if not group:
         raise HTTPException(status_code=404, detail="Issue not found")
 
     scoped = (
-        PortfolioErrorEvent.pipeline_id == pipeline_id,
-        PortfolioErrorEvent.group_id == group_id,
-        PortfolioErrorEvent.occurred_at >= since,
+        MonitorErrorEvent.pipeline_id == pipeline_id,
+        MonitorErrorEvent.group_id == group_id,
+        MonitorErrorEvent.occurred_at >= since,
     )
     agg = (await db.execute(
         select(
             func.count(func.distinct(actor)),
-            func.count(func.distinct(PortfolioErrorEvent.session_id)),
-            func.count(PortfolioErrorEvent.id),
-            func.sum(case((PortfolioErrorEvent.occurred_at >= midpoint, 1), else_=0)),
-            func.sum(case((PortfolioErrorEvent.occurred_at < midpoint, 1), else_=0)),
+            func.count(func.distinct(MonitorErrorEvent.session_id)),
+            func.count(MonitorErrorEvent.id),
+            func.sum(case((MonitorErrorEvent.occurred_at >= midpoint, 1), else_=0)),
+            func.sum(case((MonitorErrorEvent.occurred_at < midpoint, 1), else_=0)),
         ).where(*scoped)
     )).all()
     users, sessions, occ, recent, prior = (
@@ -4205,34 +4205,34 @@ async def get_issue_detail(
     )
 
     # Facets: slice this issue's occurrences by a dimension. Pivoting is the verb.
-    release_label = func.coalesce(PortfolioErrorEvent.release, "(none)")
+    release_label = func.coalesce(MonitorErrorEvent.release, "(none)")
     release_rows = (await db.execute(
-        select(release_label, func.count(PortfolioErrorEvent.id), func.count(func.distinct(actor)))
+        select(release_label, func.count(MonitorErrorEvent.id), func.count(func.distinct(actor)))
         .where(*scoped)
         .group_by(release_label)
-        .order_by(func.count(PortfolioErrorEvent.id).desc())
+        .order_by(func.count(MonitorErrorEvent.id).desc())
         .limit(20)
     )).all()
-    url_label = func.coalesce(PortfolioErrorEvent.url, "(none)")
+    url_label = func.coalesce(MonitorErrorEvent.url, "(none)")
     url_rows = (await db.execute(
-        select(url_label, func.count(PortfolioErrorEvent.id), func.count(func.distinct(actor)))
+        select(url_label, func.count(MonitorErrorEvent.id), func.count(func.distinct(actor)))
         .where(*scoped)
         .group_by(url_label)
-        .order_by(func.count(PortfolioErrorEvent.id).desc())
+        .order_by(func.count(MonitorErrorEvent.id).desc())
         .limit(20)
     )).all()
 
     sample = (await db.execute(
-        select(PortfolioErrorEvent)
-        .where(PortfolioErrorEvent.pipeline_id == pipeline_id, PortfolioErrorEvent.group_id == group_id)
-        .order_by(PortfolioErrorEvent.occurred_at.desc())
+        select(MonitorErrorEvent)
+        .where(MonitorErrorEvent.pipeline_id == pipeline_id, MonitorErrorEvent.group_id == group_id)
+        .order_by(MonitorErrorEvent.occurred_at.desc())
         .limit(1)
     )).scalar_one_or_none()
 
     recent_events = list((await db.execute(
-        select(PortfolioErrorEvent)
-        .where(PortfolioErrorEvent.pipeline_id == pipeline_id, PortfolioErrorEvent.group_id == group_id)
-        .order_by(PortfolioErrorEvent.occurred_at.desc())
+        select(MonitorErrorEvent)
+        .where(MonitorErrorEvent.pipeline_id == pipeline_id, MonitorErrorEvent.group_id == group_id)
+        .order_by(MonitorErrorEvent.occurred_at.desc())
         .limit(20)
     )).scalars().all())
 
@@ -4288,9 +4288,9 @@ async def get_issue_sessions(
     since = _now() - timedelta(days=usage_window)
 
     group = (await db.execute(
-        select(PortfolioErrorGroup).where(
-            PortfolioErrorGroup.id == group_id,
-            PortfolioErrorGroup.pipeline_id == pipeline_id,
+        select(MonitorErrorGroup).where(
+            MonitorErrorGroup.id == group_id,
+            MonitorErrorGroup.pipeline_id == pipeline_id,
         )
     )).scalar_one_or_none()
     if not group:
@@ -4298,21 +4298,21 @@ async def get_issue_sessions(
 
     rows = (await db.execute(
         select(
-            PortfolioErrorEvent.session_id,
-            func.max(PortfolioErrorEvent.visitor_id),
-            func.max(PortfolioErrorEvent.user_ref),
-            func.count(PortfolioErrorEvent.id),
-            func.min(PortfolioErrorEvent.occurred_at),
-            func.max(PortfolioErrorEvent.occurred_at),
+            MonitorErrorEvent.session_id,
+            func.max(MonitorErrorEvent.visitor_id),
+            func.max(MonitorErrorEvent.user_ref),
+            func.count(MonitorErrorEvent.id),
+            func.min(MonitorErrorEvent.occurred_at),
+            func.max(MonitorErrorEvent.occurred_at),
         )
         .where(
-            PortfolioErrorEvent.pipeline_id == pipeline_id,
-            PortfolioErrorEvent.group_id == group_id,
-            PortfolioErrorEvent.occurred_at >= since,
-            PortfolioErrorEvent.session_id != None,
+            MonitorErrorEvent.pipeline_id == pipeline_id,
+            MonitorErrorEvent.group_id == group_id,
+            MonitorErrorEvent.occurred_at >= since,
+            MonitorErrorEvent.session_id != None,
         )
-        .group_by(PortfolioErrorEvent.session_id)
-        .order_by(func.max(PortfolioErrorEvent.occurred_at).desc())
+        .group_by(MonitorErrorEvent.session_id)
+        .order_by(func.max(MonitorErrorEvent.occurred_at).desc())
         .limit(50)
     )).all()
 
@@ -4350,9 +4350,9 @@ async def update_issue_status(
     it — recurrence does not reopen an ignored issue."""
     await _require_launched_product(pipeline_id, db, uid)
     group = (await db.execute(
-        select(PortfolioErrorGroup).where(
-            PortfolioErrorGroup.id == group_id,
-            PortfolioErrorGroup.pipeline_id == pipeline_id,
+        select(MonitorErrorGroup).where(
+            MonitorErrorGroup.id == group_id,
+            MonitorErrorGroup.pipeline_id == pipeline_id,
         )
     )).scalar_one_or_none()
     if not group:
@@ -4379,30 +4379,30 @@ async def get_errors_by_release(
     now = _now()
     usage_window = eff.analytics_usage_window_days
     since = now - timedelta(days=usage_window)
-    actor = func.coalesce(PortfolioErrorEvent.user_ref, PortfolioErrorEvent.visitor_id)
-    error_release = func.coalesce(PortfolioErrorEvent.release, "(none)")
-    usage_release = func.coalesce(PortfolioUsageEvent.release, "(none)")
+    actor = func.coalesce(MonitorErrorEvent.user_ref, MonitorErrorEvent.visitor_id)
+    error_release = func.coalesce(MonitorErrorEvent.release, "(none)")
+    usage_release = func.coalesce(MonitorUsageEvent.release, "(none)")
 
     error_rows = (await db.execute(
         select(
             error_release,
-            func.count(PortfolioErrorEvent.id),
+            func.count(MonitorErrorEvent.id),
             func.count(func.distinct(actor)),
-            func.count(func.distinct(PortfolioErrorEvent.session_id)),
-            func.min(PortfolioErrorEvent.occurred_at),
-            func.max(PortfolioErrorEvent.occurred_at),
+            func.count(func.distinct(MonitorErrorEvent.session_id)),
+            func.min(MonitorErrorEvent.occurred_at),
+            func.max(MonitorErrorEvent.occurred_at),
         )
-        .where(PortfolioErrorEvent.pipeline_id == pipeline_id, PortfolioErrorEvent.occurred_at >= since)
+        .where(MonitorErrorEvent.pipeline_id == pipeline_id, MonitorErrorEvent.occurred_at >= since)
         .group_by(error_release)
     )).all()
 
     # Sessions per release from usage, the denominator for the rate.
     session_rows = (await db.execute(
-        select(usage_release, func.count(func.distinct(PortfolioUsageEvent.session_id)))
+        select(usage_release, func.count(func.distinct(MonitorUsageEvent.session_id)))
         .where(
-            PortfolioUsageEvent.pipeline_id == pipeline_id,
-            PortfolioUsageEvent.occurred_at >= since,
-            PortfolioUsageEvent.session_id != None,
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.occurred_at >= since,
+            MonitorUsageEvent.session_id != None,
         )
         .group_by(usage_release)
     )).all()
@@ -4487,7 +4487,7 @@ def _record_web_vital(source, *, metric, value, rating, url, navigation_id, visi
     """Build a web-vital row (not committed). Rating falls back to the
     threshold-derived value when the client didn't send one. Shared by the
     single /vitals endpoint and /batch."""
-    return PortfolioWebVital(
+    return MonitorWebVital(
         id=str(uuid.uuid4()),
         pipeline_id=source.pipeline_id,
         source_id=source.id,
@@ -4513,7 +4513,7 @@ def _record_web_vital(source, *, metric, value, rating, url, navigation_id, visi
 def _record_log(source, *, level, message, metadata, url, visitor_id, session_id, user_ref, release, environment, occurred_at, now, trace_id=None, span_id=None, parent_span_id=None, platform=None):
     """Build a log row (not committed). Shared by the single /logs endpoint and
     /batch."""
-    return PortfolioLog(
+    return MonitorLog(
         id=str(uuid.uuid4()),
         pipeline_id=source.pipeline_id,
         source_id=source.id,
@@ -4541,7 +4541,7 @@ _SPAN_KINDS = ("client", "server", "internal")
 def _record_span(source, *, trace_id, span_id, parent_span_id, name, kind, service, feature, platform, capture_mode, status, release, environment, visitor_id, session_id, user_ref, attributes, start_at, duration_ms, now):
     """Build a span row (not committed). Shared by /spans and /batch. kind is
     clamped to the allowed set so a malformed client can't trip the CHECK."""
-    return PortfolioSpan(
+    return MonitorSpan(
         id=str(uuid.uuid4()),
         pipeline_id=source.pipeline_id,
         source_id=source.id,
@@ -4570,7 +4570,7 @@ def _record_span(source, *, trace_id, span_id, parent_span_id, name, kind, servi
 def _build_usage_event(source, *, event_type, visitor_id, session_id, user_ref, url, referrer, release, environment, metadata, occurred_at, now, trace_id=None, span_id=None, parent_span_id=None, platform=None, capture_mode=None):
     """Build a usage event row (not added/committed). Shared by the single
     `/events` endpoint and `/batch` so both store identical shapes."""
-    return PortfolioUsageEvent(
+    return MonitorUsageEvent(
         id=str(uuid.uuid4()),
         pipeline_id=source.pipeline_id,
         source_id=source.id,
@@ -4603,7 +4603,7 @@ async def _record_error_event(source, db, *, message, stack, level, handled, url
 
     group = await _error_group(source.pipeline_id, fingerprint, db)
     if group is None:
-        group = PortfolioErrorGroup(
+        group = MonitorErrorGroup(
             id=str(uuid.uuid4()),
             pipeline_id=source.pipeline_id,
             source_id=source.id,
@@ -4635,7 +4635,7 @@ async def _record_error_event(source, db, *, message, stack, level, handled, url
             group.status = "unresolved"
         group.updated_at = now
 
-    event = PortfolioErrorEvent(
+    event = MonitorErrorEvent(
         id=str(uuid.uuid4()),
         pipeline_id=source.pipeline_id,
         source_id=source.id,
@@ -4672,10 +4672,10 @@ async def ingest_usage_event(
     db: AsyncSession = Depends(get_db),
 ):
     source = (await db.execute(
-        select(PortfolioUsageSource).where(
-            PortfolioUsageSource.pipeline_id == body.product_id,
-            PortfolioUsageSource.public_key == body.key,
-            PortfolioUsageSource.status == "connected",
+        select(MonitorUsageSource).where(
+            MonitorUsageSource.pipeline_id == body.product_id,
+            MonitorUsageSource.public_key == body.key,
+            MonitorUsageSource.status == "connected",
         )
     )).scalar_one_or_none()
     if not source:
@@ -4723,10 +4723,10 @@ async def ingest_identify(
     email match; else unresolved (resolved later when the directory has the
     customer's email)."""
     source = (await db.execute(
-        select(PortfolioUsageSource).where(
-            PortfolioUsageSource.pipeline_id == body.product_id,
-            PortfolioUsageSource.public_key == body.key,
-            PortfolioUsageSource.status == "connected",
+        select(MonitorUsageSource).where(
+            MonitorUsageSource.pipeline_id == body.product_id,
+            MonitorUsageSource.public_key == body.key,
+            MonitorUsageSource.status == "connected",
         )
     )).scalar_one_or_none()
     if not source:
@@ -4742,13 +4742,13 @@ async def ingest_identify(
     customer_id, method = _resolve_identity(_clean_text(body.stripe_customer_id), email, email_index)
 
     existing = (await db.execute(
-        select(PortfolioIdentity).where(
-            PortfolioIdentity.pipeline_id == source.pipeline_id,
-            PortfolioIdentity.user_ref == body.user_id,
+        select(MonitorIdentity).where(
+            MonitorIdentity.pipeline_id == source.pipeline_id,
+            MonitorIdentity.user_ref == body.user_id,
         )
     )).scalar_one_or_none()
     if existing is None:
-        existing = PortfolioIdentity(
+        existing = MonitorIdentity(
             id=str(uuid.uuid4()),
             pipeline_id=source.pipeline_id,
             user_ref=body.user_id,
@@ -4772,7 +4772,7 @@ async def ingest_identify(
     # events already attributed to a different user.
     backfilled = 0
     if body.session_id:
-        for model in (PortfolioUsageEvent, PortfolioErrorEvent):
+        for model in (MonitorUsageEvent, MonitorErrorEvent):
             result = await db.execute(
                 update(model)
                 .where(
@@ -4795,10 +4795,10 @@ async def ingest_error_event(
     db: AsyncSession = Depends(get_db),
 ):
     source = (await db.execute(
-        select(PortfolioUsageSource).where(
-            PortfolioUsageSource.pipeline_id == body.product_id,
-            PortfolioUsageSource.public_key == body.key,
-            PortfolioUsageSource.status == "connected",
+        select(MonitorUsageSource).where(
+            MonitorUsageSource.pipeline_id == body.product_id,
+            MonitorUsageSource.public_key == body.key,
+            MonitorUsageSource.status == "connected",
         )
     )).scalar_one_or_none()
     if not source:
@@ -4843,10 +4843,10 @@ async def ingest_vital(
     db: AsyncSession = Depends(get_db),
 ):
     source = (await db.execute(
-        select(PortfolioUsageSource).where(
-            PortfolioUsageSource.pipeline_id == body.product_id,
-            PortfolioUsageSource.public_key == body.key,
-            PortfolioUsageSource.status == "connected",
+        select(MonitorUsageSource).where(
+            MonitorUsageSource.pipeline_id == body.product_id,
+            MonitorUsageSource.public_key == body.key,
+            MonitorUsageSource.status == "connected",
         )
     )).scalar_one_or_none()
     if not source:
@@ -4888,10 +4888,10 @@ async def ingest_log(
     db: AsyncSession = Depends(get_db),
 ):
     source = (await db.execute(
-        select(PortfolioUsageSource).where(
-            PortfolioUsageSource.pipeline_id == body.product_id,
-            PortfolioUsageSource.public_key == body.key,
-            PortfolioUsageSource.status == "connected",
+        select(MonitorUsageSource).where(
+            MonitorUsageSource.pipeline_id == body.product_id,
+            MonitorUsageSource.public_key == body.key,
+            MonitorUsageSource.status == "connected",
         )
     )).scalar_one_or_none()
     if not source:
@@ -4935,10 +4935,10 @@ async def ingest_batch(
     queued events here and flushes the queue in a single `sendBeacon` on page
     unload. Each item routes to the same storage path as its single endpoint."""
     source = (await db.execute(
-        select(PortfolioUsageSource).where(
-            PortfolioUsageSource.pipeline_id == body.product_id,
-            PortfolioUsageSource.public_key == body.key,
-            PortfolioUsageSource.status == "connected",
+        select(MonitorUsageSource).where(
+            MonitorUsageSource.pipeline_id == body.product_id,
+            MonitorUsageSource.public_key == body.key,
+            MonitorUsageSource.status == "connected",
         )
     )).scalar_one_or_none()
     if not source:

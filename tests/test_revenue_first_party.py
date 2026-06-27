@@ -8,7 +8,7 @@ covered by test_revenue_engine.
 from datetime import datetime, timezone
 
 from conftest import FakeResult, make_pipeline, make_revenue_source, make_subscription
-from app.models import PlanEnum, PortfolioRevenueSource
+from app.models import PlanEnum, MonitorRevenueSource
 from app.routes.portfolio import (
     _credential_path_label,
     _source_is_syncable,
@@ -67,7 +67,7 @@ async def test_create_first_party_source_creates_source(client, fake_db, auth_he
     assert body["accountMode"] == "first_party"
     assert body["status"] == "connected"
     assert body["providerAccountId"] is None
-    created = [o for o in fake_db.added if isinstance(o, PortfolioRevenueSource)]
+    created = [o for o in fake_db.added if isinstance(o, MonitorRevenueSource)]
     assert created and created[0].account_mode == "first_party"
 
 

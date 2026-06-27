@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 
 from conftest import FakeResult, make_usage_source
-from app.models import PortfolioIdentity
+from app.models import MonitorIdentity
 from app.routes.portfolio import _resolve_identity, _join_coverage
 
 
@@ -43,7 +43,7 @@ async def test_identify_explicit_join(client, fake_db):
 
     assert resp.status_code == 200
     assert resp.json()["resolution"] == "explicit"
-    created = [o for o in fake_db.added if isinstance(o, PortfolioIdentity)]
+    created = [o for o in fake_db.added if isinstance(o, MonitorIdentity)]
     assert created and created[0].stripe_customer_id == "cus_direct"
     assert created[0].resolution_method == "explicit"
 

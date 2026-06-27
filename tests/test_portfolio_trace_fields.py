@@ -4,12 +4,12 @@ ORM rows the storage path builds (across the single endpoints and /batch)."""
 
 from conftest import FakeResult, make_usage_source
 from app.models import (
-    PortfolioErrorEvent,
-    PortfolioErrorGroup,
-    PortfolioLog,
-    PortfolioSpan,
-    PortfolioUsageEvent,
-    PortfolioWebVital,
+    MonitorErrorEvent,
+    MonitorErrorGroup,
+    MonitorLog,
+    MonitorSpan,
+    MonitorUsageEvent,
+    MonitorWebVital,
 )
 
 
@@ -32,7 +32,7 @@ async def test_usage_event_persists_trace_and_dimensions(client, fake_db):
     )
 
     assert resp.status_code == 200
-    event = next(o for o in fake_db.added if isinstance(o, PortfolioUsageEvent))
+    event = next(o for o in fake_db.added if isinstance(o, MonitorUsageEvent))
     assert event.trace_id == "trace-1"
     assert event.span_id == "span-1"
     assert event.parent_span_id == "span-0"
@@ -51,7 +51,7 @@ async def test_usage_event_defaults_trace_fields_to_none(client, fake_db):
     )
 
     assert resp.status_code == 200
-    event = next(o for o in fake_db.added if isinstance(o, PortfolioUsageEvent))
+    event = next(o for o in fake_db.added if isinstance(o, MonitorUsageEvent))
     assert event.trace_id is None
     assert event.platform is None
     assert event.capture_mode is None
@@ -76,8 +76,8 @@ async def test_error_event_persists_type_and_trace_on_event_and_group(client, fa
     )
 
     assert resp.status_code == 200
-    event = next(o for o in fake_db.added if isinstance(o, PortfolioErrorEvent))
-    group = next(o for o in fake_db.added if isinstance(o, PortfolioErrorGroup))
+    event = next(o for o in fake_db.added if isinstance(o, MonitorErrorEvent))
+    group = next(o for o in fake_db.added if isinstance(o, MonitorErrorGroup))
     assert event.error_type == "exception"
     assert event.trace_id == "trace-9"
     assert event.span_id == "span-9"
@@ -104,8 +104,8 @@ async def test_batch_persists_trace_fields_across_kinds(client, fake_db):
     )
 
     assert resp.status_code == 200
-    vital = next(o for o in fake_db.added if isinstance(o, PortfolioWebVital))
-    log = next(o for o in fake_db.added if isinstance(o, PortfolioLog))
+    vital = next(o for o in fake_db.added if isinstance(o, MonitorWebVital))
+    log = next(o for o in fake_db.added if isinstance(o, MonitorLog))
     assert vital.trace_id == "t-vital" and vital.platform == "web"
     assert log.trace_id == "t-log" and log.platform == "web"
 
@@ -137,7 +137,7 @@ async def test_batch_persists_span(client, fake_db):
     )
 
     assert resp.status_code == 200
-    span = next(o for o in fake_db.added if isinstance(o, PortfolioSpan))
+    span = next(o for o in fake_db.added if isinstance(o, MonitorSpan))
     assert span.trace_id == "t-1" and span.span_id == "s-1" and span.parent_span_id == "s-0"
     assert span.name == "GET /api/cart"
     assert span.kind == "client"
@@ -163,7 +163,7 @@ async def test_batch_span_requires_identity(client, fake_db):
 
     assert resp.status_code == 200
     assert resp.json()["stored"] == 0
-    assert not any(isinstance(o, PortfolioSpan) for o in fake_db.added)
+    assert not any(isinstance(o, MonitorSpan) for o in fake_db.added)
 
 
 async def test_batch_span_clamps_unknown_kind(client, fake_db):
@@ -181,5 +181,5 @@ async def test_batch_span_clamps_unknown_kind(client, fake_db):
     )
 
     assert resp.status_code == 200
-    span = next(o for o in fake_db.added if isinstance(o, PortfolioSpan))
+    span = next(o for o in fake_db.added if isinstance(o, MonitorSpan))
     assert span.kind == "client"

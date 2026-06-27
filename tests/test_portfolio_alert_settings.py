@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from conftest import FakeResult, make_pipeline
-from app.models import PortfolioAlertSettings
+from app.models import MonitorAlertSettings
 
 
 async def test_get_alert_settings_returns_defaults(client, fake_db, auth_headers):
@@ -41,7 +41,7 @@ async def test_update_alert_settings_creates_and_overrides(client, fake_db, auth
     assert body["signupsDropPct"] == 0.7
     assert body["newIssueEnabled"] is True       # untouched -> default on
     assert body["revenueDropPct"] == 0.2         # untouched -> global default
-    assert any(isinstance(o, PortfolioAlertSettings) and o.pipeline_id == product.id for o in fake_db.added)
+    assert any(isinstance(o, MonitorAlertSettings) and o.pipeline_id == product.id for o in fake_db.added)
     assert fake_db.commit_count == 1
 
 

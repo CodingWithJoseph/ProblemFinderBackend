@@ -311,7 +311,7 @@ class IssueComment(Base):
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
-class PortfolioUsageSource(Base):
+class MonitorUsageSource(Base):
     __tablename__ = "portfolio_usage_sources"
 
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -327,7 +327,7 @@ class PortfolioUsageSource(Base):
     last_seen_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 
 
-class PortfolioUsageEvent(Base):
+class MonitorUsageEvent(Base):
     __tablename__ = "portfolio_usage_events"
 
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -352,7 +352,7 @@ class PortfolioUsageEvent(Base):
     received_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
-class PortfolioErrorGroup(Base):
+class MonitorErrorGroup(Base):
     """A distinct error "issue" — many raw occurrences folded together by a
     deterministic fingerprint, so the dashboard shows a handful of problems
     instead of thousands of rows."""
@@ -375,7 +375,7 @@ class PortfolioErrorGroup(Base):
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
-class PortfolioErrorEvent(Base):
+class MonitorErrorEvent(Base):
     """A single raw error occurrence, linked to its group and (when available)
     to the visitor/session it happened in — the tie-back to usage data."""
 
@@ -407,7 +407,7 @@ class PortfolioErrorEvent(Base):
     received_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
-class PortfolioWebVital(Base):
+class MonitorWebVital(Base):
     """A single Core Web Vital sample (LCP/CLS/INP/FCP/TTFB) captured by the
     beacon. The per-URL experience rollups (p75 + rating) aggregate these."""
 
@@ -434,7 +434,7 @@ class PortfolioWebVital(Base):
     received_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
-class PortfolioLog(Base):
+class MonitorLog(Base):
     """A client log line (debug/info/warn/error) from the beacon's log() call or
     console hook. Faceted by level/session/release in the logs explorer."""
 
@@ -460,7 +460,7 @@ class PortfolioLog(Base):
     received_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
-class PortfolioSpan(Base):
+class MonitorSpan(Base):
     """One unit of work in a trace — a page load, a fetch, a backend request, a
     slow query, or a manually tagged feature. Joined into a trace by trace_id and
     into a call tree by parent_span_id. Usage/error/log/vital rows reference the
@@ -493,7 +493,7 @@ class PortfolioSpan(Base):
     received_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
-class MonitoringProblem(Base):
+class MonitorProblem(Base):
     """A monitoring condition the alert evaluator recorded (error spike, signup
     drop, ...). Separate from the discovery `problems` table. detected_at +
     metric/baseline/observed drive the before/during/after impact view."""
@@ -518,7 +518,7 @@ class MonitoringProblem(Base):
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
-class MonitoringInvestigation(Base):
+class MonitorInvestigation(Base):
     """A case object: collects evidence + notes (entries) into a timeline."""
 
     __tablename__ = "monitoring_investigations"
@@ -532,7 +532,7 @@ class MonitoringInvestigation(Base):
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
-class MonitoringInvestigationEntry(Base):
+class MonitorInvestigationEntry(Base):
     """One timeline entry: a free note, or a link to an issue/problem/session."""
 
     __tablename__ = "monitoring_investigation_entries"
@@ -546,7 +546,7 @@ class MonitoringInvestigationEntry(Base):
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
-class MonitoringReport(Base):
+class MonitorReport(Base):
     """A saved, exportable write-up, optionally tied to an investigation."""
 
     __tablename__ = "monitoring_reports"
@@ -560,7 +560,7 @@ class MonitoringReport(Base):
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
-class PortfolioRevenueSource(Base):
+class MonitorRevenueSource(Base):
     __tablename__ = "portfolio_revenue_sources"
 
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -600,7 +600,7 @@ class PortfolioRevenueSource(Base):
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
-class PortfolioBillingEvent(Base):
+class MonitorBillingEvent(Base):
     """Immutable, append-only ledger row derived from a Stripe invoice line item.
     One row per recurring-revenue-affecting fact. ``stripe_line_item_id`` is the
     natural idempotency key, so re-running the backfill never duplicates a row.
@@ -625,7 +625,7 @@ class PortfolioBillingEvent(Base):
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
-class PortfolioCustomerMrr(Base):
+class MonitorCustomerMrr(Base):
     """Per-customer normalized MRR time series. Summing each customer's latest
     row on/before a date gives total MRR at that date."""
 
@@ -641,7 +641,7 @@ class PortfolioCustomerMrr(Base):
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
-class PortfolioMrrMovement(Base):
+class MonitorMrrMovement(Base):
     """A single MRR movement for a customer, derived by diffing consecutive
     ``portfolio_customer_mrr`` rows. At most one movement per customer per
     ``effective_date``."""
@@ -660,7 +660,7 @@ class PortfolioMrrMovement(Base):
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
-class PortfolioCustomer(Base):
+class MonitorCustomer(Base):
     """A Stripe customer seen on a revenue source's account, keyed by
     ``stripe_customer_id``. Populated from the Stripe customer object during sync
     so the identity email-fallback has an email to match against."""
@@ -677,7 +677,7 @@ class PortfolioCustomer(Base):
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
-class PortfolioIdentity(Base):
+class MonitorIdentity(Base):
     """One identified usage actor per product. ``resolution_method`` records how
     ``stripe_customer_id`` was determined: 'explicit' (id trait), 'email'
     (matched a Stripe customer email), or 'unresolved'."""
@@ -697,7 +697,7 @@ class PortfolioIdentity(Base):
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
-class PortfolioAlert(Base):
+class MonitorAlert(Base):
     """A record that an alert was sent, used to dedupe so the same condition
     doesn't email repeatedly. ``dedupe_key`` is per alert type (e.g. the error
     group id for new-issue, or a date bucket for spike/drop alerts)."""
@@ -714,7 +714,7 @@ class PortfolioAlert(Base):
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
-class PortfolioAlertSettings(Base):
+class MonitorAlertSettings(Base):
     """Per-product alert preferences. One row per pipeline; absence means
     "all triggers on, global thresholds". Threshold columns are nullable —
     null falls back to the global default in config."""

@@ -2,9 +2,9 @@ from datetime import datetime, timezone
 
 from conftest import FakeResult, make_pipeline
 from app.models import (
-    MonitoringInvestigation,
-    MonitoringInvestigationEntry,
-    MonitoringReport,
+    MonitorInvestigation,
+    MonitorInvestigationEntry,
+    MonitorReport,
 )
 
 
@@ -16,7 +16,7 @@ def _inv(pipeline_id, **kw):
         updated_at=datetime(2026, 5, 20, tzinfo=timezone.utc),
     )
     defaults.update(kw)
-    return MonitoringInvestigation(**defaults)
+    return MonitorInvestigation(**defaults)
 
 
 async def test_create_investigation(client, fake_db, auth_headers):
@@ -32,17 +32,17 @@ async def test_create_investigation(client, fake_db, auth_headers):
     assert resp.status_code == 200
     assert resp.json()["data"]["title"] == "Checkout broke"
     assert resp.json()["data"]["status"] == "open"
-    assert any(isinstance(o, MonitoringInvestigation) for o in fake_db.added)
+    assert any(isinstance(o, MonitorInvestigation) for o in fake_db.added)
 
 
 async def test_investigation_timeline(client, fake_db, auth_headers):
     product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
     inv = _inv(product.id)
-    note = MonitoringInvestigationEntry(
+    note = MonitorInvestigationEntry(
         id="e1", investigation_id=inv.id, kind="note", ref_id=None, body="Looks deploy-related",
         event_metadata={}, created_at=datetime(2026, 5, 20, 10, tzinfo=timezone.utc),
     )
-    evidence = MonitoringInvestigationEntry(
+    evidence = MonitorInvestigationEntry(
         id="e2", investigation_id=inv.id, kind="issue", ref_id="group-9", body=None,
         event_metadata={}, created_at=datetime(2026, 5, 20, 11, tzinfo=timezone.utc),
     )
@@ -87,7 +87,7 @@ async def test_add_evidence_entry(client, fake_db, auth_headers):
 
     assert resp.status_code == 200
     assert resp.json()["data"]["refId"] == "prob-7"
-    assert any(isinstance(o, MonitoringInvestigationEntry) for o in fake_db.added)
+    assert any(isinstance(o, MonitorInvestigationEntry) for o in fake_db.added)
 
 
 async def test_update_investigation_status(client, fake_db, auth_headers):
@@ -124,12 +124,12 @@ async def test_create_and_export_report(client, fake_db, auth_headers):
     )
     assert resp.status_code == 200
     assert resp.json()["data"]["title"] == "Checkout incident"
-    assert any(isinstance(o, MonitoringReport) for o in fake_db.added)
+    assert any(isinstance(o, MonitorReport) for o in fake_db.added)
 
 
 async def test_export_report_markdown(client, fake_db, auth_headers):
     product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
-    report = MonitoringReport(
+    report = MonitorReport(
         id="rep-1", pipeline_id=product.id, investigation_id=None,
         title="Checkout incident", body="Rolled back the deploy.",
         created_at=datetime(2026, 5, 20, tzinfo=timezone.utc),

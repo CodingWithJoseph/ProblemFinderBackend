@@ -39,7 +39,7 @@ def test_problem_from_alert_signups_drop():
 
 
 class FakeSettingsRow:
-    """Stand-in for a PortfolioAlertSettings row."""
+    """Stand-in for a MonitorAlertSettings row."""
 
     def __init__(self, **kw):
         defaults = dict(
