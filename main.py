@@ -1,7 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from dotenv import load_dotenv
 from app.config import get_settings
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,6 +19,8 @@ from app.routes.dashboard import router as dashboard_router
 from app.routes.homepage import router as homepage_router
 from app.routes.public import router as public_router
 from app.routes.preferences import router as preferences_router
+from app.db import AsyncSessionLocal
+from app.services.activity import record_user_activity, should_record_user_action
 
 load_dotenv()
 
@@ -101,6 +103,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def track_user_activity(request: Request, call_next):
+    response = await call_next(request)
+    uid = getattr(request.state, "uid", None)
+    if uid and should_record_user_action(request.method, request.url.path, response.status_code):
+        try:
+            async with AsyncSessionLocal() as db:
+                await record_user_activity(db, uid, "action")
+                await db.commit()
+        except Exception:
+            logger.exception("failed to record user activity")
+    return response
 
 app.include_router(subscriptions_router)
 app.include_router(clusters_router)

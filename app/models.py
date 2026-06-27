@@ -798,3 +798,17 @@ class UserPreference(Base):
     default_landing: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_digest_sent_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class UserActivityDaily(Base):
+    """Per-user daily activity rollup used by the workspace heatmap."""
+
+    __tablename__ = "user_activity_daily"
+
+    user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    activity_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    login_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    action_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_active_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
