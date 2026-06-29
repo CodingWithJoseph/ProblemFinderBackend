@@ -616,6 +616,15 @@ def _source_is_syncable(source: MonitorRevenueSource | None) -> bool:
     return bool(source.provider_account_id)
 
 
+def _revenue_source_is_connected(source: MonitorRevenueSource | None, pipeline_id: str) -> bool:
+    """Require a usable revenue integration scoped to the requested product."""
+    return bool(
+        source
+        and str(source.pipeline_id) == str(pipeline_id)
+        and _source_is_syncable(source)
+    )
+
+
 def _stripe_timestamp(value: Any) -> int | None:
     if value is None:
         return None
@@ -644,6 +653,16 @@ async def _usage_source(pipeline_id: str, db: AsyncSession) -> MonitorUsageSourc
         .where(MonitorUsageSource.pipeline_id == pipeline_id)
         .order_by(MonitorUsageSource.created_at.asc())
     )).scalar_one_or_none()
+
+
+def _usage_source_is_connected(source: MonitorUsageSource | None, pipeline_id: str) -> bool:
+    """Only report a usable source belonging to the requested product as connected."""
+    return bool(
+        source
+        and str(source.pipeline_id) == str(pipeline_id)
+        and source.status == "connected"
+        and source.public_key
+    )
 
 
 def _health_verdict(*, connected: bool, last_seen_at, total_events: int, eff, now) -> dict:
@@ -731,7 +750,7 @@ async def _source_health(pipeline_id: str, source, eff, now, db) -> tuple[dict, 
     lcp_rating = _rate_vital("LCP", lcp_p75) if lcp_p75 is not None else None
 
     verdict = _health_verdict_v2(
-        connected=source is not None,
+        connected=_usage_source_is_connected(source, pipeline_id),
         last_seen_at=last_seen,
         total_events=total_events,
         error_rate=error_rate,
@@ -764,7 +783,7 @@ async def get_source_health(
     return {
         "data": {
             "source": _serialize_usage_source(source),
-            "connected": source is not None,
+            "connected": _usage_source_is_connected(source, pipeline_id),
             "windowDays": eff.analytics_usage_window_days,
             "health": verdict,
             "signals": signals,
@@ -851,7 +870,7 @@ async def get_command_center(
                     "changePct": _pct_change(rev_cur, rev_prev) if (rev_cur is not None and rev_prev) else None,
                 },
             },
-            "revenueConnected": revenue is not None,
+            "revenueConnected": _revenue_source_is_connected(revenue, pipeline_id),
             "topIssues": [
                 {
                     "id": group.id,
@@ -1566,7 +1585,7 @@ async def get_revenue_metrics(
     return {
         "data": {
             "source": _serialize_revenue_source(source, eff.revenue_engine),
-            "connected": bool(source and source.status == "connected"),
+            "connected": _revenue_source_is_connected(source, pipeline_id),
             "summary": {
                 "mrrCents": selected_mrr,
                 "subscriptionMrrCents": source.current_mrr_cents if source else None,
@@ -2966,11 +2985,11 @@ async def get_usage_metrics(
     return {
         "data": {
             "source": _serialize_usage_source(source),
-            "connected": source is not None,
+            "connected": _usage_source_is_connected(source, pipeline_id),
             "totalEvents": int(total_events),
             "lastSeenAt": _iso(source.last_seen_at if source else None),
             "health": _health_verdict(
-                connected=source is not None,
+                connected=_usage_source_is_connected(source, pipeline_id),
                 last_seen_at=source.last_seen_at if source else None,
                 total_events=int(total_events),
                 eff=eff,
@@ -3066,7 +3085,7 @@ async def get_sessions(
     return {
         "data": {
             "source": _serialize_usage_source(source),
-            "connected": source is not None,
+            "connected": _usage_source_is_connected(source, pipeline_id),
             "windowDays": usage_window,
             "summary": {
                 "totalSessions": total_sessions,
@@ -3347,7 +3366,7 @@ async def get_explorer(
     return {
         "data": {
             "source": _serialize_usage_source(source),
-            "connected": source is not None,
+            "connected": _usage_source_is_connected(source, pipeline_id),
             "windowDays": usage_window,
             "rows": rows,
         }
@@ -3566,7 +3585,7 @@ async def get_experience_vitals(
     return {
         "data": {
             "source": _serialize_usage_source(source),
-            "connected": source is not None,
+            "connected": _usage_source_is_connected(source, pipeline_id),
             "windowDays": usage_window,
             "totalSamples": sum(m["sampleCount"] for m in metrics),
             "metrics": metrics,
@@ -3626,7 +3645,7 @@ async def get_logs(
     return {
         "data": {
             "source": _serialize_usage_source(source),
-            "connected": source is not None,
+            "connected": _usage_source_is_connected(source, pipeline_id),
             "windowDays": usage_window,
             "levelCounts": level_counts,
             "filters": {"level": level, "q": q, "session": session, "release": release},
@@ -3994,7 +4013,7 @@ async def get_error_metrics(
     return {
         "data": {
             "source": _serialize_usage_source(source),
-            "connected": source is not None,
+            "connected": _usage_source_is_connected(source, pipeline_id),
             "totalErrors": int(total_errors),
             "lastSeenAt": _iso(source.last_seen_at if source else None),
             "windowDays": usage_window,
@@ -4144,7 +4163,7 @@ async def get_issues(
     return {
         "data": {
             "source": _serialize_usage_source(source),
-            "connected": source is not None,
+            "connected": _usage_source_is_connected(source, pipeline_id),
             "windowDays": usage_window,
             "summary": {
                 "openIssues": open_issues,
@@ -4427,7 +4446,7 @@ async def get_errors_by_release(
     return {
         "data": {
             "source": _serialize_usage_source(source),
-            "connected": source is not None,
+            "connected": _usage_source_is_connected(source, pipeline_id),
             "windowDays": usage_window,
             "releases": releases,
         }

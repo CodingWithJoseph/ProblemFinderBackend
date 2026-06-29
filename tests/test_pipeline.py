@@ -1,4 +1,5 @@
 from conftest import FakeResult, make_issue, make_pipeline, make_team
+from app.models import MonitorUsageSource
 
 
 async def test_pipeline_list_includes_project_team_and_issue_counts(client, fake_db, auth_headers):
@@ -114,3 +115,18 @@ async def test_patch_rejects_invalid_timeline_days(client, fake_db, auth_headers
     )
 
     assert resp.status_code == 400
+
+
+async def test_launch_does_not_create_or_connect_monitoring(client, fake_db, auth_headers):
+    card = make_pipeline(name="PC Boot Failures and Hardware Damage")
+    fake_db.stub(execute=[FakeResult(rows=[card])])
+
+    resp = await client.post(
+        f"/pipeline/{card.id}/launch",
+        json={"product_name": card.name},
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["data"]["launchedAt"] is not None
+    assert not any(isinstance(obj, MonitorUsageSource) for obj in fake_db.added)

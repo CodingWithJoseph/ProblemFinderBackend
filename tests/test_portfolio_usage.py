@@ -160,6 +160,58 @@ async def test_get_usage_metrics(client, fake_db, auth_headers):
     assert body["recentEvents"][0]["eventType"] == "pageview"
 
 
+async def test_launched_product_without_source_is_not_connected(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    fake_db.stub(execute=[
+        FakeResult(rows=[product]),  # launched product lookup
+        FakeResult(rows=[]),         # app settings overlay
+        FakeResult(rows=[]),         # no project-scoped usage source
+    ])
+
+    resp = await client.get(f"/portfolio/{product.id}/usage", headers=auth_headers)
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["source"] is None
+    assert body["connected"] is False
+    assert body["totalEvents"] == 0
+    assert body["health"]["state"] == "no-data"
+    assert body["summary14d"]["visitors"] == 0
+
+
+async def test_project_source_without_events_is_connected_but_has_no_data(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    source = make_usage_source(pipeline_id=product.id, last_seen_at=None)
+    fake_db.stub(execute=[
+        FakeResult(rows=[product]),  # launched product lookup
+        FakeResult(rows=[]),         # app settings overlay
+        FakeResult(rows=[source]),   # this product's configured source
+    ])
+
+    resp = await client.get(f"/portfolio/{product.id}/usage", headers=auth_headers)
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["source"]["pipelineId"] == product.id
+    assert body["connected"] is True
+    assert body["totalEvents"] == 0
+    assert body["health"]["state"] == "no-data"
+
+
+def test_usage_connection_requires_active_project_scoped_key():
+    from app.routes.portfolio import _usage_source_is_connected
+
+    project_a = "11111111-1111-1111-1111-111111111111"
+    project_b = "22222222-2222-2222-2222-222222222222"
+    source = make_usage_source(pipeline_id=project_a)
+
+    assert _usage_source_is_connected(source, project_a) is True
+    assert _usage_source_is_connected(source, project_b) is False
+    assert _usage_source_is_connected(make_usage_source(pipeline_id=project_a, status="paused"), project_a) is False
+    assert _usage_source_is_connected(make_usage_source(pipeline_id=project_a, public_key=""), project_a) is False
+    assert _usage_source_is_connected(None, project_a) is False
+
+
 async def test_get_usage_metrics_funnel_and_growth(client, fake_db, auth_headers):
     product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
     source = make_usage_source(pipeline_id=product.id)
@@ -375,6 +427,7 @@ async def test_get_revenue_metrics_placeholder(client, fake_db, auth_headers):
     source = make_revenue_source(
         pipeline_id=product.id,
         status="connected",
+        provider_account_id="acct_123",
         current_mrr_cents=12000,
         new_customers_30d=3,
         churned_customers_30d=1,
@@ -749,7 +802,13 @@ async def test_get_command_center(client, fake_db, auth_headers):
 
     product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
     source = make_usage_source(pipeline_id=product.id, last_seen_at=_dt.now(_tz.utc))
-    revenue = make_revenue_source(pipeline_id=product.id, current_mrr_cents=10000, previous_mrr_cents=8000)
+    revenue = make_revenue_source(
+        pipeline_id=product.id,
+        status="connected",
+        provider_account_id="acct_123",
+        current_mrr_cents=10000,
+        previous_mrr_cents=8000,
+    )
     group = make_error_group(pipeline_id=product.id, title="Boom", event_count=12)
     fake_db.stub(
         execute=[
