@@ -3705,6 +3705,86 @@ async def get_flow(
     }
 
 
+def _feature_flow(rows, *, max_nodes: int = 30, max_edges: int = 50) -> tuple[list, list]:
+    """Build the flow graph from feature spans ordered by (session, time): node =
+    a named feature (Sign Up, Checkout) with its run count, error count and mean
+    duration; edge = a consecutive feature→feature hop within one session. Unlike
+    the URL graph this measures outcomes — how often a flow ran, how slow it was,
+    and how often it failed — so Monitor can show feature names, not pages."""
+    stats: dict[str, dict] = {}
+    edges: dict[tuple, int] = {}
+    prev_session = None
+    prev_feature = None
+    for session_id, feature, status, duration_ms, _ in rows:
+        stat = stats.setdefault(feature, {"count": 0, "errors": 0, "dur_sum": 0.0, "dur_n": 0})
+        stat["count"] += 1
+        if status == "error":
+            stat["errors"] += 1
+        if duration_ms is not None:
+            stat["dur_sum"] += duration_ms
+            stat["dur_n"] += 1
+        if session_id == prev_session and prev_feature is not None and prev_feature != feature:
+            key = (prev_feature, feature)
+            edges[key] = edges.get(key, 0) + 1
+        prev_session = session_id
+        prev_feature = feature
+
+    top = sorted(stats.items(), key=lambda kv: kv[1]["count"], reverse=True)[:max_nodes]
+    node_set = {feature for feature, _ in top}
+    nodes = [
+        {
+            "feature": feature,
+            "count": stat["count"],
+            "errorCount": stat["errors"],
+            "avgDurationMs": round(stat["dur_sum"] / stat["dur_n"], 1) if stat["dur_n"] else None,
+        }
+        for feature, stat in top
+    ]
+    edge_list = [
+        {"from": a, "to": b, "count": count}
+        for (a, b), count in sorted(edges.items(), key=lambda kv: kv[1], reverse=True)
+        if a in node_set and b in node_set
+    ][:max_edges]
+    return nodes, edge_list
+
+
+@router.get("/{pipeline_id}/feature-flow")
+async def get_feature_flow(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Feature-flow graph: the named user flows (from instrumented feature spans)
+    and how one leads into the next, with run count, error count and mean
+    duration per feature. Empty until flows are instrumented — the UI falls back
+    to the URL flow in that case."""
+    await _require_launched_product(pipeline_id, db, uid)
+    eff = await effective_config(db)
+    usage_window = eff.analytics_usage_window_days
+    since = _now() - timedelta(days=usage_window)
+
+    rows = (await db.execute(
+        select(MonitorSpan.session_id, MonitorSpan.feature, MonitorSpan.status, MonitorSpan.duration_ms, MonitorSpan.start_at)
+        .where(
+            MonitorSpan.pipeline_id == pipeline_id,
+            MonitorSpan.start_at >= since,
+            MonitorSpan.feature != None,
+            MonitorSpan.session_id != None,
+        )
+        .order_by(MonitorSpan.session_id.asc(), MonitorSpan.start_at.asc())
+        .limit(5000)
+    )).all()
+    nodes, edges = _feature_flow(rows)
+
+    return {
+        "data": {
+            "windowDays": usage_window,
+            "nodes": nodes,
+            "edges": edges,
+        }
+    }
+
+
 def _round_vital(metric: str, value) -> float | None:
     if value is None:
         return None
