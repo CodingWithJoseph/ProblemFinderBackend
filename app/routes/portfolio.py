@@ -3,6 +3,7 @@ import logging
 import re
 import secrets
 import uuid
+from calendar import monthrange
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 from urllib.parse import urlencode, urlparse
@@ -1252,7 +1253,7 @@ def _empty_daily(days: int = 14) -> dict[str, dict]:
 
 
 PORTFOLIO_COMPARISON_DAYS = 7
-PORTFOLIO_SPARKLINE_DAYS = 30
+PORTFOLIO_SPARKLINE_DAYS = 14
 
 
 def _portfolio_metric_payload(
@@ -1262,46 +1263,42 @@ def _portfolio_metric_payload(
     *,
     unit: str,
     positive_when_up: bool,
-    stock_metric: bool = False,
+    display_total: int | None,
+    comparison_current: int | None,
+    comparison_prior: int | None,
+    comparison_date: date | None = None,
 ) -> dict:
-    """Build the fixed Portfolio-card contract from one 30-day series.
-
-    Count metrics are summed over the current seven calendar days and the seven
-    immediately before them. MRR is a stock, not a flow, so its comparison uses
-    each window's closing balance instead of incorrectly summing daily balances.
-    """
-    if stock_metric:
-        current_total = values[-1] if values else None
-        prior_index = len(values) - PORTFOLIO_COMPARISON_DAYS - 1
-        prior_total = values[prior_index] if prior_index >= 0 else None
-    else:
-        current_values = values[-PORTFOLIO_COMPARISON_DAYS:]
-        prior_values = values[-2 * PORTFOLIO_COMPARISON_DAYS:-PORTFOLIO_COMPARISON_DAYS]
-        current_total = sum(value or 0 for value in current_values)
-        prior_total = sum(value or 0 for value in prior_values)
-
-    if current_total is None or prior_total is None:
+    """Build one card payload while keeping headline and trend semantics separate."""
+    if comparison_current is None or comparison_prior is None:
         direction = "flat"
         is_positive = None
         percent_change = None
     else:
-        direction = "up" if current_total > prior_total else "down" if current_total < prior_total else "flat"
+        direction = "up" if comparison_current > comparison_prior else "down" if comparison_current < comparison_prior else "flat"
         is_positive = None if direction == "flat" else (direction == "up") == positive_when_up
-        percent_change = _pct_change(current_total, prior_total)
+        percent_change = _pct_change(comparison_current, comparison_prior)
 
     return {
         "metric": metric,
         "unit": unit,
-        "currentTotal": current_total,
-        "priorTotal": prior_total,
+        "currentTotal": display_total,
+        "priorTotal": comparison_prior,
+        "comparisonCurrent": comparison_current,
         "percentChange": percent_change,
         "trendDirection": direction,
         "isPositiveTrend": is_positive,
+        "comparisonDate": comparison_date.isoformat() if comparison_date else None,
         "points": [
             {"date": day.isoformat(), "value": value}
             for day, value in zip(dates, values)
         ],
     }
+
+
+def _previous_month_same_day(day: date) -> date:
+    month = 12 if day.month == 1 else day.month - 1
+    year = day.year - 1 if day.month == 1 else day.year
+    return date(year, month, min(day.day, monthrange(year, month)[1]))
 
 
 def _portfolio_revenue_values(
@@ -1329,7 +1326,7 @@ async def get_portfolio_overview_metrics(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
-    """Fixed Portfolio overview: 7d vs prior 7d plus 30 daily points.
+    """Portfolio overview totals with 7d comparisons and 14 daily points.
 
     This is deliberately not a configurable analytics endpoint. The overview
     has one stable comparison so cards remain comparable and cacheable.
@@ -1345,8 +1342,24 @@ async def get_portfolio_overview_metrics(
     usage_by_day = {day: {"traffic": 0, "usage": 0} for day in dates}
     errors_by_day = {day: 0 for day in dates}
     revenue_values: list[int | None] = [None for _ in dates]
+    all_time_traffic = 0
+    all_time_usage = 0
+    unresolved_errors = 0
+    revenue_prior_value: int | None = None
+    revenue_comparison_date = _previous_month_same_day(today)
 
     if pipeline_ids:
+        all_time_usage_rows = (await db.execute(
+            select(MonitorUsageEvent.event_type, func.count(MonitorUsageEvent.id))
+            .where(MonitorUsageEvent.pipeline_id.in_(pipeline_ids))
+            .group_by(MonitorUsageEvent.event_type)
+        )).all()
+        for event_type, count in all_time_usage_rows:
+            count = int(count or 0)
+            all_time_usage += count
+            if event_type == "pageview":
+                all_time_traffic += count
+
         usage_rows = (await db.execute(
             select(
                 func.date(MonitorUsageEvent.occurred_at),
@@ -1380,6 +1393,13 @@ async def get_portfolio_overview_metrics(
             if day in errors_by_day:
                 errors_by_day[day] = int(count or 0)
 
+        unresolved_errors = int((await db.execute(
+            select(func.count(MonitorErrorGroup.id)).where(
+                MonitorErrorGroup.pipeline_id.in_(pipeline_ids),
+                MonitorErrorGroup.status == "unresolved",
+            )
+        )).scalar() or 0)
+
         eff = await effective_config(db)
         revenue_sources = list((await db.execute(
             select(MonitorRevenueSource).where(MonitorRevenueSource.pipeline_id.in_(pipeline_ids))
@@ -1398,6 +1418,12 @@ async def get_portfolio_overview_metrics(
                 str(eff.revenue_base_currency or "usd"),
                 eff.revenue_fx_rates or {},
             )
+            revenue_prior_value = _portfolio_revenue_values(
+                customer_mrr_rows,
+                [revenue_comparison_date],
+                str(eff.revenue_base_currency or "usd"),
+                eff.revenue_fx_rates or {},
+            )[0]
             if not customer_mrr_rows:
                 selected = [
                     _selected_mrr(source, eff.revenue_engine)[0]
@@ -1410,11 +1436,18 @@ async def get_portfolio_overview_metrics(
     traffic_values = [usage_by_day[day]["traffic"] for day in dates]
     usage_values = [usage_by_day[day]["usage"] for day in dates]
     error_values = [errors_by_day[day] for day in dates]
+    traffic_current = sum(traffic_values[-PORTFOLIO_COMPARISON_DAYS:])
+    traffic_prior = sum(traffic_values[:PORTFOLIO_COMPARISON_DAYS])
+    usage_current = sum(usage_values[-PORTFOLIO_COMPARISON_DAYS:])
+    usage_prior = sum(usage_values[:PORTFOLIO_COMPARISON_DAYS])
+    errors_current = sum(error_values[-PORTFOLIO_COMPARISON_DAYS:])
+    errors_prior = sum(error_values[:PORTFOLIO_COMPARISON_DAYS])
+    revenue_current = revenue_values[-1] if revenue_values else None
     metrics = [
-        _portfolio_metric_payload("traffic", dates, traffic_values, unit="count", positive_when_up=True),
-        _portfolio_metric_payload("usage", dates, usage_values, unit="count", positive_when_up=True),
-        _portfolio_metric_payload("revenue", dates, revenue_values, unit="cents", positive_when_up=True, stock_metric=True),
-        _portfolio_metric_payload("errors", dates, error_values, unit="count", positive_when_up=False),
+        _portfolio_metric_payload("traffic", dates, traffic_values, unit="count", positive_when_up=True, display_total=all_time_traffic, comparison_current=traffic_current, comparison_prior=traffic_prior),
+        _portfolio_metric_payload("usage", dates, usage_values, unit="count", positive_when_up=True, display_total=all_time_usage, comparison_current=usage_current, comparison_prior=usage_prior),
+        _portfolio_metric_payload("revenue", dates, revenue_values, unit="cents", positive_when_up=True, display_total=revenue_current, comparison_current=revenue_current, comparison_prior=revenue_prior_value, comparison_date=revenue_comparison_date),
+        _portfolio_metric_payload("errors", dates, error_values, unit="count", positive_when_up=False, display_total=unresolved_errors, comparison_current=errors_current, comparison_prior=errors_prior),
     ]
     return {
         "data": {
