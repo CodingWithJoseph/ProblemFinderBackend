@@ -1,10 +1,12 @@
+from datetime import datetime, timezone
+
 from conftest import FakeResult, make_issue, make_pipeline, make_team
 from app.models import MonitorUsageSource
 
 
 async def test_pipeline_list_includes_project_team_and_issue_counts(client, fake_db, auth_headers):
     team = make_team(name="Validation Team")
-    card = make_pipeline(team_id=team.id)
+    card = make_pipeline(team_id=team.id, icon_url="https://example.com/product.png")
     fake_db.stub(execute=[
         FakeResult(rows=[card]),  # active cards
         FakeResult(rows=[team]),  # assigned team summaries
@@ -20,8 +22,25 @@ async def test_pipeline_list_includes_project_team_and_issue_counts(client, fake
     row = resp.json()["data"][0]
     assert row["teamId"] == team.id
     assert row["team"]["name"] == "Validation Team"
+    assert row["iconUrl"] == "https://example.com/product.png"
     assert row["openIssueCount"] == 2
     assert row["openKillCriteriaCount"] == 1
+
+
+async def test_portfolio_list_serializes_product_icon(client, fake_db, auth_headers):
+    card = make_pipeline(
+        launched_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        icon_url="https://example.com/launched-product.png",
+    )
+    fake_db.stub(execute=[
+        FakeResult(rows=[card]),
+        FakeResult(rows=[]),
+    ])
+
+    resp = await client.get("/portfolio", headers=auth_headers)
+
+    assert resp.status_code == 200
+    assert resp.json()["data"][0]["iconUrl"] == "https://example.com/launched-product.png"
 
 
 async def test_pipeline_team_change_updates_issues_and_clears_assignees(client, fake_db, auth_headers):
