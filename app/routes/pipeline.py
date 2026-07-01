@@ -38,7 +38,7 @@ router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 PATCHABLE_FIELDS = {
     "stage", "kill_criteria", "distribution_channels", "concept_angles",
     "exit_checklist", "notes", "url", "category", "revenue_model", "status", "name",
-    "outcome", "mrr", "team_id", "project_name",
+    "outcome", "mrr", "team_id", "project_name", "icon_url",
 }
 
 # Canonical pipeline stages, in progression order. "watching" is the backlog;
@@ -97,6 +97,7 @@ def _serialize(
         "team": team,
         "name": p.name,
         "projectName": p.project_name,
+        "iconUrl": p.icon_url,
         # Effective title shown everywhere: the user-given name, falling back to
         # the cluster name when the project hasn't been renamed.
         "displayName": p.project_name or p.name,
@@ -598,6 +599,7 @@ class PatchPipelineBody(BaseModel):
     post_ids: Optional[list[str]] = None
     team_id: Optional[str] = None
     project_name: Optional[str] = None
+    icon_url: Optional[str] = None
     timeline_days: Optional[int] = None
 
 
@@ -1087,6 +1089,13 @@ async def patch_pipeline(
     updates = body.model_dump(exclude_none=True)
     if "team_id" in body.model_fields_set:
         updates["team_id"] = body.team_id
+
+    if "icon_url" in updates:
+        icon_url = updates["icon_url"].strip()
+        allowed_icon = icon_url.startswith(("https://", "http://", "data:image/png;base64,", "data:image/jpeg;base64,", "data:image/webp;base64,", "data:image/gif;base64,"))
+        if len(icon_url) > 400_000 or not allowed_icon:
+            raise HTTPException(status_code=400, detail="Icon must be a supported image under 300 KB")
+        updates["icon_url"] = icon_url
 
     if "stage" in updates and updates["stage"] not in VALID_STAGES:
         raise HTTPException(
