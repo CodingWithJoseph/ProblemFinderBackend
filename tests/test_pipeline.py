@@ -84,6 +84,38 @@ async def test_patch_sets_project_name_and_timeline(client, fake_db, auth_header
     assert card.timeline_target_launch - card.timeline_start == __import__("datetime").timedelta(days=30)
 
 
+async def test_patch_sets_product_icon(client, fake_db, auth_headers):
+    card = make_pipeline(name="Cluster 42")
+    fake_db.stub(execute=[
+        FakeResult(rows=[card]),
+        FakeResult(rows=[]),
+    ])
+
+    icon_url = "data:image/png;base64,aWNvbg=="
+    resp = await client.patch(
+        f"/pipeline/{card.id}",
+        json={"icon_url": icon_url},
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["data"]["iconUrl"] == icon_url
+    assert card.icon_url == icon_url
+
+
+async def test_patch_rejects_unsupported_product_icon(client, fake_db, auth_headers):
+    card = make_pipeline(name="Cluster 42")
+    fake_db.stub(execute=[FakeResult(rows=[card])])
+
+    resp = await client.patch(
+        f"/pipeline/{card.id}",
+        json={"icon_url": "javascript:alert(1)"},
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 400
+
+
 async def test_patch_skip_sets_project_name_only(client, fake_db, auth_headers):
     card = make_pipeline(name="Cluster 42")
     fake_db.stub(execute=[

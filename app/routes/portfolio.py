@@ -3,6 +3,7 @@ import logging
 import re
 import secrets
 import uuid
+from calendar import monthrange
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 from urllib.parse import urlencode, urlparse
@@ -1249,6 +1250,212 @@ def _empty_daily(days: int = 14) -> dict[str, dict]:
             "events": 0,
         }
     return rows
+
+
+PORTFOLIO_COMPARISON_DAYS = 7
+PORTFOLIO_SPARKLINE_DAYS = 14
+
+
+def _portfolio_metric_payload(
+    metric: str,
+    dates: list[date],
+    values: list[int | None],
+    *,
+    unit: str,
+    positive_when_up: bool,
+    display_total: int | None,
+    comparison_current: int | None,
+    comparison_prior: int | None,
+    comparison_date: date | None = None,
+) -> dict:
+    """Build one card payload while keeping headline and trend semantics separate."""
+    if comparison_current is None or comparison_prior is None:
+        direction = "flat"
+        is_positive = None
+        percent_change = None
+    else:
+        direction = "up" if comparison_current > comparison_prior else "down" if comparison_current < comparison_prior else "flat"
+        is_positive = None if direction == "flat" else (direction == "up") == positive_when_up
+        percent_change = _pct_change(comparison_current, comparison_prior)
+
+    return {
+        "metric": metric,
+        "unit": unit,
+        "currentTotal": display_total,
+        "priorTotal": comparison_prior,
+        "comparisonCurrent": comparison_current,
+        "percentChange": percent_change,
+        "trendDirection": direction,
+        "isPositiveTrend": is_positive,
+        "comparisonDate": comparison_date.isoformat() if comparison_date else None,
+        "points": [
+            {"date": day.isoformat(), "value": value}
+            for day, value in zip(dates, values)
+        ],
+    }
+
+
+def _previous_month_same_day(day: date) -> date:
+    month = 12 if day.month == 1 else day.month - 1
+    year = day.year - 1 if day.month == 1 else day.year
+    return date(year, month, min(day.day, monthrange(year, month)[1]))
+
+
+def _portfolio_revenue_values(
+    rows: list[MonitorCustomerMrr],
+    dates: list[date],
+    base_currency: str,
+    fx_rates: dict[str, float],
+) -> list[int | None]:
+    """Return portfolio-wide end-of-day MRR in base-currency cents.
+
+    Customer ids are namespaced by revenue source because separate Stripe
+    accounts can legitimately contain the same customer id.
+    """
+    if not rows:
+        return [None for _ in dates]
+    series = [
+        (f"{row.revenue_source_id}:{row.stripe_customer_id}", row.as_of_date, row.mrr_cents, row.currency)
+        for row in rows
+    ]
+    return [_total_mrr_at(series, day, base_currency, fx_rates)[0] for day in dates]
+
+
+@router.get("/overview-metrics")
+async def get_portfolio_overview_metrics(
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Portfolio overview totals with 7d comparisons and 14 daily points.
+
+    This is deliberately not a configurable analytics endpoint. The overview
+    has one stable comparison so cards remain comparable and cacheable.
+    """
+    pipeline_rows = (await db.execute(
+        select(Pipeline.id).where(Pipeline.user_id == uid, Pipeline.launched_at != None)
+    )).all()
+    pipeline_ids = [row[0] for row in pipeline_rows]
+
+    today = _now().date()
+    dates = [today - timedelta(days=offset) for offset in range(PORTFOLIO_SPARKLINE_DAYS - 1, -1, -1)]
+    since = datetime.combine(dates[0], datetime.min.time(), tzinfo=timezone.utc)
+    usage_by_day = {day: {"traffic": 0, "usage": 0} for day in dates}
+    errors_by_day = {day: 0 for day in dates}
+    revenue_values: list[int | None] = [None for _ in dates]
+    all_time_traffic = 0
+    all_time_usage = 0
+    unresolved_errors = 0
+    revenue_prior_value: int | None = None
+    revenue_comparison_date = _previous_month_same_day(today)
+
+    if pipeline_ids:
+        all_time_usage_rows = (await db.execute(
+            select(MonitorUsageEvent.event_type, func.count(MonitorUsageEvent.id))
+            .where(MonitorUsageEvent.pipeline_id.in_(pipeline_ids))
+            .group_by(MonitorUsageEvent.event_type)
+        )).all()
+        for event_type, count in all_time_usage_rows:
+            count = int(count or 0)
+            all_time_usage += count
+            if event_type == "pageview":
+                all_time_traffic += count
+
+        usage_rows = (await db.execute(
+            select(
+                func.date(MonitorUsageEvent.occurred_at),
+                MonitorUsageEvent.event_type,
+                func.count(MonitorUsageEvent.id),
+            )
+            .where(
+                MonitorUsageEvent.pipeline_id.in_(pipeline_ids),
+                MonitorUsageEvent.occurred_at >= since,
+            )
+            .group_by(func.date(MonitorUsageEvent.occurred_at), MonitorUsageEvent.event_type)
+        )).all()
+        for day_value, event_type, count in usage_rows:
+            day = _as_date(day_value)
+            if day not in usage_by_day:
+                continue
+            usage_by_day[day]["usage"] += int(count or 0)
+            if event_type == "pageview":
+                usage_by_day[day]["traffic"] += int(count or 0)
+
+        error_rows = (await db.execute(
+            select(func.date(MonitorErrorEvent.occurred_at), func.count(MonitorErrorEvent.id))
+            .where(
+                MonitorErrorEvent.pipeline_id.in_(pipeline_ids),
+                MonitorErrorEvent.occurred_at >= since,
+            )
+            .group_by(func.date(MonitorErrorEvent.occurred_at))
+        )).all()
+        for day_value, count in error_rows:
+            day = _as_date(day_value)
+            if day in errors_by_day:
+                errors_by_day[day] = int(count or 0)
+
+        unresolved_errors = int((await db.execute(
+            select(func.count(MonitorErrorGroup.id)).where(
+                MonitorErrorGroup.pipeline_id.in_(pipeline_ids),
+                MonitorErrorGroup.status == "unresolved",
+            )
+        )).scalar() or 0)
+
+        eff = await effective_config(db)
+        revenue_sources = list((await db.execute(
+            select(MonitorRevenueSource).where(MonitorRevenueSource.pipeline_id.in_(pipeline_ids))
+        )).scalars().all())
+        source_ids = [source.id for source in revenue_sources]
+        if source_ids:
+            customer_mrr_rows = list((await db.execute(
+                select(MonitorCustomerMrr).where(
+                    MonitorCustomerMrr.revenue_source_id.in_(source_ids),
+                    MonitorCustomerMrr.as_of_date <= today,
+                )
+            )).scalars().all())
+            revenue_values = _portfolio_revenue_values(
+                customer_mrr_rows,
+                dates,
+                str(eff.revenue_base_currency or "usd"),
+                eff.revenue_fx_rates or {},
+            )
+            revenue_prior_value = _portfolio_revenue_values(
+                customer_mrr_rows,
+                [revenue_comparison_date],
+                str(eff.revenue_base_currency or "usd"),
+                eff.revenue_fx_rates or {},
+            )[0]
+            if not customer_mrr_rows:
+                selected = [
+                    _selected_mrr(source, eff.revenue_engine)[0]
+                    for source in revenue_sources
+                ]
+                known = [value for value in selected if value is not None]
+                if known:
+                    revenue_values[-1] = sum(known)
+
+    traffic_values = [usage_by_day[day]["traffic"] for day in dates]
+    usage_values = [usage_by_day[day]["usage"] for day in dates]
+    error_values = [errors_by_day[day] for day in dates]
+    traffic_current = sum(traffic_values[-PORTFOLIO_COMPARISON_DAYS:])
+    traffic_prior = sum(traffic_values[:PORTFOLIO_COMPARISON_DAYS])
+    usage_current = sum(usage_values[-PORTFOLIO_COMPARISON_DAYS:])
+    usage_prior = sum(usage_values[:PORTFOLIO_COMPARISON_DAYS])
+    errors_current = sum(error_values[-PORTFOLIO_COMPARISON_DAYS:])
+    errors_prior = sum(error_values[:PORTFOLIO_COMPARISON_DAYS])
+    revenue_current = revenue_values[-1] if revenue_values else None
+    metrics = [
+        _portfolio_metric_payload("traffic", dates, traffic_values, unit="count", positive_when_up=True, display_total=all_time_traffic, comparison_current=traffic_current, comparison_prior=traffic_prior),
+        _portfolio_metric_payload("usage", dates, usage_values, unit="count", positive_when_up=True, display_total=all_time_usage, comparison_current=usage_current, comparison_prior=usage_prior),
+        _portfolio_metric_payload("revenue", dates, revenue_values, unit="cents", positive_when_up=True, display_total=revenue_current, comparison_current=revenue_current, comparison_prior=revenue_prior_value, comparison_date=revenue_comparison_date),
+        _portfolio_metric_payload("errors", dates, error_values, unit="count", positive_when_up=False, display_total=unresolved_errors, comparison_current=errors_current, comparison_prior=errors_prior),
+    ]
+    return {
+        "data": {
+            "comparisonDays": PORTFOLIO_COMPARISON_DAYS,
+            "sparklineDays": PORTFOLIO_SPARKLINE_DAYS,
+            "metrics": metrics,
+        }
+    }
 
 
 @router.get("")
