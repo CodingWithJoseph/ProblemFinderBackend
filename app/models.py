@@ -223,6 +223,7 @@ class Pipeline(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     # User-given project name; falls back to ``name`` (the cluster name) when null.
     project_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    icon_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     post_ids: Mapped[list] = mapped_column(ARRAY(Text), nullable=False, default=list)
     source_cluster_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     stage: Mapped[str] = mapped_column(String(50), nullable=False, default="watching")
