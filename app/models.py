@@ -661,6 +661,28 @@ class MonitorMrrMovement(Base):
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
+class MonitorRevenueDaily(Base):
+    """Daily gross revenue for a source, aggregated from Stripe succeeded
+    charges. One row per (revenue source, day, currency); ``gross_cents`` is the
+    day's gross charge total in that currency's minor units (refunds not netted).
+
+    This is *daily financial activity* — how much money actually came in each
+    day — as opposed to the recurring-revenue snapshot in
+    ``portfolio_customer_mrr``. It feeds the Portfolio overview revenue card so
+    that card reads like traffic/usage/errors: a daily series with a fixed
+    prior-7-days comparison."""
+
+    __tablename__ = "portfolio_revenue_daily"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    revenue_source_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("portfolio_revenue_sources.id", ondelete="CASCADE"), nullable=False, index=True)
+    as_of_date: Mapped[date] = mapped_column(Date, nullable=False)
+    gross_cents: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    currency: Mapped[str] = mapped_column(Text, nullable=False, default="usd")
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
 class MonitorCustomer(Base):
     """A Stripe customer seen on a revenue source's account, keyed by
     ``stripe_customer_id``. Populated from the Stripe customer object during sync
