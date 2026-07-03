@@ -44,6 +44,7 @@ from app.models import (
 )
 from app.services.alerts import AlertPrefs, alert_settings_row
 from app.services.app_settings import apply_settings, effective_config, serialize_settings
+from app.services.goals import account_goals_payload, project_goals_payload
 from app.routes.pipeline import (
     _fetch_issue_counts_for_cards,
     _fetch_posts_for_cards,
@@ -1500,6 +1501,28 @@ async def get_portfolio(
     teams_map = await _fetch_teams_for_cards(list(cards), db)
     counts_map = await _fetch_issue_counts_for_cards(list(cards), db)
     return {"data": _serialize_cards(list(cards), posts_map, teams_map, counts_map)}
+
+
+@router.get("/goals")
+async def get_account_goals(
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Portfolio-level (account-scoped) goals with progress + milestone log.
+    Reconciles achievements on read. Defined before /{pipeline_id} so the static
+    path wins."""
+    return {"data": await account_goals_payload(uid, db)}
+
+
+@router.get("/{pipeline_id}/goals")
+async def get_project_goals(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Project-scoped goals for a launched product, with progress + milestone log."""
+    await _require_launched_product(pipeline_id, db, uid)
+    return {"data": await project_goals_payload(pipeline_id, db)}
 
 
 @router.get("/{pipeline_id}")

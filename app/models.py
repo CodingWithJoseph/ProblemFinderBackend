@@ -4,7 +4,7 @@ from app.db import Base
 from datetime import datetime, date, timezone
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID, ARRAY
-from sqlalchemy import String, Text, Integer, Boolean, Float, DateTime, Date, TIMESTAMP, ForeignKey
+from sqlalchemy import String, Text, Integer, BigInteger, Boolean, Float, DateTime, Date, TIMESTAMP, ForeignKey
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -835,3 +835,57 @@ class UserActivityDaily(Base):
     last_active_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class GoalDefinition(Base):
+    """Static, admin-defined goal (seeded in migration 0042; no user config).
+    ``scope`` is 'project' or 'account'; ``metric_key`` maps to a rollup the Goal
+    Progress Engine reads; ``icon`` is a lucide icon name (no badge collectibles)."""
+
+    __tablename__ = "goal_definitions"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    scope: Mapped[str] = mapped_column(Text, nullable=False)
+    category: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    metric_key: Mapped[str] = mapped_column(Text, nullable=False)
+    icon: Mapped[str] = mapped_column(Text, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class GoalTier(Base):
+    """One ordered threshold for a goal. ``threshold_value`` is compared to the
+    goal's current metric value; ``label`` is the human tier name."""
+
+    __tablename__ = "goal_tiers"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    goal_definition_id: Mapped[str] = mapped_column(Text, ForeignKey("goal_definitions.id", ondelete="CASCADE"), nullable=False, index=True)
+    tier_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    threshold_value: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class ProjectGoalAchievement(Base):
+    """Append-only record of a project crossing a goal tier (the milestone log)."""
+
+    __tablename__ = "project_goal_achievements"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
+    goal_definition_id: Mapped[str] = mapped_column(Text, ForeignKey("goal_definitions.id", ondelete="CASCADE"), nullable=False)
+    tier_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    achieved_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class AccountGoalAchievement(Base):
+    """Append-only record of an account (user) crossing a portfolio-level goal
+    tier. Same shape as the project table with no project_id."""
+
+    __tablename__ = "account_goal_achievements"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    goal_definition_id: Mapped[str] = mapped_column(Text, ForeignKey("goal_definitions.id", ondelete="CASCADE"), nullable=False)
+    tier_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    achieved_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
