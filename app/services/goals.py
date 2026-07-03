@@ -1,0 +1,295 @@
+"""Goal Progress Engine.
+
+Reads existing rollups/flags (never the raw event firehose), compares each goal's
+current value to the next un-achieved tier per project+goal or account+goal, and
+inserts an achievement row when a tier is crossed — emitting ``goal_tier_achieved``.
+Achievement rows are the durable, append-only milestone log the UI renders.
+
+The engine is idempotent: achievement inserts use ON CONFLICT DO NOTHING against
+the (project|user, goal, tier) unique key, so re-running never double-records.
+It is invoked on read (the goals endpoints reconcile before returning) and can be
+called from the scheduled syncs.
+"""
+
+import logging
+from datetime import datetime, timezone
+
+from sqlalchemy import func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import (
+    AccountGoalAchievement,
+    GoalDefinition,
+    GoalTier,
+    Issue,
+    MonitorErrorEvent,
+    MonitorRevenueSource,
+    MonitorUsageEvent,
+    MonitorUsageSource,
+    Pipeline,
+    Problem,
+    ProjectGoalAchievement,
+    Task,
+    Team,
+    TeamMember,
+)
+from app.services.app_settings import effective_config
+
+logger = logging.getLogger(__name__)
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _selected_mrr_cents(source: MonitorRevenueSource | None, engine: str) -> int:
+    """Current MRR in cents for the configured revenue engine (mirrors the
+    portfolio route's _selected_mrr without importing the routes layer)."""
+    if not source:
+        return 0
+    if engine == "invoice":
+        return int(source.invoice_mrr_cents or 0)
+    return int(source.current_mrr_cents or 0)
+
+
+async def _project_setup_steps(pipeline_id: str, db: AsyncSession) -> int:
+    """Count the connections that make the Monitor section fully realized for a
+    product (out of 4): a data source (usage beacon) connected, usage data
+    flowing, revenue connected, and error monitoring active."""
+    usage_source = await db.scalar(
+        select(MonitorUsageSource).where(MonitorUsageSource.pipeline_id == pipeline_id).limit(1)
+    )
+    data_source_connected = bool(usage_source and usage_source.status == "connected")
+    usage_flowing = bool(await db.scalar(
+        select(MonitorUsageEvent.id).where(MonitorUsageEvent.pipeline_id == pipeline_id).limit(1)
+    ))
+    revenue_source = await db.scalar(
+        select(MonitorRevenueSource).where(MonitorRevenueSource.pipeline_id == pipeline_id).limit(1)
+    )
+    revenue_connected = bool(revenue_source and revenue_source.status == "connected")
+    errors_flowing = bool(await db.scalar(
+        select(MonitorErrorEvent.id).where(MonitorErrorEvent.pipeline_id == pipeline_id).limit(1)
+    ))
+    return sum([data_source_connected, usage_flowing, revenue_connected, errors_flowing])
+
+
+async def project_metric_values(pipeline_id: str, db: AsyncSession) -> dict[str, int]:
+    """Current value for every project-scoped metric_key."""
+    eff = await effective_config(db)
+    revenue_source = await db.scalar(
+        select(MonitorRevenueSource).where(MonitorRevenueSource.pipeline_id == pipeline_id).limit(1)
+    )
+    signups = int(await db.scalar(
+        select(func.count(MonitorUsageEvent.id)).where(
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.event_type == "signup",
+        )
+    ) or 0)
+    traffic = int(await db.scalar(
+        select(func.count(MonitorUsageEvent.id)).where(
+            MonitorUsageEvent.pipeline_id == pipeline_id,
+            MonitorUsageEvent.event_type == "pageview",
+        )
+    ) or 0)
+    issues_created = int(await db.scalar(
+        select(func.count(Issue.id)).where(Issue.pipeline_id == pipeline_id)
+    ) or 0)
+    return {
+        "signups": signups,
+        "traffic": traffic,
+        "issues_created": issues_created,
+        "mrr_cents": _selected_mrr_cents(revenue_source, eff.revenue_engine),
+        "setup_steps": await _project_setup_steps(pipeline_id, db),
+    }
+
+
+async def account_metric_values(uid: str, db: AsyncSession) -> dict[str, int]:
+    """Current value for every account-scoped metric_key."""
+    products_launched = int(await db.scalar(
+        select(func.count(Pipeline.id)).where(Pipeline.user_id == uid, Pipeline.launched_at != None)
+    ) or 0)
+    problems_created = int(await db.scalar(
+        select(func.count(Problem.id)).where(Problem.user_id == uid)
+    ) or 0)
+    tasks_created = int(await db.scalar(
+        select(func.count(Task.id)).where(Task.user_id == uid)
+    ) or 0)
+    owned_team_ids = select(Team.id).where(Team.owner_user_id == uid)
+    teammates_invited = int(await db.scalar(
+        select(func.count(TeamMember.id)).where(
+            TeamMember.team_id.in_(owned_team_ids),
+            TeamMember.status != "removed",
+            or_(TeamMember.user_id == None, TeamMember.user_id != uid),
+        )
+    ) or 0)
+    return {
+        "products_launched": products_launched,
+        "problems_created": problems_created,
+        "tasks_created": tasks_created,
+        "teammates_invited": teammates_invited,
+    }
+
+
+async def _definitions_with_tiers(scope: str, db: AsyncSession) -> list[tuple[GoalDefinition, list[GoalTier]]]:
+    definitions = list((await db.execute(
+        select(GoalDefinition).where(GoalDefinition.scope == scope).order_by(GoalDefinition.sort_order)
+    )).scalars().all())
+    if not definitions:
+        return []
+    tier_rows = list((await db.execute(
+        select(GoalTier)
+        .where(GoalTier.goal_definition_id.in_([d.id for d in definitions]))
+        .order_by(GoalTier.tier_index)
+    )).scalars().all())
+    tiers_by_goal: dict[str, list[GoalTier]] = {}
+    for tier in tier_rows:
+        tiers_by_goal.setdefault(tier.goal_definition_id, []).append(tier)
+    return [(d, tiers_by_goal.get(d.id, [])) for d in definitions]
+
+
+def _newly_crossed_indices(value: int, tiers: list[GoalTier], already: set[int]) -> list[int]:
+    """Tier indices whose threshold the current value meets and which aren't yet
+    recorded — usually one, but several can cross at once (e.g. a bulk import)."""
+    return [t.tier_index for t in tiers if value >= t.threshold_value and t.tier_index not in already]
+
+
+async def evaluate_project_goals(pipeline_id: str, db: AsyncSession) -> int:
+    """Reconcile a project's goal achievements. Returns the number of tiers newly
+    recorded. Does not commit — the caller owns the transaction."""
+    defs = await _definitions_with_tiers("project", db)
+    if not defs:
+        return 0
+    values = await project_metric_values(pipeline_id, db)
+    existing = {(row.goal_definition_id, row.tier_index) for row in (await db.execute(
+        select(ProjectGoalAchievement).where(ProjectGoalAchievement.project_id == pipeline_id)
+    )).scalars().all()}
+    now = _now()
+    recorded = 0
+    for definition, tiers in defs:
+        value = int(values.get(definition.metric_key, 0))
+        already = {index for (gid, index) in existing if gid == definition.id}
+        for tier_index in _newly_crossed_indices(value, tiers, already):
+            await db.execute(
+                pg_insert(ProjectGoalAchievement.__table__)
+                .values(project_id=pipeline_id, goal_definition_id=definition.id, tier_index=tier_index, achieved_at=now)
+                .on_conflict_do_nothing(index_elements=["project_id", "goal_definition_id", "tier_index"])
+            )
+            _emit_goal_tier_achieved("project", pipeline_id, definition, tier_index, value)
+            recorded += 1
+    return recorded
+
+
+async def evaluate_account_goals(uid: str, db: AsyncSession) -> int:
+    """Reconcile an account's portfolio-level goal achievements. Returns the
+    number of tiers newly recorded. Does not commit."""
+    defs = await _definitions_with_tiers("account", db)
+    if not defs:
+        return 0
+    values = await account_metric_values(uid, db)
+    existing = {(row.goal_definition_id, row.tier_index) for row in (await db.execute(
+        select(AccountGoalAchievement).where(AccountGoalAchievement.user_id == uid)
+    )).scalars().all()}
+    now = _now()
+    recorded = 0
+    for definition, tiers in defs:
+        value = int(values.get(definition.metric_key, 0))
+        already = {index for (gid, index) in existing if gid == definition.id}
+        for tier_index in _newly_crossed_indices(value, tiers, already):
+            await db.execute(
+                pg_insert(AccountGoalAchievement.__table__)
+                .values(user_id=uid, goal_definition_id=definition.id, tier_index=tier_index, achieved_at=now)
+                .on_conflict_do_nothing(index_elements=["user_id", "goal_definition_id", "tier_index"])
+            )
+            _emit_goal_tier_achieved("account", uid, definition, tier_index, value)
+            recorded += 1
+    return recorded
+
+
+def _emit_goal_tier_achieved(scope: str, owner_id: str, definition: GoalDefinition, tier_index: int, value: int) -> None:
+    """Emit the goal_tier_achieved signal. The durable record is the achievement
+    row; this is the observable hook (structured log) other systems can wire to."""
+    logger.info(
+        "goal_tier_achieved scope=%s owner=%s goal=%s tier=%s value=%s",
+        scope, owner_id, definition.id, tier_index, value,
+    )
+
+
+def _shape_goal(definition: GoalDefinition, tiers: list[GoalTier], value: int, achieved: dict[int, datetime]) -> dict:
+    """Build the UI payload for one goal: current value, tiers, the next
+    un-achieved tier, and the chronological milestone log."""
+    ordered = sorted(tiers, key=lambda t: t.tier_index)
+    next_tier = next((t for t in ordered if value < t.threshold_value), None)
+    max_threshold = ordered[-1].threshold_value if ordered else 0
+    milestones = [
+        {
+            "tierIndex": t.tier_index,
+            "label": t.label,
+            "threshold": t.threshold_value,
+            "achievedAt": achieved[t.tier_index].isoformat(),
+        }
+        for t in ordered if t.tier_index in achieved
+    ]
+    milestones.sort(key=lambda m: m["achievedAt"])
+    return {
+        "id": definition.id,
+        "category": definition.category,
+        "title": definition.title,
+        "metricKey": definition.metric_key,
+        "icon": definition.icon,
+        "currentValue": value,
+        "achievedCount": len(achieved),
+        "tierCount": len(ordered),
+        "maxThreshold": max_threshold,
+        "tiers": [
+            {
+                "tierIndex": t.tier_index,
+                "threshold": t.threshold_value,
+                "label": t.label,
+                "achieved": t.tier_index in achieved,
+            }
+            for t in ordered
+        ],
+        "nextTier": None if next_tier is None else {
+            "tierIndex": next_tier.tier_index,
+            "threshold": next_tier.threshold_value,
+            "label": next_tier.label,
+        },
+        "milestones": milestones,
+    }
+
+
+async def project_goals_payload(pipeline_id: str, db: AsyncSession) -> list[dict]:
+    """Evaluate then shape a project's goals for the UI."""
+    await evaluate_project_goals(pipeline_id, db)
+    await db.commit()
+    defs = await _definitions_with_tiers("project", db)
+    values = await project_metric_values(pipeline_id, db)
+    achieved_rows = (await db.execute(
+        select(ProjectGoalAchievement).where(ProjectGoalAchievement.project_id == pipeline_id)
+    )).scalars().all()
+    achieved_by_goal: dict[str, dict[int, datetime]] = {}
+    for row in achieved_rows:
+        achieved_by_goal.setdefault(row.goal_definition_id, {})[row.tier_index] = row.achieved_at
+    return [
+        _shape_goal(d, tiers, int(values.get(d.metric_key, 0)), achieved_by_goal.get(d.id, {}))
+        for d, tiers in defs
+    ]
+
+
+async def account_goals_payload(uid: str, db: AsyncSession) -> list[dict]:
+    """Evaluate then shape an account's portfolio-level goals for the UI."""
+    await evaluate_account_goals(uid, db)
+    await db.commit()
+    defs = await _definitions_with_tiers("account", db)
+    values = await account_metric_values(uid, db)
+    achieved_rows = (await db.execute(
+        select(AccountGoalAchievement).where(AccountGoalAchievement.user_id == uid)
+    )).scalars().all()
+    achieved_by_goal: dict[str, dict[int, datetime]] = {}
+    for row in achieved_rows:
+        achieved_by_goal.setdefault(row.goal_definition_id, {})[row.tier_index] = row.achieved_at
+    return [
+        _shape_goal(d, tiers, int(values.get(d.metric_key, 0)), achieved_by_goal.get(d.id, {}))
+        for d, tiers in defs
+    ]
