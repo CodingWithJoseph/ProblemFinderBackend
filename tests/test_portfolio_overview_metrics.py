@@ -1,7 +1,7 @@
 from datetime import date, datetime, timezone
 
 from conftest import FakeResult, make_revenue_source
-from app.models import MonitorCustomerMrr
+from app.models import MonitorRevenueDaily
 from app.routes import portfolio as portfolio_routes
 
 
@@ -19,28 +19,27 @@ async def test_portfolio_overview_metrics_returns_fixed_comparison_and_sparkline
         lambda: datetime(2026, 6, 30, 12, tzinfo=timezone.utc),
     )
     source = make_revenue_source(pipeline_id="pipeline-1")
-    previous_month_mrr = MonitorCustomerMrr(
-        id="mrr-previous-month",
+    # Daily gross revenue rows: two land in the trailing 7 days (2026-06-24..30)
+    # and one in the prior 7 days (2026-06-17..23). Missing days read as 0.
+    prior_day = MonitorRevenueDaily(
+        id="rev-prior",
         revenue_source_id=source.id,
-        stripe_customer_id="cus_1",
-        as_of_date=date(2026, 5, 30),
-        mrr_cents=1000,
+        as_of_date=date(2026, 6, 19),
+        gross_cents=1000,
         currency="usd",
     )
-    prior_mrr = MonitorCustomerMrr(
-        id="mrr-prior",
+    trailing_day = MonitorRevenueDaily(
+        id="rev-trailing",
         revenue_source_id=source.id,
-        stripe_customer_id="cus_1",
-        as_of_date=date(2026, 6, 23),
-        mrr_cents=1200,
+        as_of_date=date(2026, 6, 26),
+        gross_cents=500,
         currency="usd",
     )
-    current_mrr = MonitorCustomerMrr(
-        id="mrr-current",
+    current_day = MonitorRevenueDaily(
+        id="rev-current",
         revenue_source_id=source.id,
-        stripe_customer_id="cus_1",
         as_of_date=date(2026, 6, 30),
-        mrr_cents=1500,
+        gross_cents=1500,
         currency="usd",
     )
     fake_db.stub(execute=[
@@ -59,7 +58,7 @@ async def test_portfolio_overview_metrics_returns_fixed_comparison_and_sparkline
         FakeResult(scalar=3),
         FakeResult(rows=[]),  # effective app settings overlay
         FakeResult(rows=[source]),
-        FakeResult(rows=[previous_month_mrr, prior_mrr, current_mrr]),
+        FakeResult(rows=[prior_day, trailing_day, current_day]),
     ])
 
     response = await client.get("/portfolio/overview-metrics", headers=auth_headers)
@@ -86,11 +85,24 @@ async def test_portfolio_overview_metrics_returns_fixed_comparison_and_sparkline
     assert metrics["errors"]["trendDirection"] == "down"
     assert metrics["errors"]["isPositiveTrend"] is True
 
+    # Revenue is now daily gross with a trailing-7 vs prior-7 comparison, like
+    # the other cards: trailing = 1500 + 500 = 2000, prior = 1000.
     assert metrics["revenue"]["unit"] == "cents"
-    assert metrics["revenue"]["currentTotal"] == 1500
+    assert metrics["revenue"]["currentTotal"] == 2000
+    assert metrics["revenue"]["comparisonCurrent"] == 2000
     assert metrics["revenue"]["priorTotal"] == 1000
-    assert metrics["revenue"]["percentChange"] == 0.5
-    assert metrics["revenue"]["comparisonDate"] == "2026-05-30"
+    assert metrics["revenue"]["percentChange"] == 1.0
+    assert metrics["revenue"]["trendDirection"] == "up"
+    assert metrics["revenue"]["isPositiveTrend"] is True
+    # The month-over-month MRR comparison is gone.
+    assert metrics["revenue"]["comparisonDate"] is None
+    # Days with charges carry their gross; every other day is zero-filled so the
+    # sparkline is a continuous daily line.
+    revenue_points = {point["date"]: point["value"] for point in metrics["revenue"]["points"]}
+    assert revenue_points["2026-06-30"] == 1500
+    assert revenue_points["2026-06-26"] == 500
+    assert revenue_points["2026-06-19"] == 1000
+    assert revenue_points["2026-06-17"] == 0
 
     for metric in metrics.values():
         assert len(metric["points"]) == 14
@@ -118,3 +130,43 @@ async def test_portfolio_overview_metrics_is_zero_filled_without_products(
     assert metrics["revenue"]["currentTotal"] is None
     assert all(point["value"] == 0 for point in metrics["traffic"]["points"])
     assert all(point["value"] is None for point in metrics["revenue"]["points"])
+
+
+def _charge(*, amount, currency, when, status="succeeded"):
+    return {
+        "amount": amount,
+        "currency": currency,
+        "status": status,
+        "created": int(when.timestamp()),
+    }
+
+
+def test_daily_gross_by_day_currency_sums_succeeded_charges_by_day():
+    charges = [
+        _charge(amount=1000, currency="usd", when=datetime(2026, 6, 30, 9, tzinfo=timezone.utc)),
+        _charge(amount=500, currency="usd", when=datetime(2026, 6, 30, 20, tzinfo=timezone.utc)),
+        _charge(amount=2000, currency="eur", when=datetime(2026, 6, 29, 1, tzinfo=timezone.utc)),
+        # Excluded: not succeeded, and zero-amount.
+        _charge(amount=999, currency="usd", when=datetime(2026, 6, 30, 3, tzinfo=timezone.utc), status="failed"),
+        _charge(amount=0, currency="usd", when=datetime(2026, 6, 30, 4, tzinfo=timezone.utc)),
+    ]
+
+    totals = portfolio_routes._daily_gross_by_day_currency(charges)
+
+    assert totals == {
+        (date(2026, 6, 30), "usd"): 1500,
+        (date(2026, 6, 29), "eur"): 2000,
+    }
+
+
+def test_portfolio_daily_revenue_values_zero_fills_and_converts_currency():
+    dates = [date(2026, 6, 28), date(2026, 6, 29), date(2026, 6, 30)]
+    rows = [
+        MonitorRevenueDaily(id="a", revenue_source_id="s", as_of_date=date(2026, 6, 28), gross_cents=1000, currency="usd"),
+        MonitorRevenueDaily(id="b", revenue_source_id="s", as_of_date=date(2026, 6, 30), gross_cents=2000, currency="eur"),
+    ]
+
+    values = portfolio_routes._portfolio_daily_revenue_values(rows, dates, "usd", {"eur": 1.1})
+
+    # 06-28 as-is, 06-29 zero-filled, 06-30 converted 2000 * 1.1 = 2200.
+    assert values == [1000, 0, 2200]

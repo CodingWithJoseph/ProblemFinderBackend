@@ -33,6 +33,7 @@ from app.models import (
     MonitorErrorGroup,
     MonitorIdentity,
     MonitorMrrMovement,
+    MonitorRevenueDaily,
     MonitorRevenueSource,
     MonitorLog,
     MonitorSpan,
@@ -1301,24 +1302,53 @@ def _previous_month_same_day(day: date) -> date:
     return date(year, month, min(day.day, monthrange(year, month)[1]))
 
 
-def _portfolio_revenue_values(
-    rows: list[MonitorCustomerMrr],
+def _daily_gross_by_day_currency(charges: list[Any]) -> dict[tuple[date, str], int]:
+    """Aggregate Stripe charge objects into ``{(utc_date, currency): gross_cents}``.
+
+    Only succeeded charges count, and the amount is the charge's own ``amount``
+    (gross — refunds are *not* netted out, matching "gross revenue"). Charges
+    without a usable ``created`` timestamp are skipped.
+    """
+    totals: dict[tuple[date, str], int] = {}
+    for charge in charges:
+        if _stripe_value(charge, "status") != "succeeded":
+            continue
+        created = _stripe_timestamp(_stripe_value(charge, "created"))
+        if created is None:
+            continue
+        amount = int(_stripe_value(charge, "amount", 0) or 0)
+        if amount <= 0:
+            continue
+        day = datetime.fromtimestamp(created, tz=timezone.utc).date()
+        currency = str(_stripe_value(charge, "currency", "usd") or "usd").lower()
+        key = (day, currency)
+        totals[key] = totals.get(key, 0) + amount
+    return totals
+
+
+def _portfolio_daily_revenue_values(
+    rows: list[MonitorRevenueDaily],
     dates: list[date],
     base_currency: str,
     fx_rates: dict[str, float],
-) -> list[int | None]:
-    """Return portfolio-wide end-of-day MRR in base-currency cents.
+) -> list[int]:
+    """Daily gross revenue per date in base-currency cents, zero-filled.
 
-    Customer ids are namespaced by revenue source because separate Stripe
-    accounts can legitimately contain the same customer id.
+    Days with no charge row read as 0 so the sparkline is a continuous daily
+    line (and the card can compare trailing 7 days to the prior 7).
     """
-    if not rows:
-        return [None for _ in dates]
-    series = [
-        (f"{row.revenue_source_id}:{row.stripe_customer_id}", row.as_of_date, row.mrr_cents, row.currency)
-        for row in rows
-    ]
-    return [_total_mrr_at(series, day, base_currency, fx_rates)[0] for day in dates]
+    by_day: dict[date, dict[str, int]] = {}
+    for row in rows:
+        bucket = by_day.setdefault(row.as_of_date, {})
+        bucket[row.currency] = bucket.get(row.currency, 0) + int(row.gross_cents or 0)
+    values: list[int] = []
+    for day in dates:
+        totals = by_day.get(day)
+        if not totals:
+            values.append(0)
+        else:
+            values.append(_combine_currency_totals(totals, base_currency, fx_rates)[0])
+    return values
 
 
 @router.get("/overview-metrics")
@@ -1345,8 +1375,6 @@ async def get_portfolio_overview_metrics(
     all_time_traffic = 0
     all_time_usage = 0
     unresolved_errors = 0
-    revenue_prior_value: int | None = None
-    revenue_comparison_date = _previous_month_same_day(today)
 
     if pipeline_ids:
         all_time_usage_rows = (await db.execute(
@@ -1406,32 +1434,24 @@ async def get_portfolio_overview_metrics(
         )).scalars().all())
         source_ids = [source.id for source in revenue_sources]
         if source_ids:
-            customer_mrr_rows = list((await db.execute(
-                select(MonitorCustomerMrr).where(
-                    MonitorCustomerMrr.revenue_source_id.in_(source_ids),
-                    MonitorCustomerMrr.as_of_date <= today,
+            # Daily gross revenue (Stripe charges), zero-filled per day so the
+            # card reads like traffic/usage/errors: a continuous daily line with
+            # a trailing-7-days vs prior-7-days comparison. Once a source exists
+            # every day has a value (0 when no charges settled), which is why the
+            # series switches from None-filled to numbers here.
+            revenue_daily_rows = list((await db.execute(
+                select(MonitorRevenueDaily).where(
+                    MonitorRevenueDaily.revenue_source_id.in_(source_ids),
+                    MonitorRevenueDaily.as_of_date >= dates[0],
+                    MonitorRevenueDaily.as_of_date <= today,
                 )
             )).scalars().all())
-            revenue_values = _portfolio_revenue_values(
-                customer_mrr_rows,
+            revenue_values = _portfolio_daily_revenue_values(
+                revenue_daily_rows,
                 dates,
                 str(eff.revenue_base_currency or "usd"),
                 eff.revenue_fx_rates or {},
             )
-            revenue_prior_value = _portfolio_revenue_values(
-                customer_mrr_rows,
-                [revenue_comparison_date],
-                str(eff.revenue_base_currency or "usd"),
-                eff.revenue_fx_rates or {},
-            )[0]
-            if not customer_mrr_rows:
-                selected = [
-                    _selected_mrr(source, eff.revenue_engine)[0]
-                    for source in revenue_sources
-                ]
-                known = [value for value in selected if value is not None]
-                if known:
-                    revenue_values[-1] = sum(known)
 
     traffic_values = [usage_by_day[day]["traffic"] for day in dates]
     usage_values = [usage_by_day[day]["usage"] for day in dates]
@@ -1442,11 +1462,17 @@ async def get_portfolio_overview_metrics(
     usage_prior = sum(usage_values[:PORTFOLIO_COMPARISON_DAYS])
     errors_current = sum(error_values[-PORTFOLIO_COMPARISON_DAYS:])
     errors_prior = sum(error_values[:PORTFOLIO_COMPARISON_DAYS])
-    revenue_current = revenue_values[-1] if revenue_values else None
+    # Revenue trend mirrors the other cards: trailing 7 days vs the prior 7. When
+    # no source is connected the series is all-None, so both totals stay None and
+    # the card reads as "No data" (the frontend still draws a flat baseline line).
+    revenue_has_data = any(value is not None for value in revenue_values)
+    revenue_numeric = [value or 0 for value in revenue_values]
+    revenue_current = sum(revenue_numeric[-PORTFOLIO_COMPARISON_DAYS:]) if revenue_has_data else None
+    revenue_prior = sum(revenue_numeric[:PORTFOLIO_COMPARISON_DAYS]) if revenue_has_data else None
     metrics = [
         _portfolio_metric_payload("traffic", dates, traffic_values, unit="count", positive_when_up=True, display_total=all_time_traffic, comparison_current=traffic_current, comparison_prior=traffic_prior),
         _portfolio_metric_payload("usage", dates, usage_values, unit="count", positive_when_up=True, display_total=all_time_usage, comparison_current=usage_current, comparison_prior=usage_prior),
-        _portfolio_metric_payload("revenue", dates, revenue_values, unit="cents", positive_when_up=True, display_total=revenue_current, comparison_current=revenue_current, comparison_prior=revenue_prior_value, comparison_date=revenue_comparison_date),
+        _portfolio_metric_payload("revenue", dates, revenue_values, unit="cents", positive_when_up=True, display_total=revenue_current, comparison_current=revenue_current, comparison_prior=revenue_prior),
         _portfolio_metric_payload("errors", dates, error_values, unit="count", positive_when_up=False, display_total=unresolved_errors, comparison_current=errors_current, comparison_prior=errors_prior),
     ]
     return {
@@ -2790,6 +2816,41 @@ async def _join_coverage(db: AsyncSession, pipeline_id: str) -> dict:
     }
 
 
+async def _sync_daily_revenue(source: MonitorRevenueSource, db: AsyncSession, window_days: int | None = None) -> int:
+    """Pull succeeded Stripe charges over the window and upsert one
+    ``portfolio_revenue_daily`` row per (day, currency) gross total.
+
+    This is the daily-gross-revenue series behind the Portfolio overview card.
+    The upsert recomputes each day's full total from the window's charges, so
+    re-running an overlapping window never double-counts. Returns the number of
+    day/currency rows written."""
+    window = window_days if window_days is not None else settings.revenue_sync_window_days
+    since = int((_now() - timedelta(days=window)).timestamp())
+    account_kwargs = _stripe_account_kwargs(source)
+    charges = _stripe_items(stripe.Charge.list(
+        created={"gte": since},
+        limit=100,
+        **account_kwargs,
+    ))
+    totals = _daily_gross_by_day_currency(charges)
+    now = _now()
+    table = MonitorRevenueDaily.__table__
+    for (day, currency), gross in sorted(totals.items()):
+        await db.execute(
+            pg_insert(table)
+            .values(
+                id=str(uuid.uuid4()), revenue_source_id=source.id, as_of_date=day,
+                gross_cents=gross, currency=currency, created_at=now, updated_at=now,
+            )
+            .on_conflict_do_update(
+                index_elements=["revenue_source_id", "as_of_date", "currency"],
+                set_={"gross_cents": gross, "updated_at": now},
+            )
+        )
+    await db.flush()
+    return len(totals)
+
+
 async def _perform_revenue_sync(source: MonitorRevenueSource, db: AsyncSession, window_days: int | None = None) -> None:
     """Pull fresh metrics from the connected Stripe account onto ``source`` and
     commit. Raises on Stripe failure; callers decide how to surface it."""
@@ -2848,6 +2909,15 @@ async def _perform_revenue_sync(source: MonitorRevenueSource, db: AsyncSession, 
         _log_engine_comparison(source, invoice_result)
     except Exception as exc:
         logger.warning("invoice revenue engine failed for source %s: %s", source.id, exc)
+
+    # Daily gross revenue from charges, also savepoint-guarded so a Charge API
+    # failure can't roll back the snapshot or the invoice engine above.
+    try:
+        async with db.begin_nested():
+            written = await _sync_daily_revenue(source, db, window_days)
+        logger.info("daily revenue sync for source %s wrote %s day(s)", source.id, written)
+    except Exception as exc:
+        logger.warning("daily revenue sync failed for source %s: %s", source.id, exc)
 
     await db.commit()
     await db.refresh(source)
