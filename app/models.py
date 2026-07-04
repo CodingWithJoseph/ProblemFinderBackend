@@ -864,6 +864,10 @@ class GoalTier(Base):
     tier_index: Mapped[int] = mapped_column(Integer, nullable=False)
     threshold_value: Mapped[int] = mapped_column(BigInteger, nullable=False)
     label: Mapped[str] = mapped_column(Text, nullable=False)
+    # Configured duration (days) a tier is expected to take once it becomes the
+    # active milestone. NULL falls back to a computed, scale-aware estimate.
+    # The clock starts only on activation — see services/goals.py.
+    estimate_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class ProjectGoalAchievement(Base):
