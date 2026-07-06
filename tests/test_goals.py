@@ -34,7 +34,9 @@ def test_shape_goal_reports_next_tier_and_milestones():
         1: datetime(2026, 6, 10, tzinfo=timezone.utc),
     }
 
-    shaped = goals_service._shape_goal(definition, tiers, value=12, achieved=achieved)
+    anchor = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 6, 20, tzinfo=timezone.utc)
+    shaped = goals_service._shape_goal(definition, tiers, value=12, achieved=achieved, anchor=anchor, now=now)
 
     assert shaped["currentValue"] == 12
     assert shaped["achievedCount"] == 2
@@ -45,13 +47,55 @@ def test_shape_goal_reports_next_tier_and_milestones():
     assert [t["achieved"] for t in shaped["tiers"]] == [True, True, False]
     # Milestone log is chronological and only the achieved tiers.
     assert [m["label"] for m in shaped["milestones"]] == ["5", "10"]
+    # Active tier 50 activates at the previous tier's completion (Jun 10).
+    assert shaped["activeTier"]["threshold"] == 50
+    assert shaped["activatedAt"].startswith("2026-06-10")
+    assert shaped["state"] == "active"
 
 
 def test_shape_goal_next_tier_none_when_complete():
     definition = GoalDefinition(id="acct_team", scope="account", category="team", title="Team", metric_key="teammates_invited", icon="users", sort_order=40)
     tiers = [_tier("acct_team", 0, 1, "1"), _tier("acct_team", 1, 5, "5")]
-    shaped = goals_service._shape_goal(definition, tiers, value=9, achieved={0: datetime(2026, 6, 1, tzinfo=timezone.utc), 1: datetime(2026, 6, 2, tzinfo=timezone.utc)})
+    anchor = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 6, 20, tzinfo=timezone.utc)
+    shaped = goals_service._shape_goal(definition, tiers, value=9, achieved={0: datetime(2026, 6, 1, tzinfo=timezone.utc), 1: datetime(2026, 6, 2, tzinfo=timezone.utc)}, anchor=anchor, now=now)
     assert shaped["nextTier"] is None
+    assert shaped["activeTier"] is None
+    # A fully-cleared group reports as complete (the UI's Archived section).
+    assert shaped["state"] == "completed"
+
+
+def test_shape_goal_clock_starts_on_activation():
+    """The core rule: a tier's clock starts only when it becomes active, anchored
+    to the *actual* previous completion date — not a pre-planned schedule."""
+    definition = GoalDefinition(id="proj_signups", scope="project", category="growth", title="Signups", metric_key="signups", icon="user-plus", sort_order=10)
+    tiers = [
+        GoalTier(id="t0", goal_definition_id="proj_signups", tier_index=0, threshold_value=5, label="5", estimate_days=21),
+        GoalTier(id="t1", goal_definition_id="proj_signups", tier_index=1, threshold_value=10, label="10", estimate_days=30),
+        GoalTier(id="t2", goal_definition_id="proj_signups", tier_index=2, threshold_value=100, label="100", estimate_days=60),
+    ]
+    anchor = datetime(2026, 6, 1, tzinfo=timezone.utc)          # tier 0 activation
+    achieved = {0: datetime(2026, 8, 5, tzinfo=timezone.utc)}   # completed late (Aug 5, not the Jun 22 plan)
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    shaped = goals_service._shape_goal(definition, tiers, value=6, achieved=achieved, anchor=anchor, now=now)
+
+    t0, t1, t2 = shaped["tiers"]
+    # Completed tier 0: activated at the anchor, planned target anchor+21d, done Aug 5.
+    assert t0["state"] == "completed"
+    assert t0["activatedAt"].startswith("2026-06-01")
+    assert t0["targetDate"].startswith("2026-06-22")
+    assert t0["completedAt"].startswith("2026-08-05")
+    # Active tier 1: clock starts at the real previous completion (Aug 5) + 30d.
+    assert t1["state"] == "active"
+    assert t1["activatedAt"].startswith("2026-08-05")
+    assert t1["targetDate"].startswith("2026-09-04")
+    assert t1["daysLeft"] == 15
+    # Upcoming tier 2: estimate only — no activation, target, or countdown yet.
+    assert t2["state"] == "upcoming"
+    assert t2["activatedAt"] is None
+    assert t2["targetDate"] is None
+    assert t2["daysLeft"] is None
+    assert t2["estimateDays"] == 60
 
 
 async def test_account_metric_values_reads_rollups(fake_db):

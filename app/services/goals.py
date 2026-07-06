@@ -12,7 +12,8 @@ called from the scheduled syncs.
 """
 
 import logging
-from datetime import datetime, timezone
+import math
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -215,22 +216,105 @@ def _emit_goal_tier_achieved(scope: str, owner_id: str, definition: GoalDefiniti
     )
 
 
-def _shape_goal(definition: GoalDefinition, tiers: list[GoalTier], value: int, achieved: dict[int, datetime]) -> dict:
-    """Build the UI payload for one goal: current value, tiers, the next
-    un-achieved tier, and the chronological milestone log."""
+def _tier_estimate_days(threshold: int, prev_threshold: int, configured: int | None) -> int:
+    """Configured duration for a tier, or a scale-aware fallback when unset.
+
+    The fallback grows with the jump from the previous threshold (in decades), so
+    a 10x milestone jump is months out while a small early jump is close — never
+    evenly spaced. Configured values (seeded per tier) always win."""
+    if configured is not None:
+        return int(configured)
+    ratio = threshold / max(prev_threshold, 1)
+    decades = math.log10(ratio) if ratio > 1 else 0.0
+    return max(7, round(30 * max(decades, 0.5)))
+
+
+async def _project_anchor(pipeline_id: str, db: AsyncSession) -> datetime:
+    """Tier-0 activation anchor for a project's goals: when the product started
+    being tracked. Uses launch date if launched, else the project's creation."""
+    pipeline = await db.get(Pipeline, pipeline_id)
+    if pipeline is None:
+        return _now()
+    return pipeline.launched_at or pipeline.created_at or _now()
+
+
+async def _account_anchor(uid: str, db: AsyncSession) -> datetime:
+    """Tier-0 activation anchor for account goals: the user's earliest project
+    creation (a proxy for when they started), falling back to now."""
+    earliest = await db.scalar(
+        select(func.min(Pipeline.created_at)).where(Pipeline.user_id == uid)
+    )
+    return earliest or _now()
+
+
+def _shape_goal(
+    definition: GoalDefinition,
+    tiers: list[GoalTier],
+    value: int,
+    achieved: dict[int, datetime],
+    anchor: datetime,
+    now: datetime,
+) -> dict:
+    """Build the UI payload for one goal.
+
+    Encodes the "clock starts only when active" rule. Dates are derived, not
+    stored: a tier's activation date = the previous tier's completion date (or the
+    group's ``anchor`` for tier 0); its target date = activation + estimate_days.
+    Completed and active tiers carry activation/target dates; upcoming tiers carry
+    only the configured estimate (no live countdown)."""
     ordered = sorted(tiers, key=lambda t: t.tier_index)
-    next_tier = next((t for t in ordered if value < t.threshold_value), None)
     max_threshold = ordered[-1].threshold_value if ordered else 0
+    # Achievements are a prefix (thresholds increase), so the first un-achieved
+    # tier is the single active milestone; None means the whole group is complete.
+    active_pos = next((i for i, t in enumerate(ordered) if t.tier_index not in achieved), None)
+
+    def activation_of(pos: int) -> datetime | None:
+        """When the tier at ``pos`` became/would become active: the anchor for
+        tier 0, else the previous tier's completion date (None if not yet done)."""
+        if pos == 0:
+            return anchor
+        return achieved.get(ordered[pos - 1].tier_index)
+
+    tier_views: list[dict] = []
+    for pos, t in enumerate(ordered):
+        completed = t.tier_index in achieved
+        is_active = active_pos is not None and pos == active_pos
+        state = "completed" if completed else "active" if is_active else "upcoming"
+        prev_threshold = ordered[pos - 1].threshold_value if pos > 0 else 0
+        estimate_days = _tier_estimate_days(t.threshold_value, prev_threshold, t.estimate_days)
+        # Only active/completed tiers have a live activation + target; upcoming
+        # tiers expose the estimate only (soft projection is the UI's job).
+        activated = activation_of(pos) if state in ("completed", "active") else None
+        target = activated + timedelta(days=estimate_days) if activated is not None else None
+        completed_at = achieved.get(t.tier_index)
+        days_left = (target - now).days if state == "active" and target is not None else None
+        tier_views.append({
+            "tierIndex": t.tier_index,
+            "threshold": t.threshold_value,
+            "label": t.label,
+            "achieved": completed,
+            "state": state,
+            "estimateDays": estimate_days,
+            "activatedAt": activated.isoformat() if activated else None,
+            "targetDate": target.isoformat() if target else None,
+            "completedAt": completed_at.isoformat() if completed_at else None,
+            "daysLeft": days_left,
+        })
+
     milestones = [
         {
-            "tierIndex": t.tier_index,
-            "label": t.label,
-            "threshold": t.threshold_value,
-            "achievedAt": achieved[t.tier_index].isoformat(),
+            "tierIndex": v["tierIndex"],
+            "label": v["label"],
+            "threshold": v["threshold"],
+            "achievedAt": v["completedAt"],
+            "activatedAt": v["activatedAt"],
+            "targetDate": v["targetDate"],
         }
-        for t in ordered if t.tier_index in achieved
+        for v in tier_views if v["state"] == "completed"
     ]
-    milestones.sort(key=lambda m: m["achievedAt"])
+    milestones.sort(key=lambda m: m["achievedAt"] or "")
+
+    active_view = tier_views[active_pos] if active_pos is not None else None
     return {
         "id": definition.id,
         "category": definition.category,
@@ -241,20 +325,27 @@ def _shape_goal(definition: GoalDefinition, tiers: list[GoalTier], value: int, a
         "achievedCount": len(achieved),
         "tierCount": len(ordered),
         "maxThreshold": max_threshold,
-        "tiers": [
-            {
-                "tierIndex": t.tier_index,
-                "threshold": t.threshold_value,
-                "label": t.label,
-                "achieved": t.tier_index in achieved,
-            }
-            for t in ordered
-        ],
-        "nextTier": None if next_tier is None else {
-            "tierIndex": next_tier.tier_index,
-            "threshold": next_tier.threshold_value,
-            "label": next_tier.label,
+        # Group-level state: an active milestone remains, or the whole group is done.
+        "state": "active" if active_view is not None else "completed",
+        "tiers": tier_views,
+        # Back-compat: nextTier mirrors the active tier's identity.
+        "nextTier": None if active_view is None else {
+            "tierIndex": active_view["tierIndex"],
+            "threshold": active_view["threshold"],
+            "label": active_view["label"],
         },
+        # The active milestone with its live activation/target/countdown.
+        "activeTier": None if active_view is None else {
+            "tierIndex": active_view["tierIndex"],
+            "threshold": active_view["threshold"],
+            "label": active_view["label"],
+            "estimateDays": active_view["estimateDays"],
+            "activatedAt": active_view["activatedAt"],
+            "targetDate": active_view["targetDate"],
+            "daysLeft": active_view["daysLeft"],
+        },
+        "activatedAt": active_view["activatedAt"] if active_view else None,
+        "targetDate": active_view["targetDate"] if active_view else None,
         "milestones": milestones,
     }
 
@@ -271,8 +362,10 @@ async def project_goals_payload(pipeline_id: str, db: AsyncSession) -> list[dict
     achieved_by_goal: dict[str, dict[int, datetime]] = {}
     for row in achieved_rows:
         achieved_by_goal.setdefault(row.goal_definition_id, {})[row.tier_index] = row.achieved_at
+    anchor = await _project_anchor(pipeline_id, db)
+    now = _now()
     return [
-        _shape_goal(d, tiers, int(values.get(d.metric_key, 0)), achieved_by_goal.get(d.id, {}))
+        _shape_goal(d, tiers, int(values.get(d.metric_key, 0)), achieved_by_goal.get(d.id, {}), anchor, now)
         for d, tiers in defs
     ]
 
@@ -289,7 +382,9 @@ async def account_goals_payload(uid: str, db: AsyncSession) -> list[dict]:
     achieved_by_goal: dict[str, dict[int, datetime]] = {}
     for row in achieved_rows:
         achieved_by_goal.setdefault(row.goal_definition_id, {})[row.tier_index] = row.achieved_at
+    anchor = await _account_anchor(uid, db)
+    now = _now()
     return [
-        _shape_goal(d, tiers, int(values.get(d.metric_key, 0)), achieved_by_goal.get(d.id, {}))
+        _shape_goal(d, tiers, int(values.get(d.metric_key, 0)), achieved_by_goal.get(d.id, {}), anchor, now)
         for d, tiers in defs
     ]
