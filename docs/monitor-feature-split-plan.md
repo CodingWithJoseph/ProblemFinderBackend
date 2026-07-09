@@ -31,6 +31,8 @@ Goal: shrink route files and remove remaining helper coupling.
 - Move issue grouping, trace assembly, flow graphing, vitals scoring, and correlation into smaller service modules.
 - Keep route files thin: request model, authorization, service call, response shape.
 
+PR 379 starts this split with `app.services.monitoring`: common utilities, source/access helpers, serializers, analytics helpers, and ingest row builders now live outside the route module. The remaining route-local helpers should become smaller workflow services next.
+
 ## Phase 3: API Boundary
 
 Goal: make Monitor explicit to clients while keeping old installs alive.
@@ -40,6 +42,8 @@ Goal: make Monitor explicit to clients while keeping old installs alive.
 - Update frontend API clients to call Monitor paths.
 - Update setup snippets and backend tracing helpers to post to Monitor paths.
 - Add compatibility tests for both route families.
+
+PR 379 starts this by mounting the same Monitor routers under both the legacy Portfolio prefixes and the canonical Monitor prefixes. Frontend and SDK migration can now happen without breaking existing installs.
 
 ## Phase 4: Data Model Naming
 
