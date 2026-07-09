@@ -8,7 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.routes.subscriptions import router as subscriptions_router
 from app.routes.clusters import router as clusters_router
 from app.routes.pipeline import router as pipeline_router
-from app.routes.portfolio import public_router as portfolio_public_router
+from app.routes.monitor import public_router as monitor_public_router
+from app.routes.monitor import router as monitor_router
 from app.routes.portfolio import router as portfolio_router
 from app.routes.problems import router as problems_router
 from app.routes.tasks import router as tasks_router
@@ -122,7 +123,8 @@ app.include_router(subscriptions_router)
 app.include_router(clusters_router)
 app.include_router(pipeline_router)
 app.include_router(portfolio_router)
-app.include_router(portfolio_public_router)
+app.include_router(monitor_router)
+app.include_router(monitor_public_router)
 app.include_router(problems_router)
 app.include_router(tasks_router)
 app.include_router(teams_router)

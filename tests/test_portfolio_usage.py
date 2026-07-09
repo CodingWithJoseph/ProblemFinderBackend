@@ -11,8 +11,9 @@ from conftest import (
     make_usage_event,
     make_usage_source,
 )
+from app.routes import monitor as monitor_routes
 from app.routes import portfolio as portfolio_routes
-from app.routes.portfolio import _compute_retention
+from app.routes.monitor import _compute_retention
 from app.models import (
     Pipeline,
     PlanEnum,
@@ -841,7 +842,7 @@ async def test_get_command_center(client, fake_db, auth_headers):
 
 def test_health_verdict_v2_states():
     from app.config import get_settings
-    from app.routes.portfolio import _health_verdict_v2
+    from app.routes.monitor import _health_verdict_v2
 
     eff = get_settings()  # warn=24h, unhealthy=72h, noisy=0.1, failing=0.3
     now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
@@ -890,7 +891,7 @@ async def test_get_source_health_failing(client, fake_db, auth_headers):
 
 def test_health_verdict_states():
     from app.config import get_settings
-    from app.routes.portfolio import _health_verdict
+    from app.routes.monitor import _health_verdict
 
     eff = get_settings()  # health_warning_hours=24, health_unhealthy_hours=72
     now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
@@ -932,7 +933,7 @@ async def test_public_usage_event_persists_release_and_environment(client, fake_
 async def test_ingest_rate_limit_returns_429(client, fake_db, monkeypatch):
     from app.config import get_settings
 
-    portfolio_routes._rate_windows.clear()
+    monitor_routes._rate_windows.clear()
     monkeypatch.setattr(get_settings(), "ingest_rate_limit_per_minute", 1)
 
     source = make_usage_source()
@@ -946,7 +947,7 @@ async def test_ingest_rate_limit_returns_429(client, fake_db, monkeypatch):
     assert second.status_code == 429
     assert second.headers.get("Retry-After") == "60"
 
-    portfolio_routes._rate_windows.clear()
+    monitor_routes._rate_windows.clear()
 
 
 async def test_public_batch_ingests_mixed_events(client, fake_db):

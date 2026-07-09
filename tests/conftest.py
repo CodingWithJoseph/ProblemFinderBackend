@@ -75,7 +75,8 @@ from app.models import (  # noqa: E402
 from app.routes.clusters import router as clusters_router  # noqa: E402
 from app.routes.problems import router as problems_router  # noqa: E402
 from app.routes.pipeline import router as pipeline_router  # noqa: E402
-from app.routes.portfolio import public_router as portfolio_public_router  # noqa: E402
+from app.routes.monitor import public_router as monitor_public_router  # noqa: E402
+from app.routes.monitor import router as monitor_router  # noqa: E402
 from app.routes.portfolio import router as portfolio_router  # noqa: E402
 from app.routes.tasks import router as tasks_router  # noqa: E402
 from app.routes.teams import router as teams_router  # noqa: E402
@@ -592,7 +593,8 @@ def app(fake_db):
     application.include_router(problems_router)
     application.include_router(pipeline_router)
     application.include_router(portfolio_router)
-    application.include_router(portfolio_public_router)
+    application.include_router(monitor_router)
+    application.include_router(monitor_public_router)
     application.include_router(tasks_router)
     application.include_router(teams_router)
     application.include_router(invites_router)
