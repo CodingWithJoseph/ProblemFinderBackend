@@ -10,6 +10,7 @@ from app.routes.clusters import router as clusters_router
 from app.routes.pipeline import router as pipeline_router
 from app.routes.monitor import public_router as monitor_public_router
 from app.routes.monitor import router as monitor_router
+from app.routes.monitor_war_room import router as monitor_war_room_router
 from app.routes.portfolio import router as portfolio_router
 from app.routes.problems import router as problems_router
 from app.routes.tasks import router as tasks_router
@@ -125,6 +126,8 @@ app.include_router(pipeline_router)
 app.include_router(portfolio_router)
 app.include_router(monitor_router, prefix="/portfolio")
 app.include_router(monitor_router, prefix="/monitor")
+app.include_router(monitor_war_room_router, prefix="/portfolio")
+app.include_router(monitor_war_room_router, prefix="/monitor")
 app.include_router(monitor_public_router, prefix="/public/portfolio")
 app.include_router(monitor_public_router, prefix="/public/monitor")
 app.include_router(problems_router)

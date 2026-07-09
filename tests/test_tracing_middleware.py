@@ -10,6 +10,7 @@ from starlette.testclient import TestClient
 from app.services.tracing import (
     ServerTracingMiddleware,
     build_server_span,
+    make_batch_reporter,
     parse_traceparent,
 )
 
@@ -116,3 +117,38 @@ def test_reporter_failure_never_breaks_the_request():
     client = TestClient(_app(spans, reporter=boom))
     resp = client.get("/api/cart", headers={"traceparent": VALID})
     assert resp.status_code == 200  # request unaffected
+
+
+@pytest.mark.asyncio
+async def test_batch_reporter_posts_to_canonical_monitor_ingest(monkeypatch):
+    calls = []
+
+    class FakeClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, json):
+            calls.append({"url": url, "json": json, "timeout": self.timeout})
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    reporter = make_batch_reporter("https://collector.test/", "pipe-1", "key-1", timeout=1.5)
+    await reporter({"kind": "span", "trace_id": "trace-1"})
+
+    assert calls == [{
+        "url": "https://collector.test/api/public/monitor/batch",
+        "json": {
+            "product_id": "pipe-1",
+            "key": "key-1",
+            "batch": [{"kind": "span", "trace_id": "trace-1"}],
+        },
+        "timeout": 1.5,
+    }]
