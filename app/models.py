@@ -251,6 +251,19 @@ class Pipeline(Base):
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
+class PipelineStageEvent(Base):
+    """Append-only log of a project entering a pipeline stage, so the Timeline can
+    decompose the pre-launch journey into real stage durations (watching ->
+    exploring -> validating -> building) instead of a fixed approximation."""
+
+    __tablename__ = "pipeline_stage_events"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
+    stage: Mapped[str] = mapped_column(Text, nullable=False)
+    entered_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
 class Team(Base):
     __tablename__ = "teams"
 

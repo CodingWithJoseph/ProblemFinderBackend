@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from app.db import get_db, AsyncSessionLocal
 from app.auth import get_uid
 from app.config import PIPELINE_VERSION
-from app.models import Pipeline, Cluster, ClusterItem, ClusterSignal, Issue, Team, TeamMember, Problem, Task
+from app.models import Pipeline, PipelineStageEvent, Cluster, ClusterItem, ClusterSignal, Issue, Team, TeamMember, Problem, Task
 from app.routes.clusters import (
     serialize_evidence_item,
     load_cluster_items,
@@ -630,6 +630,21 @@ async def get_pipeline(
     return {"data": _serialize_cards(list(cards), posts_map, teams_map, counts_map)}
 
 
+def _stage_event(pipeline_id: str, stage: str, at: datetime | None = None) -> PipelineStageEvent:
+    """Build an append-only stage-entry event; the caller adds it to the session."""
+    return PipelineStageEvent(pipeline_id=str(pipeline_id), stage=stage, entered_at=at or datetime.now(timezone.utc))
+
+
+async def _stage_events_for(pipeline_id: str, db: AsyncSession) -> list[dict]:
+    """Ordered stage history for one project, shaped for the Timeline payload."""
+    rows = (await db.execute(
+        select(PipelineStageEvent)
+        .where(PipelineStageEvent.pipeline_id == str(pipeline_id))
+        .order_by(PipelineStageEvent.entered_at)
+    )).scalars().all()
+    return [{"stage": e.stage, "enteredAt": e.entered_at.isoformat()} for e in rows]
+
+
 @router.get("/{pipeline_id}")
 async def get_pipeline_card(
     pipeline_id: str,
@@ -651,7 +666,9 @@ async def get_pipeline_card(
     posts_map = await _fetch_posts_for_cards([card], db)
     teams_map = await _fetch_teams_for_cards([card], db)
     counts_map = await _fetch_issue_counts_for_cards([card], db)
-    return {"data": _serialize_cards([card], posts_map, teams_map, counts_map)[0]}
+    data = _serialize_cards([card], posts_map, teams_map, counts_map)[0]
+    data["stageEvents"] = await _stage_events_for(card.id, db)
+    return {"data": data}
 
 
 async def _find_watch_card(uid: str, cluster_id: str, db: AsyncSession) -> Pipeline | None:
@@ -773,6 +790,8 @@ async def watch_cluster(
     db.add(card)
     await db.commit()
     await db.refresh(card)
+    db.add(_stage_event(card.id, card.stage, card.created_at))
+    await db.commit()
     await _seed_breakdown_from_cluster(card, cluster_int_id, uid, db)
     return {"is_watched": True, "pipeline_id": str(card.id)}
 
@@ -1062,6 +1081,8 @@ async def create_pipeline(
     db.add(card)
     await db.commit()
     await db.refresh(card)
+    db.add(_stage_event(card.id, card.stage, card.created_at))
+    await db.commit()
 
     background_tasks.add_task(_compute_and_write_metrics, str(card.id), list(body.post_ids))
 
@@ -1118,8 +1139,14 @@ async def patch_pipeline(
     if team_changed:
         await _sync_issue_team_for_card(card, updates["team_id"], db)
 
+    stage_changed = "stage" in updates and updates["stage"] != card.stage
+
     for field, value in updates.items():
         setattr(card, field, value)
+    # Record the stage entry so the Timeline can decompose the journey by real
+    # durations. Only on an actual change, so re-saving the same stage is a no-op.
+    if stage_changed:
+        db.add(_stage_event(card.id, card.stage))
     if "outcome" in updates or "mrr" in updates:
         card.outcome_noted_at = datetime.now(timezone.utc)
     # When the timeline is chosen, the start is "now" (never asked of the user)
