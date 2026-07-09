@@ -181,3 +181,51 @@ async def test_launch_does_not_create_or_connect_monitoring(client, fake_db, aut
     assert resp.status_code == 200
     assert resp.json()["data"]["launchedAt"] is not None
     assert not any(isinstance(obj, MonitorUsageSource) for obj in fake_db.added)
+
+
+async def test_patch_stage_records_a_stage_event(client, fake_db, auth_headers):
+    from app.models import PipelineStageEvent
+    card = make_pipeline(stage="watching")
+    fake_db.stub(execute=[
+        FakeResult(rows=[card]),  # card lookup
+        FakeResult(rows=[]),      # issue counts (serialization)
+    ])
+
+    resp = await client.patch(f"/pipeline/{card.id}", json={"stage": "exploring"}, headers=auth_headers)
+
+    assert resp.status_code == 200
+    assert card.stage == "exploring"
+    events = [o for o in fake_db.added if isinstance(o, PipelineStageEvent)]
+    assert len(events) == 1
+    assert events[0].stage == "exploring"
+    assert events[0].pipeline_id == str(card.id)
+
+
+async def test_patch_unchanged_stage_records_no_event(client, fake_db, auth_headers):
+    from app.models import PipelineStageEvent
+    card = make_pipeline(stage="exploring")
+    fake_db.stub(execute=[FakeResult(rows=[card]), FakeResult(rows=[])])
+
+    resp = await client.patch(f"/pipeline/{card.id}", json={"stage": "exploring"}, headers=auth_headers)
+
+    assert resp.status_code == 200
+    assert not [o for o in fake_db.added if isinstance(o, PipelineStageEvent)]
+
+
+async def test_get_card_includes_ordered_stage_events(client, fake_db, auth_headers):
+    from app.models import PipelineStageEvent
+    card = make_pipeline()
+    ev1 = PipelineStageEvent(pipeline_id=card.id, stage="watching", entered_at=datetime(2026, 5, 1, tzinfo=timezone.utc))
+    ev2 = PipelineStageEvent(pipeline_id=card.id, stage="exploring", entered_at=datetime(2026, 5, 10, tzinfo=timezone.utc))
+    fake_db.stub(execute=[
+        FakeResult(rows=[card]),        # card lookup
+        FakeResult(rows=[]),            # issue counts
+        FakeResult(rows=[ev1, ev2]),    # stage events
+    ])
+
+    resp = await client.get(f"/pipeline/{card.id}", headers=auth_headers)
+
+    assert resp.status_code == 200
+    stage_events = resp.json()["data"]["stageEvents"]
+    assert [e["stage"] for e in stage_events] == ["watching", "exploring"]
+    assert stage_events[0]["enteredAt"].startswith("2026-05-01")
