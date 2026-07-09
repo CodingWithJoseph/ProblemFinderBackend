@@ -43,6 +43,7 @@ from app.models import (
 from app.services.alerts import AlertPrefs, alert_settings_row
 from app.services.app_settings import apply_settings, effective_config, serialize_settings
 from app.services.goals import account_goals_payload, project_goals_payload
+from app.services.getting_started import getting_started_payload
 from app.services.monitoring.ingest import _error_fingerprint, _normalize_error_message
 from app.routes.pipeline import (
     _fetch_issue_counts_for_cards,
@@ -1012,6 +1013,17 @@ async def get_account_goals(
     Reconciles achievements on read. Defined before /{pipeline_id} so the static
     path wins."""
     return {"data": await account_goals_payload(uid, db)}
+
+
+@router.get("/getting-started")
+async def get_getting_started(
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Ordered onboarding checklist + the next action to take. Guides a new
+    account through the landscape (discover → build → launch → monitor) before
+    the numeric goals have data. Static path, so declared before /{pipeline_id}."""
+    return {"data": await getting_started_payload(uid, db)}
 
 
 @router.get("/{pipeline_id}/goals")
