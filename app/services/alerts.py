@@ -9,8 +9,9 @@ the owner when something needs attention. Four triggers:
 * ``revenue_drop``  — MRR dropped versus the previous sync
 
 Recipient is the product owner's account email (looked up from Firebase), so
-there's no setup. Sends are best-effort and deduped via the ``portfolio_alerts``
-table so the same condition never emails twice.
+there's no setup. Sends are best-effort and deduped via the Monitor alert table
+so the same condition never emails twice. The deployed physical table still uses
+its legacy ``portfolio_alerts`` name during the Phase 4 naming migration.
 
 The decision logic (`detect_*`, `evaluate_alerts`) is pure and unit-tested; the
 orchestrator is thin glue around it.

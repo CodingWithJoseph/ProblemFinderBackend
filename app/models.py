@@ -7,6 +7,21 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID, ARRAY
 from sqlalchemy import String, Text, Integer, BigInteger, Boolean, Float, DateTime, Date, TIMESTAMP, ForeignKey
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column
+from app.services.monitoring.schema import (
+    MONITOR_ALERT_SETTINGS,
+    MONITOR_ALERTS,
+    MONITOR_ERROR_EVENTS,
+    MONITOR_ERROR_GROUPS,
+    MONITOR_INVESTIGATION_ENTRIES,
+    MONITOR_INVESTIGATIONS,
+    MONITOR_LOGS,
+    MONITOR_PROBLEMS,
+    MONITOR_REPORTS,
+    MONITOR_SPANS,
+    MONITOR_USAGE_EVENTS,
+    MONITOR_USAGE_SOURCES,
+    MONITOR_WEB_VITALS,
+)
 
 # Embedding width produced by the AI pipeline (text-embedding-3-large). Both the
 # per-item embedding and the cluster centroid use this dimensionality. Mapped as
@@ -313,7 +328,7 @@ class IssueComment(Base):
 
 
 class MonitorUsageSource(Base):
-    __tablename__ = "portfolio_usage_sources"
+    __tablename__ = MONITOR_USAGE_SOURCES.physical
 
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -329,11 +344,11 @@ class MonitorUsageSource(Base):
 
 
 class MonitorUsageEvent(Base):
-    __tablename__ = "portfolio_usage_events"
+    __tablename__ = MONITOR_USAGE_EVENTS.physical
 
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
-    source_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("portfolio_usage_sources.id", ondelete="SET NULL"), nullable=True, index=True)
+    source_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey(MONITOR_USAGE_SOURCES.fk(), ondelete="SET NULL"), nullable=True, index=True)
     event_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     visitor_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -358,11 +373,11 @@ class MonitorErrorGroup(Base):
     deterministic fingerprint, so the dashboard shows a handful of problems
     instead of thousands of rows."""
 
-    __tablename__ = "portfolio_error_groups"
+    __tablename__ = MONITOR_ERROR_GROUPS.physical
 
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
-    source_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("portfolio_usage_sources.id", ondelete="SET NULL"), nullable=True, index=True)
+    source_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey(MONITOR_USAGE_SOURCES.fk(), ondelete="SET NULL"), nullable=True, index=True)
     fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     level: Mapped[str] = mapped_column(String(20), nullable=False, default="error")
@@ -380,12 +395,12 @@ class MonitorErrorEvent(Base):
     """A single raw error occurrence, linked to its group and (when available)
     to the visitor/session it happened in — the tie-back to usage data."""
 
-    __tablename__ = "portfolio_error_events"
+    __tablename__ = MONITOR_ERROR_EVENTS.physical
 
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
-    source_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("portfolio_usage_sources.id", ondelete="SET NULL"), nullable=True, index=True)
-    group_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("portfolio_error_groups.id", ondelete="CASCADE"), nullable=True, index=True)
+    source_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey(MONITOR_USAGE_SOURCES.fk(), ondelete="SET NULL"), nullable=True, index=True)
+    group_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey(MONITOR_ERROR_GROUPS.fk(), ondelete="CASCADE"), nullable=True, index=True)
     fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     stack: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -412,11 +427,11 @@ class MonitorWebVital(Base):
     """A single Core Web Vital sample (LCP/CLS/INP/FCP/TTFB) captured by the
     beacon. The per-URL experience rollups (p75 + rating) aggregate these."""
 
-    __tablename__ = "portfolio_web_vitals"
+    __tablename__ = MONITOR_WEB_VITALS.physical
 
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
-    source_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("portfolio_usage_sources.id", ondelete="SET NULL"), nullable=True, index=True)
+    source_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey(MONITOR_USAGE_SOURCES.fk(), ondelete="SET NULL"), nullable=True, index=True)
     metric: Mapped[str] = mapped_column(String(10), nullable=False)
     value: Mapped[float] = mapped_column(Float, nullable=False)
     rating: Mapped[str | None] = mapped_column(String(20), nullable=True)
@@ -439,11 +454,11 @@ class MonitorLog(Base):
     """A client log line (debug/info/warn/error) from the beacon's log() call or
     console hook. Faceted by level/session/release in the logs explorer."""
 
-    __tablename__ = "portfolio_logs"
+    __tablename__ = MONITOR_LOGS.physical
 
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
-    source_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("portfolio_usage_sources.id", ondelete="SET NULL"), nullable=True, index=True)
+    source_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey(MONITOR_USAGE_SOURCES.fk(), ondelete="SET NULL"), nullable=True, index=True)
     level: Mapped[str] = mapped_column(String(10), nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     event_metadata: Mapped[dict | None] = mapped_column("metadata", JSONB, nullable=True)
@@ -468,11 +483,11 @@ class MonitorSpan(Base):
     same trace_id, so a frontend error can be tied to the backend span that
     caused it (the incident chain) and journeys can be derived from span order."""
 
-    __tablename__ = "portfolio_spans"
+    __tablename__ = MONITOR_SPANS.physical
 
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
-    source_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("portfolio_usage_sources.id", ondelete="SET NULL"), nullable=True, index=True)
+    source_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey(MONITOR_USAGE_SOURCES.fk(), ondelete="SET NULL"), nullable=True, index=True)
     trace_id: Mapped[str] = mapped_column(Text, nullable=False)
     span_id: Mapped[str] = mapped_column(Text, nullable=False)
     parent_span_id: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -499,7 +514,7 @@ class MonitorProblem(Base):
     drop, ...). Separate from the discovery `problems` table. detected_at +
     metric/baseline/observed drive the before/during/after impact view."""
 
-    __tablename__ = "monitoring_problems"
+    __tablename__ = MONITOR_PROBLEMS.physical
 
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -522,7 +537,7 @@ class MonitorProblem(Base):
 class MonitorInvestigation(Base):
     """A case object: collects evidence + notes (entries) into a timeline."""
 
-    __tablename__ = "monitoring_investigations"
+    __tablename__ = MONITOR_INVESTIGATIONS.physical
 
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -536,10 +551,10 @@ class MonitorInvestigation(Base):
 class MonitorInvestigationEntry(Base):
     """One timeline entry: a free note, or a link to an issue/problem/session."""
 
-    __tablename__ = "monitoring_investigation_entries"
+    __tablename__ = MONITOR_INVESTIGATION_ENTRIES.physical
 
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
-    investigation_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("monitoring_investigations.id", ondelete="CASCADE"), nullable=False, index=True)
+    investigation_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey(MONITOR_INVESTIGATIONS.fk(), ondelete="CASCADE"), nullable=False, index=True)
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     ref_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     body: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -550,11 +565,11 @@ class MonitorInvestigationEntry(Base):
 class MonitorReport(Base):
     """A saved, exportable write-up, optionally tied to an investigation."""
 
-    __tablename__ = "monitoring_reports"
+    __tablename__ = MONITOR_REPORTS.physical
 
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
-    investigation_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey("monitoring_investigations.id", ondelete="SET NULL"), nullable=True)
+    investigation_id: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False), ForeignKey(MONITOR_INVESTIGATIONS.fk(), ondelete="SET NULL"), nullable=True)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
@@ -725,7 +740,7 @@ class MonitorAlert(Base):
     doesn't email repeatedly. ``dedupe_key`` is per alert type (e.g. the error
     group id for new-issue, or a date bucket for spike/drop alerts)."""
 
-    __tablename__ = "portfolio_alerts"
+    __tablename__ = MONITOR_ALERTS.physical
 
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -742,7 +757,7 @@ class MonitorAlertSettings(Base):
     "all triggers on, global thresholds". Threshold columns are nullable —
     null falls back to the global default in config."""
 
-    __tablename__ = "portfolio_alert_settings"
+    __tablename__ = MONITOR_ALERT_SETTINGS.physical
 
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     pipeline_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)

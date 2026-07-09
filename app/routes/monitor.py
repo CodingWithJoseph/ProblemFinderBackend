@@ -996,9 +996,9 @@ async def get_sessions(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
-    """Sessions as first-class objects: each row is an aggregate of the events
-    sharing a session_id (the B.2 identity payoff), not a raw event log. Derived
-    from portfolio_usage_events — no sessions table until perf demands one."""
+    """Sessions as first-class objects: each row is an aggregate of Monitor
+    usage events sharing a session_id, not a raw event log. No sessions table
+    until perf demands one."""
     await _require_launched_product(pipeline_id, db, uid)
     eff = await effective_config(db)
     source = await _usage_source(pipeline_id, db)

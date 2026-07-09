@@ -54,6 +54,8 @@ Goal: align storage language with product ownership.
 - Prefer `monitor_*` naming for new data structures.
 - Keep historical `portfolio_*` tables readable until migrations and dashboards are verified.
 
+PR 379 starts this phase with a Monitor schema map: each Monitor-owned model now references a logical table definition with today's physical table name and the future canonical `monitor_*` name. This keeps the deployed database stable while giving migrations, docs, and new features a single source of truth for Monitor storage ownership.
+
 ## Phase 5: War-Room UX
 
 Goal: shift from pages that show data to pages that drive investigations.
