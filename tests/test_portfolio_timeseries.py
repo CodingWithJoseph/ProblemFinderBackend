@@ -4,7 +4,7 @@ deploy markers."""
 from datetime import datetime, timedelta, timezone
 
 from conftest import FakeResult, make_pipeline
-from app.routes.portfolio import _series_stats
+from app.routes.monitor import _series_stats
 
 
 def test_series_stats_band():

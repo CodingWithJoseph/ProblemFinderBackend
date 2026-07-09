@@ -4,7 +4,7 @@ error count and mean duration, and feature->feature transitions per session."""
 from datetime import datetime, timezone
 
 from conftest import FakeResult, make_pipeline
-from app.routes.portfolio import _feature_flow
+from app.routes.monitor import _feature_flow
 
 T = datetime(2026, 6, 1, tzinfo=timezone.utc)
 
