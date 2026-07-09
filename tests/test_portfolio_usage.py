@@ -1,6 +1,8 @@
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
+import pytest
+
 from conftest import (
     FakeResult,
     make_error_event,
@@ -11,9 +13,9 @@ from conftest import (
     make_usage_event,
     make_usage_source,
 )
-from app.routes import monitor as monitor_routes
 from app.routes import portfolio as portfolio_routes
-from app.routes.monitor import _compute_retention
+from app.services.monitoring import ingest as monitor_ingest
+from app.services.monitoring.analytics import _compute_retention
 from app.models import (
     Pipeline,
     PlanEnum,
@@ -842,7 +844,7 @@ async def test_get_command_center(client, fake_db, auth_headers):
 
 def test_health_verdict_v2_states():
     from app.config import get_settings
-    from app.routes.monitor import _health_verdict_v2
+    from app.services.monitoring.analytics import _health_verdict_v2
 
     eff = get_settings()  # warn=24h, unhealthy=72h, noisy=0.1, failing=0.3
     now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
@@ -866,7 +868,8 @@ def test_health_verdict_v2_states():
     assert state(last_seen_at=at(1)) == "live"                 # fresh + clean
 
 
-async def test_get_source_health_failing(client, fake_db, auth_headers):
+@pytest.mark.parametrize("prefix", ["/portfolio", "/monitor"])
+async def test_get_source_health_failing(client, fake_db, auth_headers, prefix):
     from datetime import datetime as _dt, timezone as _tz
 
     product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
@@ -880,7 +883,7 @@ async def test_get_source_health_failing(client, fake_db, auth_headers):
         scalar=[100, 50, 100, None],  # total_events, errors, sessions, lcp_p75
     )
 
-    resp = await client.get(f"/portfolio/{product.id}/health", headers=auth_headers)
+    resp = await client.get(f"{prefix}/{product.id}/health", headers=auth_headers)
 
     assert resp.status_code == 200
     body = resp.json()["data"]
@@ -891,7 +894,7 @@ async def test_get_source_health_failing(client, fake_db, auth_headers):
 
 def test_health_verdict_states():
     from app.config import get_settings
-    from app.routes.monitor import _health_verdict
+    from app.services.monitoring.analytics import _health_verdict
 
     eff = get_settings()  # health_warning_hours=24, health_unhealthy_hours=72
     now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
@@ -909,12 +912,13 @@ def test_health_verdict_states():
     assert _health_verdict(connected=True, last_seen_at=silent, total_events=10, eff=eff, now=now)["state"] == "unhealthy"
 
 
-async def test_public_usage_event_persists_release_and_environment(client, fake_db):
+@pytest.mark.parametrize("public_prefix", ["/public/portfolio", "/public/monitor"])
+async def test_public_usage_event_persists_release_and_environment(client, fake_db, public_prefix):
     source = make_usage_source()
     fake_db.stub(execute=[FakeResult(rows=[source])])
 
     resp = await client.post(
-        "/public/portfolio/events",
+        f"{public_prefix}/events",
         json={
             "product_id": source.pipeline_id,
             "key": source.public_key,
@@ -933,7 +937,7 @@ async def test_public_usage_event_persists_release_and_environment(client, fake_
 async def test_ingest_rate_limit_returns_429(client, fake_db, monkeypatch):
     from app.config import get_settings
 
-    monitor_routes._rate_windows.clear()
+    monitor_ingest._rate_windows.clear()
     monkeypatch.setattr(get_settings(), "ingest_rate_limit_per_minute", 1)
 
     source = make_usage_source()
@@ -947,7 +951,7 @@ async def test_ingest_rate_limit_returns_429(client, fake_db, monkeypatch):
     assert second.status_code == 429
     assert second.headers.get("Retry-After") == "60"
 
-    monitor_routes._rate_windows.clear()
+    monitor_ingest._rate_windows.clear()
 
 
 async def test_public_batch_ingests_mixed_events(client, fake_db):

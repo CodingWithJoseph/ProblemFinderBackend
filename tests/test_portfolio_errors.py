@@ -8,7 +8,7 @@ from conftest import (
     make_usage_source,
 )
 from app.models import MonitorErrorEvent, MonitorErrorGroup
-from app.routes.portfolio import _error_fingerprint, _normalize_error_message
+from app.services.monitoring.ingest import _error_fingerprint, _normalize_error_message
 
 
 def test_fingerprint_groups_numeric_variants():

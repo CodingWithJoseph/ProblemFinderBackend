@@ -1,10 +1,7 @@
-import hashlib
-import re
 import secrets
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Literal
-from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
@@ -35,9 +32,64 @@ from app.models import (
 )
 from app.services.alerts import AlertPrefs, alert_settings_row
 from app.services.app_settings import effective_config
+from app.services.monitoring.analytics import (
+    _build_correlation_days,
+    _compute_retention,
+    _correlation_insights,
+    _empty_daily,
+    _empty_error_daily,
+    _explorer_health,
+    _feature_flow,
+    _flow_graph,
+    _health_verdict,
+    _health_verdict_v2,
+    _issue_trend,
+    _rate_vital,
+    _round_vital,
+    _series_stats,
+    _source_health,
+    _VITAL_ORDER,
+)
+from app.services.monitoring.common import _clean_text, _domain_from_url, _iso, _now, _pct_change
+from app.services.monitoring.ingest import (
+    _build_usage_event,
+    _check_rate_limit,
+    _error_fingerprint,
+    _normalize_error_message,
+    _record_error_event,
+    _record_log,
+    _record_span,
+    _record_web_vital,
+)
+from app.services.monitoring.serializers import (
+    _order_span_tree,
+    _serialize_alert_settings,
+    _serialize_entry,
+    _serialize_error_event,
+    _serialize_error_group,
+    _serialize_investigation,
+    _serialize_issue,
+    _serialize_problem,
+    _serialize_report,
+    _serialize_span,
+    _serialize_usage_event,
+    _serialize_usage_source,
+)
+from app.services.monitoring.sources import (
+    _customer_email_index,
+    _origin_allowed,
+    _require_launched_product,
+    _resolve_identity,
+    _revenue_source,
+    _revenue_source_is_connected,
+    _selected_mrr,
+    _usage_event_domain_allowed,
+    _usage_source,
+    _usage_source_is_connected,
+)
 
-router = APIRouter(prefix="/portfolio", tags=["monitor"])
-public_router = APIRouter(prefix="/public/portfolio", tags=["public-monitor"])
+router = APIRouter(tags=["monitor"])
+public_router = APIRouter(tags=["public-monitor"])
 settings = get_settings()
 
 UsageEventType = Literal["pageview", "signup", "login", "activation", "custom"]
@@ -45,15 +97,6 @@ ErrorLevel = Literal["error", "warning"]
 WebVitalMetric = Literal["LCP", "CLS", "INP", "FCP", "TTFB"]
 WebVitalRating = Literal["good", "needs-improvement", "poor"]
 LogLevel = Literal["debug", "info", "warn", "error"]
-
-
-def _selected_mrr(source: MonitorRevenueSource | None, engine: str) -> tuple[int | None, int | None]:
-    """Return current/previous MRR for the configured revenue engine."""
-    if not source:
-        return None, None
-    if engine == "invoice":
-        return source.invoice_mrr_cents, source.previous_invoice_mrr_cents
-    return source.current_mrr_cents, source.previous_mrr_cents
 
 
 class UsageEventBody(BaseModel):
@@ -224,391 +267,6 @@ class AlertSettingsBody(BaseModel):
     revenue_drop_pct: float | None = Field(default=None, ge=0.05, le=1.0)
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _iso(value: datetime | None) -> str | None:
-    return value.isoformat() if value else None
-
-
-def _serialize_usage_source(source: MonitorUsageSource | None) -> dict | None:
-    if not source:
-        return None
-    return {
-        "id": source.id,
-        "pipelineId": source.pipeline_id,
-        "publicKey": source.public_key,
-        "name": source.name,
-        "status": source.status,
-        "productUrl": source.product_url,
-        "allowedDomain": source.allowed_domain,
-        "createdAt": _iso(source.created_at),
-        "updatedAt": _iso(source.updated_at),
-        "lastSeenAt": _iso(source.last_seen_at),
-    }
-
-
-def _serialize_usage_event(event: MonitorUsageEvent) -> dict:
-    return {
-        "id": event.id,
-        "pipelineId": event.pipeline_id,
-        "sourceId": event.source_id,
-        "eventType": event.event_type,
-        "visitorId": event.visitor_id,
-        "sessionId": event.session_id,
-        "userId": event.user_ref,
-        "url": event.url,
-        "referrer": event.referrer,
-        "release": event.release,
-        "environment": event.environment,
-        "metadata": event.event_metadata or {},
-        "occurredAt": _iso(event.occurred_at),
-        "receivedAt": _iso(event.received_at),
-    }
-
-
-def _serialize_error_group(group: MonitorErrorGroup, affected_sessions: int | None = None) -> dict:
-    payload = {
-        "id": group.id,
-        "pipelineId": group.pipeline_id,
-        "fingerprint": group.fingerprint,
-        "title": group.title,
-        "level": group.level,
-        "status": group.status,
-        "errorType": group.error_type,
-        "eventCount": int(group.event_count or 0),
-        "lastRelease": group.last_release,
-        "firstSeenAt": _iso(group.first_seen_at),
-        "lastSeenAt": _iso(group.last_seen_at),
-    }
-    if affected_sessions is not None:
-        payload["affectedSessions"] = int(affected_sessions)
-    return payload
-
-
-def _serialize_error_event(event: MonitorErrorEvent) -> dict:
-    return {
-        "id": event.id,
-        "pipelineId": event.pipeline_id,
-        "groupId": event.group_id,
-        "fingerprint": event.fingerprint,
-        "message": event.message,
-        "stack": event.stack,
-        "level": event.level,
-        "handled": event.handled,
-        "errorType": event.error_type,
-        "platform": event.platform,
-        "url": event.url,
-        "release": event.release,
-        "environment": event.environment,
-        "traceId": event.trace_id,
-        "spanId": event.span_id,
-        "visitorId": event.visitor_id,
-        "sessionId": event.session_id,
-        "userId": event.user_ref,
-        "metadata": event.event_metadata or {},
-        "occurredAt": _iso(event.occurred_at),
-        "receivedAt": _iso(event.received_at),
-    }
-
-
-def _serialize_span(span: MonitorSpan, depth: int = 0) -> dict:
-    return {
-        "id": span.id,
-        "traceId": span.trace_id,
-        "spanId": span.span_id,
-        "parentSpanId": span.parent_span_id,
-        "name": span.name,
-        "kind": span.kind,
-        "service": span.service,
-        "feature": span.feature,
-        "platform": span.platform,
-        "status": span.status,
-        "release": span.release,
-        "environment": span.environment,
-        "durationMs": span.duration_ms,
-        "startAt": _iso(span.start_at),
-        "attributes": span.attributes or {},
-        "depth": depth,
-    }
-
-
-def _order_span_tree(spans: list) -> list[tuple]:
-    """Preorder spans into a parent→child tree with depth. A span whose parent
-    isn't in the trace (e.g. a server span whose client parent was sampled out)
-    is treated as a root. Visited-guarded so a malformed parent cycle can't loop,
-    and any span not reached from a root is appended so nothing is dropped."""
-    ids = {s.span_id for s in spans}
-    by_parent: dict = {}
-    for s in spans:
-        key = s.parent_span_id if s.parent_span_id in ids else None
-        by_parent.setdefault(key, []).append(s)
-    for children in by_parent.values():
-        children.sort(key=lambda s: s.start_at or datetime.min.replace(tzinfo=timezone.utc))
-
-    ordered: list[tuple] = []
-    visited: set = set()
-
-    def walk(parent_key, depth):
-        for s in by_parent.get(parent_key, []):
-            if s.span_id in visited:
-                continue
-            visited.add(s.span_id)
-            ordered.append((s, depth))
-            walk(s.span_id, depth + 1)
-
-    walk(None, 0)
-    for s in spans:
-        if s.span_id not in visited:
-            ordered.append((s, 0))
-    return ordered
-
-
-async def _revenue_source(pipeline_id: str, db: AsyncSession, provider: str = "stripe") -> MonitorRevenueSource | None:
-    return (await db.execute(
-        select(MonitorRevenueSource)
-        .where(
-            MonitorRevenueSource.pipeline_id == pipeline_id,
-            MonitorRevenueSource.provider == provider,
-        )
-        .order_by(MonitorRevenueSource.created_at.asc())
-    )).scalar_one_or_none()
-
-
-def _clean_text(value: str | None) -> str | None:
-    if value is None:
-        return None
-    cleaned = value.strip()
-    return cleaned or None
-
-
-def _domain_from_url(value: str | None) -> str | None:
-    cleaned = _clean_text(value)
-    if not cleaned:
-        return None
-    parsed = urlparse(cleaned if "://" in cleaned else f"https://{cleaned}")
-    host = parsed.hostname or cleaned
-    return host.lower().removeprefix("www.")
-
-
-def _host_matches_allowed(host: str | None, allowed_domain: str | None) -> bool:
-    host = _domain_from_url(host)
-    allowed = _domain_from_url(allowed_domain)
-    if not host or not allowed:
-        return False
-    return host == allowed or host.endswith(f".{allowed}")
-
-
-def _origin_allowed(allowed_domain: str | None, request: Request, url: str | None) -> bool:
-    if not allowed_domain:
-        return True
-    candidates = [
-        request.headers.get("origin"),
-        request.headers.get("referer"),
-        url,
-    ]
-    return any(_host_matches_allowed(candidate, allowed_domain) for candidate in candidates)
-
-
-def _usage_event_domain_allowed(source: MonitorUsageSource, request: Request, body: UsageEventBody) -> bool:
-    return _origin_allowed(source.allowed_domain, request, body.url)
-
-
-# Fingerprinting: collapse near-identical errors ("user 123 not found" /
-# "user 456 not found") into one issue. We normalize volatile bits out of the
-# message and pin to the top stack frame so distinct call sites stay distinct.
-_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
-_HEX_RE = re.compile(r"0x[0-9a-fA-F]+")
-_NUM_RE = re.compile(r"\d+")
-
-
-def _normalize_error_message(message: str) -> str:
-    text = (message or "").strip()
-    text = _UUID_RE.sub("<uuid>", text)
-    text = _HEX_RE.sub("<hex>", text)
-    text = _NUM_RE.sub("<n>", text)
-    return " ".join(text.split())
-
-
-def _top_stack_frame(stack: str | None) -> str:
-    if not stack:
-        return ""
-    for raw in stack.splitlines():
-        line = raw.strip()
-        if line.startswith("at ") or line.startswith("File ") or "@" in line:
-            return _NUM_RE.sub("<n>", line)
-    return ""
-
-
-def _error_fingerprint(message: str, stack: str | None) -> str:
-    basis = f"{_normalize_error_message(message)}|{_top_stack_frame(stack)}"
-    return hashlib.sha1(basis.encode("utf-8")).hexdigest()
-
-
-async def _error_group(pipeline_id: str, fingerprint: str, db: AsyncSession) -> MonitorErrorGroup | None:
-    return (await db.execute(
-        select(MonitorErrorGroup).where(
-            MonitorErrorGroup.pipeline_id == pipeline_id,
-            MonitorErrorGroup.fingerprint == fingerprint,
-        )
-    )).scalar_one_or_none()
-
-
-def _source_is_syncable(source: MonitorRevenueSource | None) -> bool:
-    """A source can be synced when it's a connected account with a provider id,
-    or a first-party (own-key) source. First-party sources have no
-    ``provider_account_id`` — they read the platform account directly."""
-    if not source or source.status != "connected":
-        return False
-    if source.account_mode == "first_party":
-        return True
-    return bool(source.provider_account_id)
-
-
-def _revenue_source_is_connected(source: MonitorRevenueSource | None, pipeline_id: str) -> bool:
-    """Require a usable revenue integration scoped to the requested product."""
-    return bool(
-        source
-        and str(source.pipeline_id) == str(pipeline_id)
-        and _source_is_syncable(source)
-    )
-
-
-async def _require_launched_product(pipeline_id: str, db: AsyncSession, uid: str) -> Pipeline:
-    product = (await db.execute(
-        select(Pipeline).where(
-            Pipeline.id == pipeline_id,
-            Pipeline.user_id == uid,
-            Pipeline.launched_at != None,
-        )
-    )).scalar_one_or_none()
-    if not product:
-        raise HTTPException(status_code=404, detail="Launched product not found")
-    return product
-
-
-async def _usage_source(pipeline_id: str, db: AsyncSession) -> MonitorUsageSource | None:
-    return (await db.execute(
-        select(MonitorUsageSource)
-        .where(MonitorUsageSource.pipeline_id == pipeline_id)
-        .order_by(MonitorUsageSource.created_at.asc())
-    )).scalar_one_or_none()
-
-
-def _usage_source_is_connected(source: MonitorUsageSource | None, pipeline_id: str) -> bool:
-    """Only report a usable source belonging to the requested product as connected."""
-    return bool(
-        source
-        and str(source.pipeline_id) == str(pipeline_id)
-        and source.status == "connected"
-        and source.public_key
-    )
-
-
-def _health_verdict(*, connected: bool, last_seen_at, total_events: int, eff, now) -> dict:
-    """Health verdict engine v0: a per-source computed state, so the UI renders a
-    badge instead of making the user read a timestamp and guess. Freshness-only
-    for now (errors/vitals/revenue fold in at v2). States: no-data / healthy /
-    warning / unhealthy."""
-    if not connected or last_seen_at is None or total_events <= 0:
-        return {"state": "no-data", "label": "No data", "reason": "No events received yet",
-                "lastSeenAt": _iso(last_seen_at), "ageHours": None}
-
-    seen = last_seen_at if last_seen_at.tzinfo else last_seen_at.replace(tzinfo=timezone.utc)
-    age_hours = max(0.0, (now - seen).total_seconds() / 3600.0)
-    if age_hours <= eff.health_warning_hours:
-        state, label, reason = "healthy", "Healthy", "Receiving events"
-    elif age_hours <= eff.health_unhealthy_hours:
-        state, label, reason = "warning", "Quiet", f"No events for {int(age_hours)}h"
-    else:
-        state, label, reason = "unhealthy", "Silent", f"No events for {int(age_hours)}h"
-    return {"state": state, "label": label, "reason": reason,
-            "lastSeenAt": _iso(last_seen_at), "ageHours": round(age_hours, 1)}
-
-
-def _health_verdict_v2(*, connected, last_seen_at, total_events, error_rate, lcp_rating, eff, now) -> dict:
-    """Health verdict engine v2: freshness + error rate + vitals → a richer
-    operational state. Precedence is severity-ordered: nothing to judge, then
-    gone silent, then failing/noisy on live data, then merely stale, else live."""
-    def verdict(state, label, reason, age_hours):
-        return {"state": state, "label": label, "reason": reason,
-                "lastSeenAt": _iso(last_seen_at), "ageHours": round(age_hours, 1) if age_hours is not None else None}
-
-    if not connected or last_seen_at is None or total_events <= 0:
-        return verdict("no-data", "No data", "No events received yet", None)
-
-    seen = last_seen_at if last_seen_at.tzinfo else last_seen_at.replace(tzinfo=timezone.utc)
-    age_hours = max(0.0, (now - seen).total_seconds() / 3600.0)
-
-    if age_hours > eff.health_unhealthy_hours:
-        return verdict("silent", "Silent", f"No events for {int(age_hours)}h", age_hours)
-
-    rate_pct = f"{round(error_rate * 100)}%" if error_rate is not None else None
-    if (error_rate is not None and error_rate >= eff.health_error_rate_failing):
-        return verdict("failing", "Failing", f"Error rate {rate_pct}", age_hours)
-    if lcp_rating == "poor":
-        return verdict("failing", "Failing", "Poor experience (LCP)", age_hours)
-    if (error_rate is not None and error_rate >= eff.health_error_rate_noisy):
-        return verdict("noisy", "Noisy", f"Error rate {rate_pct}", age_hours)
-    if lcp_rating == "needs-improvement":
-        return verdict("noisy", "Noisy", "Experience needs improvement (LCP)", age_hours)
-    if age_hours > eff.health_warning_hours:
-        return verdict("stale", "Stale", f"No events for {int(age_hours)}h", age_hours)
-    return verdict("live", "Live", "Healthy and current", age_hours)
-
-
-async def _source_health(pipeline_id: str, source, eff, now, db) -> tuple[dict, dict]:
-    """Gather the signals the v2 verdict needs (freshness, error rate, LCP p75)
-    and compute it. Returns (verdict, signals)."""
-    last_seen = source.last_seen_at if source else None
-    since = now - timedelta(days=eff.analytics_usage_window_days)
-
-    total_events = int(await db.scalar(
-        select(func.count(MonitorUsageEvent.id)).where(MonitorUsageEvent.pipeline_id == pipeline_id)
-    ) or 0)
-    errors = int(await db.scalar(
-        select(func.count(MonitorErrorEvent.id)).where(
-            MonitorErrorEvent.pipeline_id == pipeline_id,
-            MonitorErrorEvent.occurred_at >= since,
-        )
-    ) or 0)
-    sessions = int(await db.scalar(
-        select(func.count(func.distinct(MonitorUsageEvent.session_id))).where(
-            MonitorUsageEvent.pipeline_id == pipeline_id,
-            MonitorUsageEvent.occurred_at >= since,
-            MonitorUsageEvent.session_id != None,
-        )
-    ) or 0)
-    lcp_p75 = await db.scalar(
-        select(func.percentile_cont(0.75).within_group(MonitorWebVital.value.asc())).where(
-            MonitorWebVital.pipeline_id == pipeline_id,
-            MonitorWebVital.occurred_at >= since,
-            MonitorWebVital.metric == "LCP",
-        )
-    )
-    error_rate = round(errors / sessions, 4) if sessions else None
-    lcp_rating = _rate_vital("LCP", lcp_p75) if lcp_p75 is not None else None
-
-    verdict = _health_verdict_v2(
-        connected=_usage_source_is_connected(source, pipeline_id),
-        last_seen_at=last_seen,
-        total_events=total_events,
-        error_rate=error_rate,
-        lcp_rating=lcp_rating,
-        eff=eff,
-        now=now,
-    )
-    signals = {
-        "errors": errors,
-        "sessions": sessions,
-        "errorRate": error_rate,
-        "lcpP75": _round_vital("LCP", lcp_p75),
-        "lcpRating": lcp_rating,
-    }
-    return verdict, signals
-
-
 @router.get("/{pipeline_id}/health")
 async def get_source_health(
     pipeline_id: str,
@@ -728,22 +386,6 @@ async def get_command_center(
     }
 
 
-def _serialize_problem(problem: MonitorProblem) -> dict:
-    return {
-        "id": problem.id,
-        "kind": problem.kind,
-        "title": problem.title,
-        "detail": problem.detail,
-        "severity": problem.severity,
-        "status": problem.status,
-        "metric": problem.metric,
-        "baseline": problem.baseline,
-        "observed": problem.observed,
-        "detectedAt": _iso(problem.detected_at),
-        "resolvedAt": _iso(problem.resolved_at),
-    }
-
-
 @router.get("/{pipeline_id}/problems")
 async def get_problems(
     pipeline_id: str,
@@ -837,39 +479,6 @@ class ReportCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     body: str | None = Field(default=None, max_length=100000)
     investigation_id: str | None = None
-
-
-def _serialize_investigation(inv: MonitorInvestigation) -> dict:
-    return {
-        "id": inv.id,
-        "title": inv.title,
-        "summary": inv.summary,
-        "status": inv.status,
-        "createdAt": _iso(inv.created_at),
-        "updatedAt": _iso(inv.updated_at),
-    }
-
-
-def _serialize_entry(entry: MonitorInvestigationEntry) -> dict:
-    return {
-        "id": entry.id,
-        "kind": entry.kind,
-        "refId": entry.ref_id,
-        "body": entry.body,
-        "metadata": entry.event_metadata or {},
-        "createdAt": _iso(entry.created_at),
-    }
-
-
-def _serialize_report(report: MonitorReport) -> dict:
-    return {
-        "id": report.id,
-        "title": report.title,
-        "body": report.body,
-        "investigationId": report.investigation_id,
-        "createdAt": _iso(report.created_at),
-        "updatedAt": _iso(report.updated_at),
-    }
 
 
 async def _get_investigation(pipeline_id: str, investigation_id: str, db) -> MonitorInvestigation:
@@ -1067,31 +676,6 @@ async def export_report(
     )
 
 
-def _empty_error_daily(days: int = 14) -> dict[str, dict]:
-    today = _now().date()
-    rows: dict[str, dict] = {}
-    for offset in range(days - 1, -1, -1):
-        day = today - timedelta(days=offset)
-        rows[day.isoformat()] = {"date": day.isoformat(), "errors": 0}
-    return rows
-
-
-def _empty_daily(days: int = 14) -> dict[str, dict]:
-    today = _now().date()
-    rows: dict[str, dict] = {}
-    for offset in range(days - 1, -1, -1):
-        day = today - timedelta(days=offset)
-        rows[day.isoformat()] = {
-            "date": day.isoformat(),
-            "pageviews": 0,
-            "visitors": 0,
-            "signups": 0,
-            "activations": 0,
-            "events": 0,
-        }
-    return rows
-
-
 @router.post("/{pipeline_id}/usage-source")
 async def create_usage_source(
     pipeline_id: str,
@@ -1139,96 +723,6 @@ async def update_usage_source(
     await db.commit()
     await db.refresh(source)
     return {"data": _serialize_usage_source(source)}
-
-
-def _resolve_identity(stripe_customer_id: str | None, email: str | None, customer_by_email: dict[str, str]) -> tuple[str | None, str]:
-    """Resolve a usage actor to a Stripe customer. Explicit id wins; otherwise
-    match email against the Stripe customer directory; otherwise unresolved.
-    Returns ``(stripe_customer_id, resolution_method)``."""
-    if stripe_customer_id:
-        return stripe_customer_id, "explicit"
-    if email:
-        matched = customer_by_email.get(email.strip().lower())
-        if matched:
-            return matched, "email"
-    return None, "unresolved"
-
-
-async def _customer_email_index(db: AsyncSession, source_id: str) -> dict[str, str]:
-    rows = (await db.execute(
-        select(MonitorCustomer.stripe_customer_id, MonitorCustomer.email)
-        .where(MonitorCustomer.revenue_source_id == source_id)
-    )).all()
-    return {email.strip().lower(): cid for cid, email in rows if email}
-
-
-def _pct_change(current: int, previous: int) -> float | None:
-    """Week-over-week change as a fraction, or None when there's no baseline."""
-    if not previous:
-        return None
-    return round((current - previous) / previous, 4)
-
-
-def _as_date(value) -> date:
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    return date.fromisoformat(str(value)[:10])
-
-
-def _compute_retention(
-    first_seen_rows: list[tuple],
-    active_rows: list[tuple],
-    today: date,
-    window_days: int = 30,
-    cohort_limit: int = 7,
-) -> dict:
-    """Day-1 / Day-7 return retention.
-
-    A visitor is "retained DN" if they have any activity N days after their
-    first-seen day. Only cohorts old enough to have been observed for N days
-    count toward the rate, so a brand-new cohort doesn't drag it down.
-    """
-    active = {(visitor, _as_date(day)) for visitor, day in active_rows}
-    overall = {1: {"eligible": 0, "retained": 0}, 7: {"eligible": 0, "retained": 0}}
-    cohorts: dict[date, dict] = {}
-
-    for visitor, day in first_seen_rows:
-        first = _as_date(day)
-        cohort = cohorts.setdefault(first, {"size": 0, 1: {"eligible": 0, "retained": 0}, 7: {"eligible": 0, "retained": 0}})
-        cohort["size"] += 1
-        for n in (1, 7):
-            if first + timedelta(days=n) <= today:
-                overall[n]["eligible"] += 1
-                cohort[n]["eligible"] += 1
-                if (visitor, first + timedelta(days=n)) in active:
-                    overall[n]["retained"] += 1
-                    cohort[n]["retained"] += 1
-
-    def _bucket(agg: dict) -> dict:
-        rate = round(agg["retained"] / agg["eligible"], 4) if agg["eligible"] else None
-        return {"eligible": agg["eligible"], "retained": agg["retained"], "rate": rate}
-
-    def _rate(agg: dict) -> float | None:
-        return round(agg["retained"] / agg["eligible"], 4) if agg["eligible"] else None
-
-    cohort_list = [
-        {
-            "date": cohort_date.isoformat(),
-            "size": cohorts[cohort_date]["size"],
-            "d1Rate": _rate(cohorts[cohort_date][1]),
-            "d7Rate": _rate(cohorts[cohort_date][7]),
-        }
-        for cohort_date in sorted(cohorts.keys(), reverse=True)[:cohort_limit]
-    ]
-
-    return {
-        "windowDays": window_days,
-        "d1": _bucket(overall[1]),
-        "d7": _bucket(overall[7]),
-        "cohorts": cohort_list,
-    }
 
 
 @router.get("/{pipeline_id}/usage")
@@ -1663,17 +1157,6 @@ async def get_session_detail(
     }
 
 
-def _series_stats(values: list[int]) -> dict:
-    """Normal-range band for the hero chart: mean +/- 1 stddev over the window
-    (lower clamped at 0). A point outside the band is the 'this is abnormal' cue."""
-    if not values:
-        return {"mean": 0.0, "lower": 0.0, "upper": 0.0}
-    n = len(values)
-    mean = sum(values) / n
-    std = (sum((v - mean) ** 2 for v in values) / n) ** 0.5
-    return {"mean": round(mean, 2), "lower": round(max(0.0, mean - std), 2), "upper": round(mean + std, 2)}
-
-
 @router.get("/{pipeline_id}/timeseries")
 async def get_timeseries(
     pipeline_id: str,
@@ -1739,17 +1222,6 @@ async def get_timeseries(
             "markers": markers,
         }
     }
-
-
-def _explorer_health(error_rate: float | None, lcp_rating: str | None, loads: int) -> str:
-    """One-glance verdict per page: error rate dominates, then felt-speed."""
-    if not loads:
-        return "no-data"
-    if error_rate is not None and error_rate >= 0.05:
-        return "unhealthy"
-    if lcp_rating == "poor" or (error_rate is not None and error_rate >= 0.01):
-        return "warning"
-    return "healthy"
 
 
 @router.get("/{pipeline_id}/explorer")
@@ -1912,34 +1384,6 @@ async def get_trace(
     }
 
 
-def _flow_graph(rows, *, max_nodes: int = 30, max_edges: int = 50) -> tuple[list, list]:
-    """Build the journey graph from pageviews ordered by (session, time): node =
-    page with its visit count, edge = a consecutive page→page hop within one
-    session (self-hops/refreshes dropped). Edges are kept only between the top
-    nodes so the graph stays readable."""
-    visits: dict[str, int] = {}
-    edges: dict[tuple, int] = {}
-    prev_session = None
-    prev_url = None
-    for session_id, url, _ in rows:
-        visits[url] = visits.get(url, 0) + 1
-        if session_id == prev_session and prev_url is not None and prev_url != url:
-            key = (prev_url, url)
-            edges[key] = edges.get(key, 0) + 1
-        prev_session = session_id
-        prev_url = url
-
-    top = sorted(visits.items(), key=lambda kv: kv[1], reverse=True)[:max_nodes]
-    node_set = {url for url, _ in top}
-    nodes = [{"url": url, "visits": count} for url, count in top]
-    edge_list = [
-        {"from": a, "to": b, "count": count}
-        for (a, b), count in sorted(edges.items(), key=lambda kv: kv[1], reverse=True)
-        if a in node_set and b in node_set
-    ][:max_edges]
-    return nodes, edge_list
-
-
 @router.get("/{pipeline_id}/flow")
 async def get_flow(
     pipeline_id: str,
@@ -1977,49 +1421,6 @@ async def get_flow(
     }
 
 
-def _feature_flow(rows, *, max_nodes: int = 30, max_edges: int = 50) -> tuple[list, list]:
-    """Build the flow graph from feature spans ordered by (session, time): node =
-    a named feature (Sign Up, Checkout) with its run count, error count and mean
-    duration; edge = a consecutive feature→feature hop within one session. Unlike
-    the URL graph this measures outcomes — how often a flow ran, how slow it was,
-    and how often it failed — so Monitor can show feature names, not pages."""
-    stats: dict[str, dict] = {}
-    edges: dict[tuple, int] = {}
-    prev_session = None
-    prev_feature = None
-    for session_id, feature, status, duration_ms, _ in rows:
-        stat = stats.setdefault(feature, {"count": 0, "errors": 0, "dur_sum": 0.0, "dur_n": 0})
-        stat["count"] += 1
-        if status == "error":
-            stat["errors"] += 1
-        if duration_ms is not None:
-            stat["dur_sum"] += duration_ms
-            stat["dur_n"] += 1
-        if session_id == prev_session and prev_feature is not None and prev_feature != feature:
-            key = (prev_feature, feature)
-            edges[key] = edges.get(key, 0) + 1
-        prev_session = session_id
-        prev_feature = feature
-
-    top = sorted(stats.items(), key=lambda kv: kv[1]["count"], reverse=True)[:max_nodes]
-    node_set = {feature for feature, _ in top}
-    nodes = [
-        {
-            "feature": feature,
-            "count": stat["count"],
-            "errorCount": stat["errors"],
-            "avgDurationMs": round(stat["dur_sum"] / stat["dur_n"], 1) if stat["dur_n"] else None,
-        }
-        for feature, stat in top
-    ]
-    edge_list = [
-        {"from": a, "to": b, "count": count}
-        for (a, b), count in sorted(edges.items(), key=lambda kv: kv[1], reverse=True)
-        if a in node_set and b in node_set
-    ][:max_edges]
-    return nodes, edge_list
-
-
 @router.get("/{pipeline_id}/feature-flow")
 async def get_feature_flow(
     pipeline_id: str,
@@ -2055,13 +1456,6 @@ async def get_feature_flow(
             "edges": edges,
         }
     }
-
-
-def _round_vital(metric: str, value) -> float | None:
-    if value is None:
-        return None
-    # CLS is a small unitless score; keep precision. The rest are milliseconds.
-    return round(float(value), 3 if metric == "CLS" else 1)
 
 
 @router.get("/{pipeline_id}/experience")
@@ -2226,53 +1620,6 @@ async def get_logs(
     }
 
 
-def _build_correlation_days(usage_rows, error_rows, days: int = 30, today: date | None = None) -> list[dict]:
-    """Merge usage + error daily rows into one aligned timeline."""
-    today = today or _now().date()
-    skeleton: dict[str, dict] = {}
-    for offset in range(days - 1, -1, -1):
-        day = today - timedelta(days=offset)
-        skeleton[day.isoformat()] = {"date": day.isoformat(), "visitors": 0, "pageviews": 0, "signups": 0, "errors": 0}
-
-    for day, event_type, count, visitors in usage_rows:
-        key = day.isoformat() if hasattr(day, "isoformat") else str(day)
-        if key not in skeleton:
-            continue
-        if event_type == "pageview":
-            skeleton[key]["pageviews"] += int(count or 0)
-            skeleton[key]["visitors"] = max(skeleton[key]["visitors"], int(visitors or 0))
-        elif event_type == "signup":
-            skeleton[key]["signups"] += int(count or 0)
-
-    for day, count in error_rows:
-        key = day.isoformat() if hasattr(day, "isoformat") else str(day)
-        if key in skeleton:
-            skeleton[key]["errors"] += int(count or 0)
-
-    return list(skeleton.values())
-
-
-def _correlation_insights(days: list[dict]) -> list[str]:
-    """Plain-language callouts where signals move together — the cross-source read."""
-    if not days:
-        return []
-    errors = [d["errors"] for d in days]
-    signups = [d["signups"] for d in days]
-    avg_err = sum(errors) / len(errors) if errors else 0
-    avg_signups = sum(signups) / len(signups) if signups else 0
-
-    insights: list[str] = []
-    for day in reversed(days):  # most recent first
-        if day["errors"] >= 5 and avg_err > 0 and day["errors"] >= 2 * avg_err:
-            msg = f"Errors spiked to {day['errors']} on {day['date']}"
-            if day["signups"] <= avg_signups:
-                msg += f", while signups dipped to {day['signups']}"
-            insights.append(msg + ".")
-        if len(insights) >= 3:
-            break
-    return insights
-
-
 # NOTE: this is the usage-vs-errors correlation. It is slated for a later rename
 # to `/insights/error-correlation` to disambiguate from the new usage↔revenue
 # correlation (`/insights/revenue-correlation`). Left at its current path here to
@@ -2370,18 +1717,6 @@ async def get_correlation(
                 "errorsPerSessionWindowDays": usage_window,
             },
         }
-    }
-
-
-def _serialize_alert_settings(prefs: AlertPrefs) -> dict:
-    return {
-        "newIssueEnabled": prefs.new_issue_enabled,
-        "errorSpikeEnabled": prefs.error_spike_enabled,
-        "signupsDropEnabled": prefs.signups_drop_enabled,
-        "revenueDropEnabled": prefs.revenue_drop_enabled,
-        "errorSpikeMultiplier": prefs.error_spike_multiplier,
-        "signupsDropPct": prefs.signups_drop_pct,
-        "revenueDropPct": prefs.revenue_drop_pct,
     }
 
 
@@ -2591,41 +1926,6 @@ async def get_error_metrics(
             "facets": facets,
             "filters": {"errorType": error_type, "platform": platform},
         }
-    }
-
-
-def _issue_trend(recent: int, prior: int) -> dict:
-    """Direction of an issue over the window: this half vs the prior half. 'up'
-    means it's getting worse (a regression signal), 'down' means it's receding."""
-    if recent > prior:
-        direction = "up"
-    elif recent < prior:
-        direction = "down"
-    else:
-        direction = "flat"
-    change_pct = _pct_change(recent, prior)
-    return {"direction": direction, "recent": int(recent), "prior": int(prior), "changePct": change_pct}
-
-
-def _serialize_issue(group: MonitorErrorGroup, *, affected_users, affected_sessions, occurrences, trend) -> dict:
-    """A fingerprint group promoted to an issue object: the group's identity plus
-    the impact metrics the engine computes (affected users/sessions, windowed
-    occurrences, trend). affected-users is net-new — it isn't stored anywhere."""
-    return {
-        "id": group.id,
-        "fingerprint": group.fingerprint,
-        "title": group.title,
-        "level": group.level,
-        "status": group.status,
-        "errorType": group.error_type,
-        "lastRelease": group.last_release,
-        "firstSeenAt": _iso(group.first_seen_at),
-        "lastSeenAt": _iso(group.last_seen_at),
-        "totalOccurrences": int(group.event_count or 0),
-        "occurrences": int(occurrences),
-        "affectedUsers": int(affected_users),
-        "affectedSessions": int(affected_sessions),
-        "trend": trend,
     }
 
 
@@ -3010,237 +2310,6 @@ async def get_errors_by_release(
             "releases": releases,
         }
     }
-
-
-# Per-source ingest rate limit. Fixed one-minute window kept in process: a
-# coarse flood guard so one source can't bury ingest, not a precise distributed
-# quota (each worker holds its own window). A batch counts as its event total.
-_rate_windows: dict[str, list] = {}
-
-
-def _check_rate_limit(source_id: str, cost: int = 1) -> None:
-    limit = get_settings().ingest_rate_limit_per_minute
-    if limit <= 0:
-        return
-    window = int(_now().timestamp()) // 60
-    entry = _rate_windows.get(source_id)
-    if entry is None or entry[0] != window:
-        # New window. Opportunistically drop stale entries so the map can't grow
-        # unbounded across many sources.
-        if len(_rate_windows) > 10000:
-            _rate_windows.clear()
-        entry = [window, 0]
-        _rate_windows[source_id] = entry
-    entry[1] += cost
-    if entry[1] > limit:
-        raise HTTPException(status_code=429, detail="Rate limit exceeded", headers={"Retry-After": "60"})
-
-
-# Core Web Vitals thresholds (good upper-bound, poor lower-bound). LCP/INP/FCP/
-# TTFB are milliseconds; CLS is unitless. A p75 at/below `good` is good, above
-# `poor` is poor, between is needs-improvement.
-_VITAL_THRESHOLDS = {
-    "LCP": (2500.0, 4000.0),
-    "INP": (200.0, 500.0),
-    "FCP": (1800.0, 3000.0),
-    "TTFB": (800.0, 1800.0),
-    "CLS": (0.1, 0.25),
-}
-_VITAL_ORDER = {"LCP": 0, "INP": 1, "CLS": 2, "FCP": 3, "TTFB": 4}
-
-
-def _rate_vital(metric: str, value: float | None) -> str | None:
-    thresholds = _VITAL_THRESHOLDS.get(metric)
-    if not thresholds or value is None:
-        return None
-    good, poor = thresholds
-    if value <= good:
-        return "good"
-    if value <= poor:
-        return "needs-improvement"
-    return "poor"
-
-
-def _record_web_vital(source, *, metric, value, rating, url, navigation_id, visitor_id, session_id, user_ref, release, environment, occurred_at, now, trace_id=None, span_id=None, parent_span_id=None, platform=None):
-    """Build a web-vital row (not committed). Rating falls back to the
-    threshold-derived value when the client didn't send one. Shared by the
-    single /vitals endpoint and /batch."""
-    return MonitorWebVital(
-        id=str(uuid.uuid4()),
-        pipeline_id=source.pipeline_id,
-        source_id=source.id,
-        metric=metric,
-        value=float(value),
-        rating=rating or _rate_vital(metric, value),
-        url=url,
-        navigation_id=navigation_id,
-        visitor_id=visitor_id,
-        session_id=session_id,
-        user_ref=user_ref,
-        release=release,
-        environment=environment,
-        trace_id=trace_id,
-        span_id=span_id,
-        parent_span_id=parent_span_id,
-        platform=platform,
-        occurred_at=occurred_at or now,
-        received_at=now,
-    )
-
-
-def _record_log(source, *, level, message, metadata, url, visitor_id, session_id, user_ref, release, environment, occurred_at, now, trace_id=None, span_id=None, parent_span_id=None, platform=None):
-    """Build a log row (not committed). Shared by the single /logs endpoint and
-    /batch."""
-    return MonitorLog(
-        id=str(uuid.uuid4()),
-        pipeline_id=source.pipeline_id,
-        source_id=source.id,
-        level=level,
-        message=str(message)[:4000],
-        event_metadata=metadata or {},
-        url=url,
-        visitor_id=visitor_id,
-        session_id=session_id,
-        user_ref=user_ref,
-        release=release,
-        environment=environment,
-        trace_id=trace_id,
-        span_id=span_id,
-        parent_span_id=parent_span_id,
-        platform=platform,
-        occurred_at=occurred_at or now,
-        received_at=now,
-    )
-
-
-_SPAN_KINDS = ("client", "server", "internal")
-
-
-def _record_span(source, *, trace_id, span_id, parent_span_id, name, kind, service, feature, platform, capture_mode, status, release, environment, visitor_id, session_id, user_ref, attributes, start_at, duration_ms, now):
-    """Build a span row (not committed). Shared by /spans and /batch. kind is
-    clamped to the allowed set so a malformed client can't trip the CHECK."""
-    return MonitorSpan(
-        id=str(uuid.uuid4()),
-        pipeline_id=source.pipeline_id,
-        source_id=source.id,
-        trace_id=trace_id,
-        span_id=span_id,
-        parent_span_id=parent_span_id,
-        name=str(name)[:200],
-        kind=kind if kind in _SPAN_KINDS else "client",
-        service=service,
-        feature=feature,
-        platform=platform,
-        capture_mode=capture_mode,
-        status=status,
-        release=release,
-        environment=environment,
-        visitor_id=visitor_id,
-        session_id=session_id,
-        user_ref=user_ref,
-        attributes=attributes or {},
-        start_at=start_at or now,
-        duration_ms=duration_ms,
-        received_at=now,
-    )
-
-
-def _build_usage_event(source, *, event_type, visitor_id, session_id, user_ref, url, referrer, release, environment, metadata, occurred_at, now, trace_id=None, span_id=None, parent_span_id=None, platform=None, capture_mode=None):
-    """Build a usage event row (not added/committed). Shared by the single
-    `/events` endpoint and `/batch` so both store identical shapes."""
-    return MonitorUsageEvent(
-        id=str(uuid.uuid4()),
-        pipeline_id=source.pipeline_id,
-        source_id=source.id,
-        event_type=event_type,
-        visitor_id=visitor_id,
-        session_id=session_id,
-        user_ref=user_ref,
-        url=url,
-        referrer=referrer,
-        release=release,
-        environment=environment,
-        trace_id=trace_id,
-        span_id=span_id,
-        parent_span_id=parent_span_id,
-        platform=platform,
-        capture_mode=capture_mode,
-        event_metadata=metadata or {},
-        occurred_at=occurred_at or now,
-        received_at=now,
-    )
-
-
-async def _record_error_event(source, db, *, message, stack, level, handled, url, release, environment, visitor_id, session_id, user_ref, metadata, occurred_at, now, error_type=None, trace_id=None, span_id=None, parent_span_id=None, platform=None, capture_mode=None):
-    """Upsert the fingerprint group and add the error event (not committed).
-    Shared by the single `/errors` endpoint and `/batch` so grouping, regression
-    reopen, and first/last-seen tracking stay identical across both."""
-    occurred = occurred_at or now
-    fingerprint = _error_fingerprint(message, stack)
-    title = (_normalize_error_message(message) or message)[:500]
-
-    group = await _error_group(source.pipeline_id, fingerprint, db)
-    if group is None:
-        group = MonitorErrorGroup(
-            id=str(uuid.uuid4()),
-            pipeline_id=source.pipeline_id,
-            source_id=source.id,
-            fingerprint=fingerprint,
-            title=title,
-            level=level,
-            error_type=error_type,
-            status="unresolved",
-            event_count=1,
-            last_release=release,
-            first_seen_at=occurred,
-            last_seen_at=occurred,
-            created_at=now,
-            updated_at=now,
-        )
-        db.add(group)
-    else:
-        group.event_count = int(group.event_count or 0) + 1
-        if group.last_seen_at is None or occurred > group.last_seen_at:
-            group.last_seen_at = occurred
-        if group.first_seen_at is None or occurred < group.first_seen_at:
-            group.first_seen_at = occurred
-        if release:
-            group.last_release = release
-        if error_type and not group.error_type:
-            group.error_type = error_type
-        # Regression: a previously resolved issue is happening again → reopen it.
-        if group.status == "resolved":
-            group.status = "unresolved"
-        group.updated_at = now
-
-    event = MonitorErrorEvent(
-        id=str(uuid.uuid4()),
-        pipeline_id=source.pipeline_id,
-        source_id=source.id,
-        group_id=group.id,
-        fingerprint=fingerprint,
-        message=message[:2000],
-        stack=stack,
-        level=level,
-        handled=handled,
-        error_type=error_type,
-        url=url,
-        release=release,
-        environment=environment,
-        trace_id=trace_id,
-        span_id=span_id,
-        parent_span_id=parent_span_id,
-        platform=platform,
-        capture_mode=capture_mode,
-        visitor_id=visitor_id,
-        session_id=session_id,
-        user_ref=user_ref,
-        event_metadata=metadata or {},
-        occurred_at=occurred,
-        received_at=now,
-    )
-    db.add(event)
-    return event, group
 
 
 @public_router.post("/events")

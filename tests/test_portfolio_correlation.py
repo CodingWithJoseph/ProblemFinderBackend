@@ -1,7 +1,7 @@
 from datetime import date, datetime, timezone
 
 from conftest import FakeResult, make_pipeline
-from app.routes.monitor import _build_correlation_days, _correlation_insights
+from app.services.monitoring.analytics import _build_correlation_days, _correlation_insights
 
 
 def test_build_correlation_days_merges_signals():

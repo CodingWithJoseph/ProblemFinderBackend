@@ -4,7 +4,7 @@ pageviews."""
 from datetime import datetime, timezone
 
 from conftest import FakeResult, make_pipeline
-from app.routes.monitor import _flow_graph
+from app.services.monitoring.analytics import _flow_graph
 
 T = datetime(2026, 6, 1, tzinfo=timezone.utc)
 

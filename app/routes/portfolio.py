@@ -1,6 +1,4 @@
-import hashlib
 import logging
-import re
 import secrets
 import uuid
 from calendar import monthrange
@@ -45,6 +43,7 @@ from app.models import (
 from app.services.alerts import AlertPrefs, alert_settings_row
 from app.services.app_settings import apply_settings, effective_config, serialize_settings
 from app.services.goals import account_goals_payload, project_goals_payload
+from app.services.monitoring.ingest import _error_fingerprint, _normalize_error_message
 from app.routes.pipeline import (
     _fetch_issue_counts_for_cards,
     _fetch_posts_for_cards,
@@ -494,46 +493,6 @@ def _origin_allowed(allowed_domain: str | None, request: Request, url: str | Non
 
 def _usage_event_domain_allowed(source: MonitorUsageSource, request: Request, body: UsageEventBody) -> bool:
     return _origin_allowed(source.allowed_domain, request, body.url)
-
-
-# Fingerprinting: collapse near-identical errors ("user 123 not found" /
-# "user 456 not found") into one issue. We normalize volatile bits out of the
-# message and pin to the top stack frame so distinct call sites stay distinct.
-_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
-_HEX_RE = re.compile(r"0x[0-9a-fA-F]+")
-_NUM_RE = re.compile(r"\d+")
-
-
-def _normalize_error_message(message: str) -> str:
-    text = (message or "").strip()
-    text = _UUID_RE.sub("<uuid>", text)
-    text = _HEX_RE.sub("<hex>", text)
-    text = _NUM_RE.sub("<n>", text)
-    return " ".join(text.split())
-
-
-def _top_stack_frame(stack: str | None) -> str:
-    if not stack:
-        return ""
-    for raw in stack.splitlines():
-        line = raw.strip()
-        if line.startswith("at ") or line.startswith("File ") or "@" in line:
-            return _NUM_RE.sub("<n>", line)
-    return ""
-
-
-def _error_fingerprint(message: str, stack: str | None) -> str:
-    basis = f"{_normalize_error_message(message)}|{_top_stack_frame(stack)}"
-    return hashlib.sha1(basis.encode("utf-8")).hexdigest()
-
-
-async def _error_group(pipeline_id: str, fingerprint: str, db: AsyncSession) -> MonitorErrorGroup | None:
-    return (await db.execute(
-        select(MonitorErrorGroup).where(
-            MonitorErrorGroup.pipeline_id == pipeline_id,
-            MonitorErrorGroup.fingerprint == fingerprint,
-        )
-    )).scalar_one_or_none()
 
 
 def _stripe_connect_redirect_url() -> str:
