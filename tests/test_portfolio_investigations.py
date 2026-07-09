@@ -35,6 +35,31 @@ async def test_create_investigation(client, fake_db, auth_headers):
     assert any(isinstance(o, MonitorInvestigation) for o in fake_db.added)
 
 
+async def test_create_monitor_investigation_from_evidence(client, fake_db, auth_headers):
+    product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
+    fake_db.stub(execute=[FakeResult(rows=[product])])
+
+    resp = await client.post(
+        f"/monitor/{product.id}/investigations/from-evidence",
+        json={
+            "kind": "trace",
+            "ref_id": "trace-abc",
+            "metadata": {"spanId": "span-1", "service": "api"},
+        },
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["investigation"]["title"] == "Investigate trace: trace-abc"
+    assert body["investigation"]["status"] == "open"
+    assert body["timeline"][0]["kind"] == "trace"
+    assert body["timeline"][0]["refId"] == "trace-abc"
+    assert body["timeline"][0]["metadata"] == {"spanId": "span-1", "service": "api"}
+    assert any(isinstance(o, MonitorInvestigation) for o in fake_db.added)
+    assert any(isinstance(o, MonitorInvestigationEntry) for o in fake_db.added)
+
+
 async def test_investigation_timeline(client, fake_db, auth_headers):
     product = make_pipeline(launched_at=datetime(2026, 5, 5, tzinfo=timezone.utc))
     inv = _inv(product.id)

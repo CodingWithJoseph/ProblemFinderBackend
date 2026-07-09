@@ -148,12 +148,12 @@ class ServerTracingMiddleware(BaseHTTPMiddleware):
 
 
 def make_batch_reporter(endpoint: str, product_id: str, key: str, *, timeout: float = 2.0) -> SpanReporter:
-    """A reporter that POSTs each span to the portfolio ``/batch`` ingest. Uses a
+    """A reporter that POSTs each span to the monitor ``/batch`` ingest. Uses a
     short timeout and swallows transport errors so a slow/unreachable collector
     can't stall the host request."""
     import httpx
 
-    url = endpoint.rstrip("/") + "/api/public/portfolio/batch"
+    url = endpoint.rstrip("/") + "/api/public/monitor/batch"
 
     async def report(span: dict) -> None:
         payload = {"product_id": product_id, "key": key, "batch": [span]}

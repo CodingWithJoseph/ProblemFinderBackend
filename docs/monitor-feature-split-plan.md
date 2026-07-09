@@ -54,6 +54,8 @@ Goal: align storage language with product ownership.
 - Prefer `monitor_*` naming for new data structures.
 - Keep historical `portfolio_*` tables readable until migrations and dashboards are verified.
 
+PR 379 starts this phase with a Monitor schema map: each Monitor-owned model now references a logical table definition with today's physical table name and the future canonical `monitor_*` name. This keeps the deployed database stable while giving migrations, docs, and new features a single source of truth for Monitor storage ownership.
+
 ## Phase 5: War-Room UX
 
 Goal: shift from pages that show data to pages that drive investigations.
@@ -64,6 +66,8 @@ Goal: shift from pages that show data to pages that drive investigations.
 - Feature health includes runs, error rate, p75 duration, affected users, and drop-off.
 - Investigation reports render resolved evidence, not manual IDs.
 
+PR 379 starts this phase with a canonical evidence-to-investigation endpoint. Monitor clients can open a war-room investigation from an issue, problem, session, trace, feature, release, log, or external link in one request, and the first timeline evidence item is created with the investigation.
+
 ## Phase 6: SDK Coverage
 
 Goal: make Monitor seamless beyond websites.
@@ -72,3 +76,5 @@ Goal: make Monitor seamless beyond websites.
 - Add backend helpers for common server frameworks.
 - Add mobile contracts for iOS and Android using the same trace/session/release/platform model.
 - Expand ingestion auth so server and native clients can report safely without depending on browser origin headers.
+
+PR 379 starts this phase by moving the backend tracing helper to the canonical `/api/public/monitor/batch` ingest path while preserving the legacy public Portfolio alias for existing installs.
