@@ -110,6 +110,32 @@ async def test_account_metric_values_reads_rollups(fake_db):
     }
 
 
+async def test_project_metric_values_includes_journey_metrics(fake_db):
+    # scalar() order: revenue_source, signups, traffic, issues_created,
+    # problems_defined, features_defined, features_built, then _project_setup_steps
+    # (usage_source, usage_flowing, revenue_source, errors_flowing).
+    fake_db.stub(scalar=[None, 3, 100, 2, 7, 12, 4, None, None, None, None])
+    values = await goals_service.project_metric_values("pipe-1", fake_db)
+    assert values["problems_defined"] == 7
+    assert values["features_defined"] == 12
+    assert values["features_built"] == 4
+    # Existing outcome metrics still present.
+    assert values["signups"] == 3
+    assert values["setup_steps"] == 0
+
+
+def _def(id, requires_launch):
+    return GoalDefinition(id=id, scope="project", category="c", title=id, metric_key=id, icon="x", sort_order=0, requires_launch=requires_launch)
+
+
+def test_visible_project_defs_gates_outcome_goals_pre_launch():
+    defs = [(_def("proj_problems", False), []), (_def("proj_signups", True), [])]
+    # Pre-launch: only the journey goal (requires_launch False) is visible.
+    assert [d.id for d, _ in goals_service._visible_project_defs(defs, launched=False)] == ["proj_problems"]
+    # Launched: both show.
+    assert [d.id for d, _ in goals_service._visible_project_defs(defs, launched=True)] == ["proj_problems", "proj_signups"]
+
+
 async def test_evaluate_account_goals_records_crossed_tiers(fake_db):
     launches = GoalDefinition(id="acct_launches", scope="account", category="portfolio", title="Launch products", metric_key="products_launched", icon="rocket", sort_order=10)
     team = GoalDefinition(id="acct_team", scope="account", category="team", title="Team", metric_key="teammates_invited", icon="users", sort_order=40)

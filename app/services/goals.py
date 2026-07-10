@@ -96,12 +96,25 @@ async def project_metric_values(pipeline_id: str, db: AsyncSession) -> dict[str,
     issues_created = int(await db.scalar(
         select(func.count(Issue.id)).where(Issue.pipeline_id == pipeline_id)
     ) or 0)
+    # Pre-launch journey metrics: the path toward launch, computed per project.
+    problems_defined = int(await db.scalar(
+        select(func.count(Problem.id)).where(Problem.pipeline_id == pipeline_id)
+    ) or 0)
+    features_defined = int(await db.scalar(
+        select(func.count(Task.id)).where(Task.pipeline_id == pipeline_id)
+    ) or 0)
+    features_built = int(await db.scalar(
+        select(func.count(Task.id)).where(Task.pipeline_id == pipeline_id, Task.status == "done")
+    ) or 0)
     return {
         "signups": signups,
         "traffic": traffic,
         "issues_created": issues_created,
         "mrr_cents": _selected_mrr_cents(revenue_source, eff.revenue_engine),
         "setup_steps": await _project_setup_steps(pipeline_id, db),
+        "problems_defined": problems_defined,
+        "features_defined": features_defined,
+        "features_built": features_built,
     }
 
 
@@ -350,11 +363,23 @@ def _shape_goal(
     }
 
 
-async def project_goals_payload(pipeline_id: str, db: AsyncSession) -> list[dict]:
-    """Evaluate then shape a project's goals for the UI."""
+def _visible_project_defs(
+    defs: list[tuple[GoalDefinition, list[GoalTier]]], launched: bool
+) -> list[tuple[GoalDefinition, list[GoalTier]]]:
+    """Journey goals (requires_launch == False) always show; outcome goals only
+    once the project has launched."""
+    if launched:
+        return defs
+    return [(d, tiers) for d, tiers in defs if not d.requires_launch]
+
+
+async def project_goals_payload(pipeline_id: str, db: AsyncSession, launched: bool = True) -> list[dict]:
+    """Evaluate then shape a project's goals for the UI. Before launch only the
+    pre-launch journey goals (requires_launch == False) are returned; once
+    launched, the post-launch outcome goals join them."""
     await evaluate_project_goals(pipeline_id, db)
     await db.commit()
-    defs = await _definitions_with_tiers("project", db)
+    defs = _visible_project_defs(await _definitions_with_tiers("project", db), launched)
     values = await project_metric_values(pipeline_id, db)
     achieved_rows = (await db.execute(
         select(ProjectGoalAchievement).where(ProjectGoalAchievement.project_id == pipeline_id)

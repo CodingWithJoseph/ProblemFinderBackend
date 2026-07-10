@@ -609,6 +609,17 @@ async def _require_launched_product(pipeline_id: str, db: AsyncSession, uid: str
     return product
 
 
+async def _require_owned_product(pipeline_id: str, db: AsyncSession, uid: str) -> Pipeline:
+    """The caller's product in any launch state (used where pre-launch access is
+    valid, e.g. journey goals)."""
+    product = (await db.execute(
+        select(Pipeline).where(Pipeline.id == pipeline_id, Pipeline.user_id == uid)
+    )).scalar_one_or_none()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return product
+
+
 async def _usage_source(pipeline_id: str, db: AsyncSession) -> MonitorUsageSource | None:
     return (await db.execute(
         select(MonitorUsageSource)
@@ -1032,9 +1043,11 @@ async def get_project_goals(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
-    """Project-scoped goals for a launched product, with progress + milestone log."""
-    await _require_launched_product(pipeline_id, db, uid)
-    return {"data": await project_goals_payload(pipeline_id, db)}
+    """Project-scoped goals with progress + milestone log. Pre-launch returns the
+    journey goals (problems/features/build); once launched the outcome goals
+    (signups/revenue/traffic/setup/issues) join them."""
+    product = await _require_owned_product(pipeline_id, db, uid)
+    return {"data": await project_goals_payload(pipeline_id, db, launched=product.launched_at is not None)}
 
 
 @router.get("/{pipeline_id}")
