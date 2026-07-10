@@ -879,6 +879,9 @@ class GoalDefinition(Base):
     metric_key: Mapped[str] = mapped_column(Text, nullable=False)
     icon: Mapped[str] = mapped_column(Text, nullable=False)
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # False for pre-launch "journey" goals (shown while a project is still on the
+    # way to launch); True (default) for post-launch outcome goals.
+    requires_launch: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
 class GoalTier(Base):
