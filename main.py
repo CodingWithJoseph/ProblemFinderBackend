@@ -13,6 +13,7 @@ from app.routes.monitor import router as monitor_router
 from app.routes.monitor_war_room import router as monitor_war_room_router
 from app.routes.portfolio import router as portfolio_router
 from app.routes.goals import router as goals_router
+from app.routes.revenue import router as revenue_router
 from app.routes.problems import router as problems_router
 from app.routes.tasks import router as tasks_router
 from app.routes.teams import router as teams_router
@@ -128,6 +129,7 @@ app.include_router(pipeline_router)
 # portfolio router so the static /portfolio/goals and /portfolio/getting-started
 # paths win over the portfolio router's /{pipeline_id} catch-all.
 app.include_router(goals_router)
+app.include_router(revenue_router)
 app.include_router(portfolio_router)
 app.include_router(monitor_router, prefix="/portfolio")
 app.include_router(monitor_router, prefix="/monitor")

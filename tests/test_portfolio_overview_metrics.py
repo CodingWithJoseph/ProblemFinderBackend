@@ -3,6 +3,7 @@ from datetime import date, datetime, timezone
 from conftest import FakeResult, make_revenue_source
 from app.models import MonitorRevenueDaily
 from app.routes import portfolio as portfolio_routes
+from app.services import revenue as revenue_service
 
 
 def test_previous_month_comparison_clamps_month_end():
@@ -151,7 +152,7 @@ def test_daily_gross_by_day_currency_sums_succeeded_charges_by_day():
         _charge(amount=0, currency="usd", when=datetime(2026, 6, 30, 4, tzinfo=timezone.utc)),
     ]
 
-    totals = portfolio_routes._daily_gross_by_day_currency(charges)
+    totals = revenue_service._daily_gross_by_day_currency(charges)
 
     assert totals == {
         (date(2026, 6, 30), "usd"): 1500,

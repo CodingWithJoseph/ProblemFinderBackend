@@ -8,11 +8,24 @@ here to avoid one route module importing another just for a lookup.
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import HTTPException
+from fastapi import Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Pipeline
+from app.auth import get_uid
+from app.db import get_db
+from app.models import Pipeline, PlanEnum, Subscription
+
+
+async def require_admin_uid(
+    uid: str = Depends(get_uid),
+    db: AsyncSession = Depends(get_db),
+) -> str:
+    """Gate: the caller must be on the admin plan. Returns their uid."""
+    sub = await db.scalar(select(Subscription).where(Subscription.uid == uid))
+    if not sub or sub.plan != PlanEnum.admin:
+        raise HTTPException(status_code=403, detail="Admin plan required")
+    return uid
 
 
 def now_utc() -> datetime:

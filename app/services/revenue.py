@@ -1131,3 +1131,27 @@ def _as_date(value) -> date:
     if isinstance(value, date):
         return value
     return date.fromisoformat(str(value)[:10])
+
+
+def _daily_gross_by_day_currency(charges: list[Any]) -> dict[tuple[date, str], int]:
+    """Aggregate Stripe charge objects into ``{(utc_date, currency): gross_cents}``.
+
+    Only succeeded charges count, and the amount is the charge's own ``amount``
+    (gross — refunds are *not* netted out, matching "gross revenue"). Charges
+    without a usable ``created`` timestamp are skipped.
+    """
+    totals: dict[tuple[date, str], int] = {}
+    for charge in charges:
+        if _stripe_value(charge, "status") != "succeeded":
+            continue
+        created = _stripe_timestamp(_stripe_value(charge, "created"))
+        if created is None:
+            continue
+        amount = int(_stripe_value(charge, "amount", 0) or 0)
+        if amount <= 0:
+            continue
+        day = datetime.fromtimestamp(created, tz=timezone.utc).date()
+        currency = str(_stripe_value(charge, "currency", "usd") or "usd").lower()
+        key = (day, currency)
+        totals[key] = totals.get(key, 0) + amount
+    return totals
