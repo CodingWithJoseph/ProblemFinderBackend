@@ -12,6 +12,7 @@ from app.routes.monitor import public_router as monitor_public_router
 from app.routes.monitor import router as monitor_router
 from app.routes.monitor_war_room import router as monitor_war_room_router
 from app.routes.portfolio import router as portfolio_router
+from app.routes.goals import router as goals_router
 from app.routes.problems import router as problems_router
 from app.routes.tasks import router as tasks_router
 from app.routes.teams import router as teams_router
@@ -123,6 +124,10 @@ async def track_user_activity(request: Request, call_next):
 app.include_router(subscriptions_router)
 app.include_router(clusters_router)
 app.include_router(pipeline_router)
+# Goals routes share the /portfolio prefix but must be registered before the
+# portfolio router so the static /portfolio/goals and /portfolio/getting-started
+# paths win over the portfolio router's /{pipeline_id} catch-all.
+app.include_router(goals_router)
 app.include_router(portfolio_router)
 app.include_router(monitor_router, prefix="/portfolio")
 app.include_router(monitor_router, prefix="/monitor")
