@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.routes.subscriptions import router as subscriptions_router
 from app.routes.clusters import router as clusters_router
 from app.routes.pipeline import router as pipeline_router
-from app.routes.monitor import public_router as monitor_public_router
+from app.routes.monitor_ingest import public_router as monitor_public_router
 from app.routes.monitor import router as monitor_router
 from app.routes.monitor_war_room import router as monitor_war_room_router
 from app.routes.portfolio import router as portfolio_router

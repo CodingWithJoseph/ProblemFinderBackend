@@ -75,7 +75,7 @@ from app.models import (  # noqa: E402
 from app.routes.clusters import router as clusters_router  # noqa: E402
 from app.routes.problems import router as problems_router  # noqa: E402
 from app.routes.pipeline import router as pipeline_router  # noqa: E402
-from app.routes.monitor import public_router as monitor_public_router  # noqa: E402
+from app.routes.monitor_ingest import public_router as monitor_public_router  # noqa: E402
 from app.routes.monitor import router as monitor_router  # noqa: E402
 from app.routes.monitor_war_room import router as monitor_war_room_router  # noqa: E402
 from app.routes.portfolio import router as portfolio_router  # noqa: E402
