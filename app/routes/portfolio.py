@@ -47,8 +47,8 @@ from app.routes.pipeline import (
     _fetch_issue_counts_for_cards,
     _fetch_posts_for_cards,
     _fetch_teams_for_cards,
-    _serialize_cards,
 )
+from app.services.pipeline_cards import serialize_cards as _serialize_cards
 from app.routes.portfolio_common import (
     require_launched_product as _require_launched_product,
     require_admin_uid,
