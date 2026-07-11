@@ -170,7 +170,7 @@ class Report:
 def run_offline():
     _install_offline_stubs()
     from datetime import date
-    from app.routes.portfolio import (
+    from app.services.revenue import (
         _billing_events_from_invoices, _customer_mrr_series, _movements_from_series,
         _active_subs_by_customer, _revenue_metrics, _resolve_identity, _revenue_correlation,
     )

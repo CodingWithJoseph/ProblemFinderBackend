@@ -52,7 +52,7 @@ def _start_background_scheduler():
 
     scheduler = AsyncIOScheduler()
     if revenue_interval > 0:
-        from app.routes.portfolio import run_scheduled_revenue_sync
+        from app.services.revenue import run_scheduled_revenue_sync
 
         async def _locked_revenue_sync():
             await run_with_advisory_lock(REVENUE_SYNC_LOCK, run_scheduled_revenue_sync, name="revenue_sync")

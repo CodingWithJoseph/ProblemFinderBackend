@@ -5,11 +5,44 @@ These small ownership checks are used by several portfolio route modules
 here to avoid one route module importing another just for a lookup.
 """
 
+from datetime import datetime, timezone
+from typing import Any
+
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Pipeline
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def iso_or_none(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
+
+
+def stripe_value(obj: Any, key: str, default: Any = None) -> Any:
+    """Read a field from a Stripe object whether it's a dict or an SDK model."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def stripe_items(response: Any) -> list[Any]:
+    if hasattr(response, "auto_paging_iter"):
+        return list(response.auto_paging_iter())
+    return list(stripe_value(response, "data", []) or [])
+
+
+def stripe_timestamp(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 async def require_launched_product(pipeline_id: str, db: AsyncSession, uid: str) -> Pipeline:

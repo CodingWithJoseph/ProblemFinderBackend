@@ -9,11 +9,7 @@ from datetime import datetime, timezone
 
 from conftest import FakeResult, make_pipeline, make_revenue_source, make_subscription
 from app.models import PlanEnum, MonitorRevenueSource
-from app.routes.portfolio import (
-    _credential_path_label,
-    _source_is_syncable,
-    _stripe_account_kwargs,
-)
+from app.services.revenue import _credential_path_label, _source_is_syncable, _stripe_account_kwargs
 
 
 # ── credential routing ────────────────────────────────────────────────────────

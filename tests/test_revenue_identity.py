@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from conftest import FakeResult, make_usage_source
 from app.models import MonitorIdentity
-from app.routes.portfolio import _resolve_identity, _join_coverage
+from app.services.revenue import _resolve_identity, _join_coverage
 
 
 # ── resolution logic ──────────────────────────────────────────────────────────

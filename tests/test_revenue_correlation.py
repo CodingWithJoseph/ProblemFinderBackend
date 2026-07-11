@@ -5,13 +5,7 @@ enough to clear the sample floor so candidates are kept, and a degenerate one to
 exercise the bail paths.
 """
 
-from app.routes.portfolio import (
-    _fisher_exact_two_sided,
-    _laplace_odds_ratio,
-    _revenue_correlation,
-    _two_by_two,
-    CORR_MIN_OUTCOME_PER_CLASS,
-)
+from app.services.revenue import _fisher_exact_two_sided, _laplace_odds_ratio, _revenue_correlation, _two_by_two, CORR_MIN_OUTCOME_PER_CLASS
 
 
 def test_two_by_two_and_odds_ratio():

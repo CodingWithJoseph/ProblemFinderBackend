@@ -6,7 +6,7 @@ computable so every ratio can be checked against its components.
 
 from datetime import date
 
-from app.routes.portfolio import _revenue_metrics
+from app.services.revenue import _revenue_metrics
 
 
 # A 30-day window. Starting MRR (at window_start) = cus_a 1000 + cus_b 2000 = 3000.

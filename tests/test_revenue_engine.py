@@ -9,20 +9,7 @@ history), without asserting exact equality.
 
 from datetime import datetime, timezone
 
-from app.routes.portfolio import (
-    _billing_events_from_invoices,
-    _combine_currency_totals,
-    _customer_mrr_series,
-    _invoice_line_mrr_cents,
-    _is_subscription_line,
-    _line_subscription_id,
-    _line_subscription_item_id,
-    _movements_from_series,
-    _normalize_interval_cents,
-    _subscription_mrr_cents,
-    _total_mrr_at,
-    _active_subs_by_customer,
-)
+from app.services.revenue import _billing_events_from_invoices, _combine_currency_totals, _customer_mrr_series, _invoice_line_mrr_cents, _is_subscription_line, _line_subscription_id, _line_subscription_item_id, _movements_from_series, _normalize_interval_cents, _subscription_mrr_cents, _total_mrr_at, _active_subs_by_customer
 
 
 def _ts(year, month, day=1) -> int:

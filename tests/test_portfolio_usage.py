@@ -14,6 +14,7 @@ from conftest import (
     make_usage_source,
 )
 from app.routes import portfolio as portfolio_routes
+from app.services import revenue as revenue_service
 from app.services.monitoring import ingest as monitor_ingest
 from app.services.monitoring.analytics import _compute_retention
 from app.models import (
@@ -530,7 +531,7 @@ async def test_scheduled_sync_refreshes_connected_sources(fake_db, monkeypatch):
         lambda **kwargs: StripeList([]),
     )
 
-    synced = await portfolio_routes._sync_connected_revenue_sources(fake_db)
+    synced = await revenue_service._sync_connected_revenue_sources(fake_db)
 
     assert synced == 2
     assert source_a.last_synced_at is not None
@@ -554,7 +555,7 @@ async def test_scheduled_sync_skips_failing_source(fake_db, monkeypatch):
     monkeypatch.setattr(portfolio_routes.stripe.Subscription, "list", _subscription_list)
     monkeypatch.setattr(portfolio_routes.stripe.Customer, "list", lambda **kwargs: StripeList([]))
 
-    synced = await portfolio_routes._sync_connected_revenue_sources(fake_db)
+    synced = await revenue_service._sync_connected_revenue_sources(fake_db)
 
     # One source fails, the other still syncs.
     assert synced == 1
