@@ -41,3 +41,20 @@ async def test_getting_started_all_incomplete_starts_at_first(fake_db):
     assert payload["completedCount"] == 0
     assert payload["nextStep"]["key"] == "save_pipeline"
     assert payload["nextStep"]["actionLabel"] == "Open the pipeline"
+
+
+async def test_getting_started_route_is_not_swallowed_by_pipeline_catchall(client, auth_headers, monkeypatch):
+    """Route-order guard for the goals-router split: /portfolio/getting-started is a
+    static path that must win over the portfolio router's /{pipeline_id} catch-all.
+    If it were matched as a product id, the catch-all would 404 with "Launched
+    product not found". We patch the service so the route resolves without a DB."""
+    import app.routes.goals as goals_routes
+
+    async def _fake_payload(uid, db):
+        return {"ok": True}
+
+    monkeypatch.setattr(goals_routes, "getting_started_payload", _fake_payload)
+
+    resp = await client.get("/portfolio/getting-started", headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json() == {"data": {"ok": True}}

@@ -42,14 +42,16 @@ from app.models import (
 )
 from app.services.alerts import AlertPrefs, alert_settings_row
 from app.services.app_settings import apply_settings, effective_config, serialize_settings
-from app.services.goals import account_goals_payload, project_goals_payload
-from app.services.getting_started import getting_started_payload
 from app.services.monitoring.ingest import _error_fingerprint, _normalize_error_message
 from app.routes.pipeline import (
     _fetch_issue_counts_for_cards,
     _fetch_posts_for_cards,
     _fetch_teams_for_cards,
     _serialize_cards,
+)
+from app.routes.portfolio_common import (
+    require_launched_product as _require_launched_product,
+    require_owned_product as _require_owned_product,
 )
 import stripe
 
@@ -596,30 +598,6 @@ def _stripe_timestamp(value: Any) -> int | None:
         return None
 
 
-async def _require_launched_product(pipeline_id: str, db: AsyncSession, uid: str) -> Pipeline:
-    product = (await db.execute(
-        select(Pipeline).where(
-            Pipeline.id == pipeline_id,
-            Pipeline.user_id == uid,
-            Pipeline.launched_at != None,
-        )
-    )).scalar_one_or_none()
-    if not product:
-        raise HTTPException(status_code=404, detail="Launched product not found")
-    return product
-
-
-async def _require_owned_product(pipeline_id: str, db: AsyncSession, uid: str) -> Pipeline:
-    """The caller's product in any launch state (used where pre-launch access is
-    valid, e.g. journey goals)."""
-    product = (await db.execute(
-        select(Pipeline).where(Pipeline.id == pipeline_id, Pipeline.user_id == uid)
-    )).scalar_one_or_none()
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
-    return product
-
-
 async def _usage_source(pipeline_id: str, db: AsyncSession) -> MonitorUsageSource | None:
     return (await db.execute(
         select(MonitorUsageSource)
@@ -1013,41 +991,6 @@ async def get_portfolio(
     teams_map = await _fetch_teams_for_cards(list(cards), db)
     counts_map = await _fetch_issue_counts_for_cards(list(cards), db)
     return {"data": _serialize_cards(list(cards), posts_map, teams_map, counts_map)}
-
-
-@router.get("/goals")
-async def get_account_goals(
-    db: AsyncSession = Depends(get_db),
-    uid: str = Depends(get_uid),
-):
-    """Portfolio-level (account-scoped) goals with progress + milestone log.
-    Reconciles achievements on read. Defined before /{pipeline_id} so the static
-    path wins."""
-    return {"data": await account_goals_payload(uid, db)}
-
-
-@router.get("/getting-started")
-async def get_getting_started(
-    db: AsyncSession = Depends(get_db),
-    uid: str = Depends(get_uid),
-):
-    """Ordered onboarding checklist + the next action to take. Guides a new
-    account through the landscape (discover → build → launch → monitor) before
-    the numeric goals have data. Static path, so declared before /{pipeline_id}."""
-    return {"data": await getting_started_payload(uid, db)}
-
-
-@router.get("/{pipeline_id}/goals")
-async def get_project_goals(
-    pipeline_id: str,
-    db: AsyncSession = Depends(get_db),
-    uid: str = Depends(get_uid),
-):
-    """Project-scoped goals with progress + milestone log. Pre-launch returns the
-    journey goals (problems/features/build); once launched the outcome goals
-    (signups/revenue/traffic/setup/issues) join them."""
-    product = await _require_owned_product(pipeline_id, db, uid)
-    return {"data": await project_goals_payload(pipeline_id, db, launched=product.launched_at is not None)}
 
 
 @router.get("/{pipeline_id}")

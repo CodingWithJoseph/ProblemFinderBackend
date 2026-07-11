@@ -79,6 +79,7 @@ from app.routes.monitor import public_router as monitor_public_router  # noqa: E
 from app.routes.monitor import router as monitor_router  # noqa: E402
 from app.routes.monitor_war_room import router as monitor_war_room_router  # noqa: E402
 from app.routes.portfolio import router as portfolio_router  # noqa: E402
+from app.routes.goals import router as goals_router  # noqa: E402
 from app.routes.tasks import router as tasks_router  # noqa: E402
 from app.routes.teams import router as teams_router  # noqa: E402
 from app.routes.teams import invites_router as invites_router  # noqa: E402
@@ -593,6 +594,9 @@ def app(fake_db):
     application.include_router(clusters_router)
     application.include_router(problems_router)
     application.include_router(pipeline_router)
+    # Mirror production ordering: goals routes share the /portfolio prefix and
+    # must be registered before the portfolio router's /{pipeline_id} catch-all.
+    application.include_router(goals_router)
     application.include_router(portfolio_router)
     application.include_router(monitor_router, prefix="/portfolio")
     application.include_router(monitor_router, prefix="/monitor")
