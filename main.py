@@ -23,6 +23,7 @@ from app.routes.homepage import router as homepage_router
 from app.routes.public import router as public_router
 from app.routes.preferences import router as preferences_router
 from app.db import AsyncSessionLocal
+from app.feature_profile import deferred_features_enabled
 from app.services.activity import record_user_activity, should_record_user_action
 
 load_dotenv()
@@ -38,6 +39,10 @@ def _start_background_scheduler():
     Best-effort: a missing apscheduler simply skips scheduling rather than
     failing app startup. Individual jobs are skipped when their interval is 0.
     """
+    if not deferred_features_enabled(settings.feature_profile):
+        # Core profile: revenue sync + alert checks belong to deferred
+        # (monitoring) features — no background jobs to run.
+        return None
     revenue_interval = settings.revenue_sync_interval_hours
     alert_interval = settings.alert_check_interval_hours
     if revenue_interval <= 0 and alert_interval <= 0:
@@ -121,25 +126,30 @@ async def track_user_activity(request: Request, call_next):
             logger.exception("failed to record user activity")
     return response
 
+# Core-loop + infrastructure routers mount in every profile. Portfolio stays in
+# core because the pipeline board's Launched column lists via /portfolio.
 app.include_router(subscriptions_router)
 app.include_router(clusters_router)
 app.include_router(pipeline_router)
-# Goals routes share the /portfolio prefix but must be registered before the
-# portfolio router so the static /portfolio/goals and /portfolio/getting-started
-# paths win over the portfolio router's /{pipeline_id} catch-all.
-app.include_router(goals_router)
+if deferred_features_enabled(settings.feature_profile):
+    # Goals routes share the /portfolio prefix but must be registered before the
+    # portfolio router so the static /portfolio/goals and /portfolio/getting-started
+    # paths win over the portfolio router's /{pipeline_id} catch-all.
+    app.include_router(goals_router)
 app.include_router(portfolio_router)
-app.include_router(monitor_router, prefix="/portfolio")
-app.include_router(monitor_router, prefix="/monitor")
-app.include_router(monitor_war_room_router, prefix="/portfolio")
-app.include_router(monitor_war_room_router, prefix="/monitor")
-app.include_router(monitor_public_router, prefix="/public/portfolio")
-app.include_router(monitor_public_router, prefix="/public/monitor")
+if deferred_features_enabled(settings.feature_profile):
+    app.include_router(monitor_router, prefix="/portfolio")
+    app.include_router(monitor_router, prefix="/monitor")
+    app.include_router(monitor_war_room_router, prefix="/portfolio")
+    app.include_router(monitor_war_room_router, prefix="/monitor")
+    app.include_router(monitor_public_router, prefix="/public/portfolio")
+    app.include_router(monitor_public_router, prefix="/public/monitor")
 app.include_router(problems_router)
 app.include_router(tasks_router)
-app.include_router(teams_router)
-app.include_router(invites_router)
-app.include_router(issues_router)
+if deferred_features_enabled(settings.feature_profile):
+    app.include_router(teams_router)
+    app.include_router(invites_router)
+    app.include_router(issues_router)
 app.include_router(dashboard_router)
 app.include_router(homepage_router)
 app.include_router(public_router)
