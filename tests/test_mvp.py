@@ -34,7 +34,10 @@ async def test_search_clusters(client, fake_db, auth_headers):
             FakeResult(rows=[signal]),    # _signals_by_cluster
         ],
     )
-    resp = await client.get("/clusters/search?q=invoicing", headers=auth_headers)
+    resp = await client.get(
+        "/clusters/search?q=invoicing&opportunity_type=software",
+        headers=auth_headers,
+    )
     assert resp.status_code == 200
     body = resp.json()
     assert body["total"] == 1
@@ -69,6 +72,80 @@ async def test_search_clusters_can_match_item_fields(client, fake_db, auth_heade
     row = resp.json()["data"][0]
     assert row["opportunity_domain"] == "real estate"
     assert row["problemStatement"] == "Property managers cannot track tenant repairs cleanly."
+
+
+async def test_query_clusters_returns_confirmed_filters_and_pagination(client, fake_db, auth_headers):
+    cluster = make_cluster()
+    signal = make_cluster_signal(signal_score=0.91)
+    item = make_cluster_item(cluster_id=cluster.id)
+    fake_db.stub(
+        scalar=[12],
+        execute=[
+            FakeResult(rows=[cluster]),
+            FakeResult(rows=[item]),
+            FakeResult(rows=[]),
+            FakeResult(rows=[signal]),
+        ],
+    )
+
+    resp = await client.post(
+        "/clusters/search/query",
+        headers=auth_headers,
+        json={
+            "query": "invoice pain",
+            "opportunity_domains": ["Fintech", "fintech", "all"],
+            "opportunity_types": ["software"],
+            "sources": ["reddit"],
+            "communities": ["r/freelance"],
+            "min_posts": 3,
+            "observed_after": "2026-05-01T00:00:00Z",
+            "trending_only": True,
+            "min_signal_score": 0.7,
+            "sort": "signal_score",
+            "limit": 5,
+            "offset": 5,
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 12
+    assert body["data"][0]["id"] == 42
+    assert body["applied_filters"] == {
+        "query": "invoice pain",
+        "opportunity_domains": ["Fintech"],
+        "opportunity_types": ["software"],
+        "sources": ["reddit"],
+        "communities": ["r/freelance"],
+        "min_posts": 3,
+        "observed_after": "2026-05-01T00:00:00+00:00",
+        "trending_only": True,
+        "min_signal_score": 0.7,
+        "sort": "signal_score",
+    }
+    assert body["pagination"] == {
+        "limit": 5,
+        "offset": 5,
+        "returned": 1,
+        "has_more": True,
+        "next_offset": 10,
+    }
+
+
+async def test_query_clusters_rejects_unknown_or_invalid_filters(client, auth_headers):
+    unknown = await client.post(
+        "/clusters/search/query",
+        headers=auth_headers,
+        json={"query": "invoice pain", "sql": "drop table clusters"},
+    )
+    assert unknown.status_code == 422
+
+    invalid = await client.post(
+        "/clusters/search/query",
+        headers=auth_headers,
+        json={"query": "x", "sort": "magic"},
+    )
+    assert invalid.status_code == 422
 
 
 async def test_browse_clusters_default_sort(client, fake_db, auth_headers):
