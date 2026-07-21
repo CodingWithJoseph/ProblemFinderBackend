@@ -91,3 +91,92 @@ class ClusterSearchQuery(BaseModel):
             "min_signal_score": self.min_signal_score,
             "sort": self.sort,
         }
+
+
+class SearchInterpretRequest(BaseModel):
+    """One conversational turn plus the draft produced by prior turns."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    message: str = Field(min_length=2, max_length=2_000)
+    current_draft: ClusterSearchQuery | None = None
+
+
+class SearchFilterOptions(BaseModel):
+    """Canonical values currently present in the searchable dataset."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    opportunity_domains: list[str] = Field(default_factory=list, max_length=100)
+    opportunity_types: list[str] = Field(default_factory=list, max_length=100)
+    sources: list[str] = Field(default_factory=list, max_length=100)
+    communities: list[str] = Field(default_factory=list, max_length=100)
+
+    @field_validator(
+        "opportunity_domains",
+        "opportunity_types",
+        "sources",
+        "communities",
+    )
+    @classmethod
+    def normalize_options(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_value in values:
+            value = raw_value.strip()
+            if not value or len(value) > 100:
+                continue
+            key = value.casefold()
+            if key not in seen:
+                seen.add(key)
+                normalized.append(value)
+        return normalized
+
+
+class SearchInterpretationModelOutput(BaseModel):
+    """Strict structured output returned by the model before server checks."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    draft: ClusterSearchQuery
+    assumptions: list[str] = Field(max_length=10)
+    unsupported: list[str] = Field(max_length=10)
+    clarification_question: str | None = Field(max_length=300)
+
+    @field_validator("assumptions", "unsupported")
+    @classmethod
+    def normalize_notes(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_value in values:
+            value = raw_value.strip()
+            if not value:
+                continue
+            if len(value) > 300:
+                raise ValueError("notes must be 300 characters or fewer")
+            key = value.casefold()
+            if key not in seen:
+                seen.add(key)
+                normalized.append(value)
+        return normalized
+
+    @field_validator("clarification_question")
+    @classmethod
+    def normalize_question(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        return value.strip()
+
+
+class SearchInterpretationResponse(BaseModel):
+    """Frontend-ready confirmation state; this endpoint never runs the query."""
+
+    draft: ClusterSearchQuery
+    confirmation: str
+    assumptions: list[str]
+    unsupported: list[str]
+    clarification_question: str | None
+    needs_clarification: bool
+    needs_confirmation: bool
+    fallback_used: bool
+    available_options: SearchFilterOptions

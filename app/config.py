@@ -41,6 +41,8 @@ class Settings(BaseSettings):
 
     # OpenAI
     openai_api_key: str = ""
+    search_interpreter_model: str = "gpt-5.6-luna"
+    search_interpreter_timeout_seconds: float = 8.0
 
     # Anthropic (Claude) — opportunity "recommended next step" generation
     anthropic_api_key: str = ""

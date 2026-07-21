@@ -22,7 +22,15 @@ from app.db import get_db
 from app.auth import get_uid
 from app.config import PIPELINE_VERSION
 from app.models import Cluster, ClusterItem, ClusterSnapshot, ClusterSignal, Pipeline
-from app.search_contract import ClusterSearchQuery, SEARCH_DEFAULT_LIMIT, SEARCH_MAX_LIMIT
+from app.search_contract import (
+    ClusterSearchQuery,
+    SearchFilterOptions,
+    SearchInterpretationResponse,
+    SearchInterpretRequest,
+    SEARCH_DEFAULT_LIMIT,
+    SEARCH_MAX_LIMIT,
+)
+from app.services.search_interpreter import interpret_search, load_search_filter_options
 
 router = APIRouter(prefix="/clusters", tags=["clusters"])
 logger = logging.getLogger(__name__)
@@ -526,6 +534,29 @@ async def query_clusters(
             "next_offset": body.offset + body.limit if has_more else None,
         },
     }
+
+
+@router.get("/search/options", response_model=SearchFilterOptions)
+async def search_filter_options(
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Canonical values available to structured filters and the filter editor."""
+    try:
+        return await load_search_filter_options(db)
+    except SQLAlchemyError:
+        await db.rollback()
+        raise HTTPException(status_code=503, detail="Search filter options are temporarily unavailable")
+
+
+@router.post("/search/interpret", response_model=SearchInterpretationResponse)
+async def interpret_cluster_search(
+    body: SearchInterpretRequest,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Translate one conversational turn into a draft without running search."""
+    return await interpret_search(body, uid, db)
 
 
 @router.get("/browse")
