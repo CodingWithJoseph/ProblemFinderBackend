@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, func, or_
+from sqlalchemy import case, func, literal, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +22,7 @@ from app.db import get_db
 from app.auth import get_uid
 from app.config import PIPELINE_VERSION
 from app.models import Cluster, ClusterItem, ClusterSnapshot, ClusterSignal, Pipeline
+from app.search_contract import ClusterSearchQuery, SEARCH_DEFAULT_LIMIT, SEARCH_MAX_LIMIT
 
 router = APIRouter(prefix="/clusters", tags=["clusters"])
 logger = logging.getLogger(__name__)
@@ -30,9 +31,8 @@ SUFFICIENT_HISTORY_DAYS = 7
 TASKS_SCAN_LIMIT = 500
 TOP_EVIDENCE_COUNT = 4
 
-SEARCH_DEFAULT_LIMIT = 20
-SEARCH_MAX_LIMIT = 50
 SEARCH_SAMPLE_POSTS = 3
+SEARCH_MAX_TOKENS = 12
 
 
 def _iso(value) -> str | None:
@@ -330,15 +330,25 @@ def _skip_filter(value: str | None) -> bool:
     return value is None or value.strip() == "" or value.strip().lower() == "all"
 
 
-def _apply_domain_filter(base, opportunity_domain: str | None):
-    if _skip_filter(opportunity_domain):
+def _normalized_values(values: list[str]) -> list[str]:
+    return [value.strip().lower() for value in values if not _skip_filter(value)]
+
+
+def _apply_item_value_filter(base, column, values: list[str]):
+    normalized = _normalized_values(values)
+    if not normalized:
         return base
     exists_q = select(ClusterItem.id).where(
         ClusterItem.cluster_id == Cluster.id,
         ClusterItem.pipeline_version == PIPELINE_VERSION,
-        func.lower(func.trim(ClusterItem.opportunity_domain)) == opportunity_domain.strip().lower(),
+        func.lower(func.trim(column)).in_(normalized),
     )
     return base.where(exists_q.exists())
+
+
+def _contains_pattern(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
 
 
 def _item_text_match(pattern: str):
@@ -346,14 +356,101 @@ def _item_text_match(pattern: str):
         ClusterItem.cluster_id == Cluster.id,
         ClusterItem.pipeline_version == PIPELINE_VERSION,
         or_(
-            ClusterItem.title.ilike(pattern),
-            ClusterItem.problem_statement.ilike(pattern),
-            ClusterItem.solution_angle.ilike(pattern),
-            ClusterItem.opportunity_domain.ilike(pattern),
-            ClusterItem.community.ilike(pattern),
+            ClusterItem.title.ilike(pattern, escape="\\"),
+            ClusterItem.problem_statement.ilike(pattern, escape="\\"),
+            ClusterItem.solution_angle.ilike(pattern, escape="\\"),
+            ClusterItem.opportunity_type.ilike(pattern, escape="\\"),
+            ClusterItem.opportunity_domain.ilike(pattern, escape="\\"),
+            ClusterItem.platform.ilike(pattern, escape="\\"),
+            ClusterItem.community.ilike(pattern, escape="\\"),
         ),
     )
     return exists_q.exists()
+
+
+def _search_text_expressions(query: str):
+    conditions = []
+    score_parts = []
+    terms: list[tuple[str, tuple[int, int, int]]] = [(query, (8, 5, 3))]
+    seen = {query.casefold()}
+    for token in (token for token in query.split() if len(token) >= 2):
+        key = token.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        terms.append((token, (3, 2, 1)))
+        if len(terms) >= SEARCH_MAX_TOKENS + 1:
+            break
+
+    for term, weights in terms:
+        pattern = _contains_pattern(term)
+        name_match = Cluster.name.ilike(pattern, escape="\\")
+        summary_match = Cluster.summary.ilike(pattern, escape="\\")
+        item_match = _item_text_match(pattern)
+        conditions.extend([name_match, summary_match, item_match])
+        score_parts.extend([
+            case((name_match, weights[0]), else_=0),
+            case((summary_match, weights[1]), else_=0),
+            case((item_match, weights[2]), else_=0),
+        ])
+
+    relevance = sum(score_parts, literal(0))
+    return conditions, relevance
+
+
+def _build_cluster_search(filters: ClusterSearchQuery):
+    """Compile allow-listed search filters into a parameterized SQLAlchemy query."""
+    stats = _item_stats_subquery()
+    base = (
+        select(Cluster)
+        .join(stats, stats.c.cluster_id == Cluster.id)
+        .where(
+            Cluster.pipeline_version == PIPELINE_VERSION,
+            stats.c.post_count >= filters.min_posts,
+        )
+    )
+
+    relevance = None
+    if filters.query:
+        conditions, relevance = _search_text_expressions(filters.query)
+        base = base.where(or_(*conditions))
+
+    base = _apply_item_value_filter(base, ClusterItem.opportunity_domain, filters.opportunity_domains)
+    base = _apply_item_value_filter(base, ClusterItem.opportunity_type, filters.opportunity_types)
+    base = _apply_item_value_filter(base, ClusterItem.platform, filters.sources)
+    base = _apply_item_value_filter(base, ClusterItem.community, filters.communities)
+
+    if filters.observed_after:
+        base = base.where(stats.c.last_observed >= filters.observed_after)
+    if filters.trending_only:
+        base = base.where(Cluster.trending.is_(True))
+
+    needs_signal_join = filters.min_signal_score is not None or filters.sort == "signal_score"
+    if needs_signal_join:
+        base = base.outerjoin(ClusterSignal, ClusterSignal.cluster_id == Cluster.id)
+    if filters.min_signal_score is not None:
+        base = base.where(_signal_score_order() >= filters.min_signal_score)
+
+    freshness_order = [
+        stats.c.last_observed.desc().nullslast(),
+        Cluster.last_seen_date.desc().nullslast(),
+    ]
+    newest_order = [
+        *freshness_order,
+        stats.c.post_count.desc(),
+    ]
+    if filters.sort == "largest":
+        order_clauses = [stats.c.post_count.desc(), *freshness_order]
+    elif filters.sort == "trending":
+        order_clauses = [Cluster.trending.desc(), *newest_order]
+    elif filters.sort == "signal_score":
+        order_clauses = [_signal_score_order().desc().nullslast(), *newest_order]
+    elif filters.sort == "relevance" and relevance is not None:
+        order_clauses = [relevance.desc(), stats.c.post_count.desc(), *freshness_order]
+    else:
+        order_clauses = newest_order
+
+    return base, order_clauses
 
 
 async def _materialize_discovery(base, order_clauses, limit, offset, uid, db) -> dict:
@@ -377,52 +474,68 @@ async def _materialize_discovery(base, order_clauses, limit, offset, uid, db) ->
 
 @router.get("/search")
 async def search_clusters(
-    q: str = Query(..., min_length=2),
+    q: str = Query(..., min_length=2, max_length=500),
     limit: int = Query(SEARCH_DEFAULT_LIMIT, ge=1, le=SEARCH_MAX_LIMIT),
-    offset: int = Query(0, ge=0),
-    min_posts: int = Query(1, ge=1),
-    opportunity_domain: str | None = Query(None),
+    offset: int = Query(0, ge=0, le=1_000_000),
+    min_posts: int = Query(1, ge=1, le=100_000),
+    opportunity_domain: str | None = Query(None, max_length=100),
+    opportunity_type: str | None = Query(None, max_length=100),
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
     """Cluster-first search across cluster and item text."""
-    full_pattern = f"%{q}%"
-    conditions = [
-        Cluster.name.ilike(full_pattern),
-        Cluster.summary.ilike(full_pattern),
-        _item_text_match(full_pattern),
-    ]
-    for token in (t for t in q.split() if len(t) >= 2):
-        pattern = f"%{token}%"
-        conditions.extend([
-            Cluster.name.ilike(pattern),
-            Cluster.summary.ilike(pattern),
-            _item_text_match(pattern),
-        ])
-
-    stats = _item_stats_subquery()
-    base = (
-        select(Cluster)
-        .join(stats, stats.c.cluster_id == Cluster.id)
-        .where(
-            Cluster.pipeline_version == PIPELINE_VERSION,
-            stats.c.post_count >= min_posts,
-            or_(*conditions),
-        )
+    filters = ClusterSearchQuery(
+        query=q,
+        opportunity_domains=[] if _skip_filter(opportunity_domain) else [opportunity_domain],
+        opportunity_types=[] if _skip_filter(opportunity_type) else [opportunity_type],
+        min_posts=min_posts,
+        sort="largest",
+        limit=limit,
+        offset=offset,
     )
-    base = _apply_domain_filter(base, opportunity_domain)
-    order_clauses = [stats.c.post_count.desc(), stats.c.last_observed.desc().nullslast()]
+    base, order_clauses = _build_cluster_search(filters)
     return await _materialize_discovery(base, order_clauses, limit, offset, uid, db)
+
+
+@router.post("/search/query")
+async def query_clusters(
+    body: ClusterSearchQuery,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Execute a confirmed, allow-listed search draft against cluster data."""
+    base, order_clauses = _build_cluster_search(body)
+    result = await _materialize_discovery(
+        base,
+        order_clauses,
+        body.limit,
+        body.offset,
+        uid,
+        db,
+    )
+    returned = len(result["data"])
+    has_more = body.offset + returned < result["total"]
+    return {
+        **result,
+        "applied_filters": body.applied_filters(),
+        "pagination": {
+            "limit": body.limit,
+            "offset": body.offset,
+            "returned": returned,
+            "has_more": has_more,
+            "next_offset": body.offset + body.limit if has_more else None,
+        },
+    }
 
 
 @router.get("/browse")
 async def browse_clusters(
     limit: int = Query(SEARCH_DEFAULT_LIMIT, ge=1, le=SEARCH_MAX_LIMIT),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=1_000_000),
     sort: str = Query("newest"),
-    subreddit: str | None = Query(None),
-    min_posts: int = Query(1, ge=1),
-    opportunity_domain: str | None = Query(None),
+    subreddit: str | None = Query(None, max_length=100),
+    min_posts: int = Query(1, ge=1, le=100_000),
+    opportunity_domain: str | None = Query(None, max_length=100),
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
@@ -436,7 +549,11 @@ async def browse_clusters(
             stats.c.post_count >= min_posts,
         )
     )
-    base = _apply_domain_filter(base, opportunity_domain)
+    base = _apply_item_value_filter(
+        base,
+        ClusterItem.opportunity_domain,
+        [] if _skip_filter(opportunity_domain) else [opportunity_domain],
+    )
 
     if subreddit:
         item_exists = select(ClusterItem.id).where(
