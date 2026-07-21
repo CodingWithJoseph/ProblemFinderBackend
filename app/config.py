@@ -39,8 +39,15 @@ class Settings(BaseSettings):
     stripe_oauth_state_ttl_minutes: int = 15
     app_url: str = "http://localhost:3000"
 
-    # OpenAI
+    # OpenAI search embeddings
     openai_api_key: str = ""
+
+    # Optional OpenAI-compatible conversational search interpreter
+    search_interpreter_provider: str = "local"
+    search_interpreter_base_url: str = ""
+    search_interpreter_model: str = ""
+    search_interpreter_timeout_seconds: float = 8.0
+    groq_api_key: str = ""
 
     # Anthropic (Claude) — opportunity "recommended next step" generation
     anthropic_api_key: str = ""
