@@ -6,6 +6,7 @@ from app.db import get_db
 from app.models import Subscription, PlanEnum
 from app.auth import get_uid, get_firestore
 from app.config import get_settings
+from app.feature_profile import require_deferred_features
 from datetime import datetime, timezone
 import logging
 import stripe
@@ -106,7 +107,7 @@ class CheckoutRequest(BaseModel):
     price_key: str
 
 
-@router.post("/checkout")
+@router.post("/checkout", dependencies=[Depends(require_deferred_features)])
 async def create_checkout(
         body: CheckoutRequest,
         uid: str = Depends(get_uid),
@@ -141,7 +142,7 @@ async def create_checkout(
 
 # ─── Portal ─────────────────────────────────────────────────────────────────
 
-@router.post("/portal")
+@router.post("/portal", dependencies=[Depends(require_deferred_features)])
 async def create_portal(
     uid: str = Depends(get_uid),
     db: AsyncSession = Depends(get_db),
@@ -168,7 +169,7 @@ class UpgradeRequest(BaseModel):
     price_key: str
 
 
-@router.post("/upgrade")
+@router.post("/upgrade", dependencies=[Depends(require_deferred_features)])
 async def upgrade_subscription(
     body: UpgradeRequest,
     uid: str = Depends(get_uid),
@@ -203,7 +204,7 @@ async def upgrade_subscription(
 
 # ─── Webhook ────────────────────────────────────────────────────────────────
 
-@router.post("/webhook")
+@router.post("/webhook", dependencies=[Depends(require_deferred_features)])
 async def stripe_webhook(
     request: Request,
     stripe_signature: str = Header(None),

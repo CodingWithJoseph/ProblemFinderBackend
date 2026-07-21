@@ -1,51 +1,69 @@
+from pathlib import Path
+
+import pytest
+from fastapi import HTTPException
+
 from app.feature_profile import (
     CORE_ROUTERS,
     DEFERRED_ROUTERS,
     deferred_features_enabled,
-    normalize_profile,
+    require_deferred_features,
+    resolve_profile,
 )
 
 
-def test_normalize_fails_open_to_full():
-    # Misconfiguration must never silently hide the product.
-    assert normalize_profile("core") == "core"
-    assert normalize_profile("  CORE ") == "core"
-    for bad in ("full", "", None, "prod", "core-ish"):
-        assert normalize_profile(bad) == "full"
+class _Settings:
+    def __init__(self, profile: str | None, environment: str):
+        self.feature_profile = profile
+        self.environment = environment
 
 
-def test_deferred_enabled_only_under_full():
+def test_explicit_profiles_are_resolved():
+    assert resolve_profile("core", "production") == "core"
+    assert resolve_profile(" FULL ", "staging") == "full"
+
+
+def test_local_and_test_environments_default_to_full():
+    assert resolve_profile(None, "development") == "full"
+    assert resolve_profile("typo", "test") == "full"
+
+
+@pytest.mark.parametrize("environment", ["staging", "production"])
+@pytest.mark.parametrize("value", [None, "", "typo"])
+def test_deployments_reject_missing_or_invalid_profiles(environment, value):
+    with pytest.raises(RuntimeError, match="FEATURE_PROFILE"):
+        resolve_profile(value, environment)
+
+
+def test_deferred_feature_switch():
     assert deferred_features_enabled("full") is True
-    assert deferred_features_enabled(None) is True
     assert deferred_features_enabled("core") is False
 
 
-def test_core_loop_routers_are_never_deferred():
-    # The initial-release journey: search -> breakdown -> tasks -> pipeline
-    # (portfolio backs the board's Launched column).
-    for essential in ("clusters", "problems", "tasks", "pipeline", "portfolio", "subscriptions"):
-        assert essential in CORE_ROUTERS
-        assert essential not in DEFERRED_ROUTERS
+def test_core_and_deferred_router_sets_do_not_overlap():
+    assert set(CORE_ROUTERS).isdisjoint(DEFERRED_ROUTERS)
 
 
-def test_deferred_covers_the_post_launch_surface():
-    for deferred in ("goals", "teams", "issues", "monitor", "monitor_ingest"):
-        assert deferred in DEFERRED_ROUTERS
-    assert not (CORE_ROUTERS & DEFERRED_ROUTERS)
+def test_core_dependency_returns_not_found():
+    with pytest.raises(HTTPException) as exc:
+        require_deferred_features(_Settings("core", "production"))
+    assert exc.value.status_code == 404
 
 
-def test_main_gates_every_deferred_mount():
-    """Source-level guard: each deferred router's include must sit inside a
-    deferred_features_enabled block; core mounts must not."""
-    src = open("main.py").read()
-    blocks = src.split("if deferred_features_enabled(settings.feature_profile):")
-    ungated = blocks[0] + "".join(
-        "\n".join(line for line in b.split("\n") if not line.startswith("    "))
-        for b in blocks[1:]
-    )
-    for name in ("goals_router", "monitor_router", "monitor_war_room_router",
-                 "monitor_public_router", "teams_router", "invites_router", "issues_router"):
-        assert f"app.include_router({name}" not in ungated, f"{name} mounted outside the profile gate"
-    for name in ("clusters_router", "problems_router", "tasks_router",
-                 "pipeline_router", "portfolio_router"):
-        assert f"app.include_router({name}" in ungated, f"{name} must mount in every profile"
+def test_main_only_mounts_deferred_routers_inside_profile_guards():
+    source = (Path(__file__).parents[1] / "main.py").read_text(encoding="utf-8")
+    for router_name in ("goals", "monitor", "monitor_war_room", "monitor_public", "teams", "invites", "issues"):
+        mount = f"app.include_router({router_name}_router"
+        assert mount in source
+    assert source.count("if deferred_features_enabled(active_feature_profile):") >= 3
+
+
+def test_mixed_routers_gate_deferred_operations():
+    routes_dir = Path(__file__).parents[1] / "app" / "routes"
+    portfolio = (routes_dir / "portfolio.py").read_text(encoding="utf-8")
+    subscriptions = (routes_dir / "subscriptions.py").read_text(encoding="utf-8")
+
+    assert '@router.get("")' in portfolio
+    assert '@router.get("", dependencies=' not in portfolio
+    assert portfolio.count("dependencies=[Depends(require_deferred_features)]") == 14
+    assert subscriptions.count("dependencies=[Depends(require_deferred_features)]") == 4

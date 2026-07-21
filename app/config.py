@@ -16,10 +16,8 @@ class Settings(BaseSettings):
     # separate from app_name (the API service name) so branding lives in one place.
     product_name: str = "Immensity"
     environment: str = "development"
-    # Release feature profile: "full" (everything) or "core" (initial-release
-    # loop only — see app/feature_profile.py). Deploys set FEATURE_PROFILE.
-    feature_profile: str = "full"
     debug: bool = False
+    feature_profile: str | None = None
 
     # Supabase / Postgres
     database_url: str

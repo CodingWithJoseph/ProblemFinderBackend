@@ -1,49 +1,66 @@
-"""Release feature profiles.
+"""Central feature-profile policy for controlling the released product surface."""
 
-The initial release ships the core loop — find problems, break them down, turn
-them into buildable tasks — while everything already built for the wider product
-(monitoring, goals, teams, issues) stays in the codebase but unmounted. One env
-var (``FEATURE_PROFILE``) decides; branches never diverge in code.
+from fastapi import Depends, HTTPException
 
-Profiles:
-    full  (default) — every router mounts; behavior identical to before this
-                      module existed.
-    core            — only the core-loop routers mount.
-
-Kept under ``core`` and why:
-    clusters / problems / tasks / pipeline  — the core loop itself
-    portfolio                               — the pipeline board's Launched
-                                              column lists via /portfolio; its
-                                              revenue endpoints ride along but
-                                              are auth+ownership gated and
-                                              unreferenced by the core UI
-    subscriptions / dashboard / homepage / public / preferences — infrastructure
-
-Deferred under ``core``:
-    goals (incl. getting-started), teams + invites, issues,
-    monitor + war room, and the public monitor ingest beacons — deferring the
-    beacons also removes unauthenticated public endpoints from the release.
-"""
+from app.config import Settings, get_settings
 
 VALID_PROFILES = ("core", "full")
+LOCAL_ENVIRONMENTS = ("development", "dev", "local", "test", "testing")
+
+# Routers that are available in the MVP profile. Portfolio and subscriptions
+# contain a small core read surface; their deferred operations are protected by
+# ``require_deferred_features`` at the route level.
+CORE_ROUTERS = (
+    "subscriptions",
+    "clusters",
+    "pipeline",
+    "portfolio",
+    "problems",
+    "tasks",
+    "dashboard",
+    "homepage",
+    "public",
+    "preferences",
+)
+
+DEFERRED_ROUTERS = (
+    "goals",
+    "teams",
+    "invites",
+    "issues",
+    "monitor",
+    "monitor_war_room",
+    "monitor_ingest",
+)
 
 
-def normalize_profile(value: str | None) -> str:
-    """Anything that isn't exactly ``core`` runs as ``full`` — misconfiguration
-    fails open to the complete product rather than silently hiding features."""
-    return "core" if (value or "").strip().lower() == "core" else "full"
+def resolve_profile(value: str | None, environment: str) -> str:
+    """Resolve a profile, allowing an ergonomic default only in local/test use.
+
+    Staging and production must opt into ``core`` or ``full`` explicitly. This
+    makes a missing or misspelled deployment setting stop application startup
+    instead of accidentally exposing the deferred surface.
+    """
+    profile = (value or "").strip().lower()
+    if profile in VALID_PROFILES:
+        return profile
+
+    normalized_environment = (environment or "").strip().lower()
+    if normalized_environment in LOCAL_ENVIRONMENTS:
+        return "full"
+
+    raise RuntimeError(
+        "FEATURE_PROFILE must be explicitly set to 'core' or 'full' "
+        f"when ENVIRONMENT is {environment!r}"
+    )
 
 
-def deferred_features_enabled(profile: str | None) -> bool:
-    return normalize_profile(profile) == "full"
+def deferred_features_enabled(profile: str) -> bool:
+    return profile == "full"
 
 
-# Names are documentation + test surface; main.py stays the single mount point.
-CORE_ROUTERS = frozenset({
-    "subscriptions", "clusters", "pipeline", "portfolio",
-    "problems", "tasks", "dashboard", "homepage", "public", "preferences",
-})
-DEFERRED_ROUTERS = frozenset({
-    "goals", "teams", "invites", "issues",
-    "monitor", "monitor_war_room", "monitor_ingest",
-})
+def require_deferred_features(settings: Settings = Depends(get_settings)) -> None:
+    """Return a neutral 404 when a deferred operation is unavailable."""
+    profile = resolve_profile(settings.feature_profile, settings.environment)
+    if not deferred_features_enabled(profile):
+        raise HTTPException(status_code=404, detail="Feature unavailable")
