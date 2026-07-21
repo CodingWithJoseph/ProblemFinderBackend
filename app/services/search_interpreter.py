@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import logging
 from datetime import datetime, timezone
 
@@ -14,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import PIPELINE_VERSION, get_settings
 from app.models import ClusterItem
-from app.openai_client import openai_client
 from app.prompts.search_interpreter import SEARCH_INTERPRETER_INSTRUCTIONS
 from app.search_contract import (
     ClusterSearchQuery,
@@ -23,11 +20,14 @@ from app.search_contract import (
     SearchInterpretationResponse,
     SearchInterpretRequest,
 )
+from app.services.search_interpreter_provider import (
+    SearchInterpreterProviderFailure,
+    get_search_interpreter_provider,
+)
 
 logger = logging.getLogger(__name__)
 
 SEARCH_OPTION_LIMIT = 100
-SEARCH_INTERPRETER_DEFAULT_MODEL = "gpt-5.6-luna"
 
 
 async def _distinct_values(db: AsyncSession, column) -> list[str]:
@@ -54,11 +54,6 @@ async def load_search_filter_options(db: AsyncSession) -> SearchFilterOptions:
         sources=await _distinct_values(db, ClusterItem.platform),
         communities=await _distinct_values(db, ClusterItem.community),
     )
-
-
-def _privacy_preserving_user_id(uid: str) -> str:
-    digest = hashlib.sha256(uid.encode("utf-8")).hexdigest()
-    return f"pf_{digest[:32]}"
 
 
 def _fallback_draft(request: SearchInterpretRequest) -> ClusterSearchQuery:
@@ -212,42 +207,46 @@ async def interpret_search(
         options = await load_search_filter_options(db)
     except SQLAlchemyError:
         await db.rollback()
-        logger.warning("search filter options unavailable; using keyword fallback", exc_info=True)
+        logger.warning("search interpretation fallback provider=none category=options_unavailable")
         return _fallback_response(request, SearchFilterOptions())
 
     settings = get_settings()
-    if not settings.openai_api_key.strip():
-        return _fallback_response(request, options)
-
     prompt_payload = {
         "current_utc": datetime.now(timezone.utc).isoformat(),
         "current_draft": request.current_draft.model_dump(mode="json") if request.current_draft else None,
         "available_options": options.model_dump(mode="json"),
         "latest_user_message": request.message,
     }
-    timeout_seconds = max(1.0, min(float(settings.search_interpreter_timeout_seconds), 30.0))
-    model = settings.search_interpreter_model.strip() or SEARCH_INTERPRETER_DEFAULT_MODEL
+    provider_name = settings.search_interpreter_provider.strip().lower()
+    if provider_name not in {"local", "groq"}:
+        provider_name = "invalid"
 
     try:
-        response = await asyncio.wait_for(
-            openai_client.responses.parse(
-                model=model,
-                instructions=SEARCH_INTERPRETER_INSTRUCTIONS,
-                input=json.dumps(prompt_payload, ensure_ascii=False),
-                text_format=SearchInterpretationModelOutput,
-                reasoning={"effort": "low"},
-                max_output_tokens=1_200,
-                store=False,
-                safety_identifier=_privacy_preserving_user_id(uid),
-                verbosity="low",
-                timeout=timeout_seconds,
-            ),
-            timeout=timeout_seconds + 0.5,
+        # User identity stays inside the application; neither adapter needs it.
+        _ = uid
+        provider = get_search_interpreter_provider(settings)
+        output = await provider.generate(
+            instructions=SEARCH_INTERPRETER_INSTRUCTIONS,
+            payload=prompt_payload,
         )
-        if response.output_parsed is None:
-            raise ValueError("search interpreter returned no parsed output")
-        output = _validated_model_output(response.output_parsed, request, options)
+        output = _validated_model_output(output, request, options)
         return _response(output, options, fallback_used=False)
+    except SearchInterpreterProviderFailure as exc:
+        logger.warning(
+            "search interpretation fallback provider=%s category=%s",
+            provider_name,
+            exc.category,
+        )
+        return _fallback_response(request, options)
+    except (asyncio.TimeoutError, TimeoutError):
+        logger.warning(
+            "search interpretation fallback provider=%s category=timeout",
+            provider_name,
+        )
+        return _fallback_response(request, options)
     except Exception:
-        logger.warning("search interpretation failed; using keyword fallback", exc_info=True)
+        logger.warning(
+            "search interpretation fallback provider=%s category=unexpected",
+            provider_name,
+        )
         return _fallback_response(request, options)

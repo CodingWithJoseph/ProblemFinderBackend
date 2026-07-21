@@ -1,29 +1,37 @@
 import json
+import logging
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.search_contract import ClusterSearchQuery, SearchInterpretationModelOutput
 from app.services import search_interpreter
+from app.services.search_interpreter_provider import SearchInterpreterProviderFailure
 from conftest import FakeResult
 
 
-class FakeResponses:
+class FakeProvider:
+    name = "local"
+
     def __init__(self, output=None, error: Exception | None = None):
         self.output = output
         self.error = error
-        self.kwargs = None
+        self.calls = []
 
-    async def parse(self, **kwargs):
-        self.kwargs = kwargs
+    async def generate(self, **kwargs):
+        self.calls.append(kwargs)
         if self.error is not None:
             raise self.error
-        return SimpleNamespace(output_parsed=self.output)
+        return self.output
 
 
-class FakeOpenAIClient:
-    def __init__(self, output=None, error: Exception | None = None):
-        self.responses = FakeResponses(output=output, error=error)
+def use_provider(monkeypatch, provider):
+    monkeypatch.setattr(
+        search_interpreter,
+        "get_search_interpreter_provider",
+        lambda settings: provider,
+    )
 
 
 def stub_filter_options(fake_db):
@@ -35,7 +43,7 @@ def stub_filter_options(fake_db):
     ])
 
 
-async def test_interpret_search_returns_canonical_confirmable_draft(
+async def test_interpret_search_returns_canonical_confirmable_draft_without_running_search(
     client,
     fake_db,
     auth_headers,
@@ -69,8 +77,8 @@ async def test_interpret_search_returns_canonical_confirmable_draft(
         unsupported=[],
         clarification_question=None,
     )
-    fake_openai = FakeOpenAIClient(output=model_output)
-    monkeypatch.setattr(search_interpreter, "openai_client", fake_openai)
+    provider = FakeProvider(output=model_output)
+    use_provider(monkeypatch, provider)
 
     resp = await client.post(
         "/clusters/search/interpret",
@@ -99,16 +107,11 @@ async def test_interpret_search_returns_canonical_confirmable_draft(
     assert "Confirm these filters" in body["confirmation"]
     assert body["available_options"]["opportunity_domains"] == ["devtools", "fintech"]
 
-    call = fake_openai.responses.kwargs
-    assert call["model"] == "gpt-5.6-luna"
-    assert call["store"] is False
-    assert call["safety_identifier"].startswith("pf_")
-    assert "test-uid" not in call["safety_identifier"]
-    assert call["text_format"] is SearchInterpretationModelOutput
-    payload = json.loads(call["input"])
+    payload = provider.calls[0]["payload"]
     assert payload["current_utc"].endswith("+00:00")
     assert payload["latest_user_message"] == "only show strong fintech software problems from Reddit"
     assert payload["current_draft"]["offset"] == 30
+    assert "test-uid" not in json.dumps(provider.calls)
     assert execute_count == 4  # Filter-option reads only; interpretation never runs search.
 
 
@@ -125,7 +128,7 @@ async def test_interpret_search_surfaces_one_clarification(
         unsupported=[],
         clarification_question="Should recent mean the last 30 or 90 days?",
     )
-    monkeypatch.setattr(search_interpreter, "openai_client", FakeOpenAIClient(output=output))
+    use_provider(monkeypatch, FakeProvider(output=output))
 
     resp = await client.post(
         "/clusters/search/interpret",
@@ -141,17 +144,18 @@ async def test_interpret_search_surfaces_one_clarification(
     assert body["confirmation"] == "I need one detail before I can prepare the database search."
 
 
-async def test_interpret_search_falls_back_without_losing_existing_filters(
+@pytest.mark.parametrize("category", ["invalid_json", "schema_invalid", "timeout", "connection"])
+async def test_interpret_search_falls_back_for_provider_failures(
+    category,
     client,
     fake_db,
     auth_headers,
     monkeypatch,
 ):
     stub_filter_options(fake_db)
-    monkeypatch.setattr(
-        search_interpreter,
-        "openai_client",
-        FakeOpenAIClient(error=RuntimeError("provider unavailable")),
+    use_provider(
+        monkeypatch,
+        FakeProvider(error=SearchInterpreterProviderFailure(category)),
     )
 
     resp = await client.post(
@@ -200,24 +204,22 @@ async def test_interpret_search_falls_back_when_filter_options_fail(
     assert body["available_options"]["opportunity_domains"] == []
 
 
-async def test_interpret_search_falls_back_when_api_key_is_missing(
+async def test_interpret_search_falls_back_when_groq_key_is_missing(
     client,
     fake_db,
     auth_headers,
     monkeypatch,
 ):
     stub_filter_options(fake_db)
-    fake_openai = FakeOpenAIClient(
-        error=AssertionError("OpenAI should not be called without an API key")
-    )
-    monkeypatch.setattr(search_interpreter, "openai_client", fake_openai)
     monkeypatch.setattr(
         search_interpreter,
         "get_settings",
         lambda: SimpleNamespace(
-            openai_api_key="",
-            search_interpreter_model="gpt-5.6-luna",
+            search_interpreter_provider="groq",
+            search_interpreter_base_url="https://api.groq.com/openai/v1",
+            search_interpreter_model="openai/gpt-oss-20b",
             search_interpreter_timeout_seconds=8.0,
+            groq_api_key="",
         ),
     )
 
@@ -229,7 +231,31 @@ async def test_interpret_search_falls_back_when_api_key_is_missing(
 
     assert resp.status_code == 200
     assert resp.json()["fallback_used"] is True
-    assert fake_openai.responses.kwargs is None
+
+
+async def test_interpret_search_logs_only_sanitized_failure_category(
+    client,
+    fake_db,
+    auth_headers,
+    monkeypatch,
+    caplog,
+):
+    stub_filter_options(fake_db)
+    use_provider(monkeypatch, FakeProvider(error=RuntimeError("SENSITIVE_MODEL_RESPONSE")))
+
+    with caplog.at_level(logging.WARNING, logger=search_interpreter.__name__):
+        resp = await client.post(
+            "/clusters/search/interpret",
+            headers=auth_headers,
+            json={"message": "SENSITIVE_USER_PROMPT"},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["fallback_used"] is True
+    assert "category=unexpected" in caplog.text
+    assert "SENSITIVE_USER_PROMPT" not in caplog.text
+    assert "SENSITIVE_MODEL_RESPONSE" not in caplog.text
+    assert "test-uid" not in caplog.text
 
 
 async def test_search_filter_options_endpoint(client, fake_db, auth_headers):
