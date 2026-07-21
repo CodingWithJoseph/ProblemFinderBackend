@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     product_name: str = "Immensity"
     environment: str = "development"
     debug: bool = False
+    feature_profile: str | None = None
 
     # Supabase / Postgres
     database_url: str
