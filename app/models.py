@@ -217,6 +217,71 @@ class SearchUsage(Base):
     searched_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now(timezone.utc))
 
 
+class SearchSession(Base):
+    __tablename__ = "search_sessions"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(160), nullable=False, default="New search")
+    saved_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True, index=True)
+    last_activity_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class SearchTurn(Base):
+    __tablename__ = "search_turns"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id: Mapped[str] = mapped_column(
+        PGUUID(as_uuid=False),
+        ForeignKey("search_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_message: Mapped[str] = mapped_column(Text, nullable=False)
+    interpretation: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class SearchRun(Base):
+    __tablename__ = "search_runs"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id: Mapped[str] = mapped_column(
+        PGUUID(as_uuid=False),
+        ForeignKey("search_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    draft: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    result_cluster_ids: Mapped[list] = mapped_column(ARRAY(Text), nullable=False, default=list)
+    result_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
 class Subscription(Base):
     __tablename__ = "subscriptions"
 

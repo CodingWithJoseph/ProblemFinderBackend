@@ -7,6 +7,7 @@ from app.config import get_settings
 from fastapi.middleware.cors import CORSMiddleware
 from app.routes.subscriptions import router as subscriptions_router
 from app.routes.clusters import router as clusters_router
+from app.routes.search_sessions import router as search_sessions_router
 from app.routes.pipeline import router as pipeline_router
 from app.routes.monitor_ingest import public_router as monitor_public_router
 from app.routes.monitor import router as monitor_router
@@ -128,6 +129,7 @@ async def track_user_activity(request: Request, call_next):
 
 app.include_router(subscriptions_router)
 app.include_router(clusters_router)
+app.include_router(search_sessions_router)
 app.include_router(pipeline_router)
 # Goals routes share the /portfolio prefix but must be registered before the
 # portfolio router so the static /portfolio/goals and /portfolio/getting-started
