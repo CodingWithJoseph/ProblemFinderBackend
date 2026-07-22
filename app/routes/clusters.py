@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.auth import get_uid
-from app.config import PIPELINE_VERSION
+from app.config import PIPELINE_VERSION, Settings, get_settings
 from app.models import Cluster, ClusterItem, ClusterSnapshot, ClusterSignal, Pipeline
 from app.search_agent_contract import SearchAgentResponse
 from app.search_contract import (
@@ -33,6 +33,8 @@ from app.search_contract import (
 )
 from app.services.search_agent import run_search_agent
 from app.services.search_interpreter import interpret_search, load_search_filter_options
+from app.services.web_search import WebSearchFailure, search_web_evidence
+from app.web_search_contract import WebSearchRequest, WebSearchResponse
 
 router = APIRouter(prefix="/clusters", tags=["clusters"])
 logger = logging.getLogger(__name__)
@@ -569,6 +571,24 @@ async def run_cluster_search_agent(
 ):
     """Run a bounded tool loop that always stops before database search execution."""
     return await run_search_agent(body, uid, db)
+
+
+@router.post("/search/web", response_model=WebSearchResponse)
+async def search_external_evidence(
+    body: WebSearchRequest,
+    uid: str = Depends(get_uid),
+    settings: Settings = Depends(get_settings),
+):
+    """Run a gated external search only after explicit user confirmation."""
+    _ = uid
+    if not settings.search_web_enabled:
+        raise HTTPException(status_code=404, detail="Not found")
+    try:
+        return await search_web_evidence(body, settings)
+    except WebSearchFailure as exc:
+        if exc.category == "timeout":
+            raise HTTPException(status_code=504, detail="External search timed out") from None
+        raise HTTPException(status_code=503, detail="External search is unavailable") from None
 
 
 @router.get("/browse")
