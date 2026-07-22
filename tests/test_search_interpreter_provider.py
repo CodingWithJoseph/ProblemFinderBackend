@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.prompts.search_interpreter import SEARCH_INTERPRETER_INSTRUCTIONS
 from app.search_contract import ClusterSearchQuery, SearchInterpretationModelOutput
 from app.services.search_interpreter_provider import (
     GROQ_BASE_URL,
@@ -78,6 +79,12 @@ def assert_strict_objects(node):
     elif isinstance(node, list):
         for value in node:
             assert_strict_objects(value)
+
+
+def test_interpreter_prompt_requires_neutral_filters_for_new_searches():
+    assert "Never invent or tighten a filter" in SEARCH_INTERPRETER_INSTRUCTIONS
+    assert "observed_after null" in SEARCH_INTERPRETER_INSTRUCTIONS
+    assert "preserve current_draft filters" in SEARCH_INTERPRETER_INSTRUCTIONS
 
 
 def test_provider_configuration_selects_local_and_groq_defaults():
