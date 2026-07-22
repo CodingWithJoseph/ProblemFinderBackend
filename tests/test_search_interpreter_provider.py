@@ -175,8 +175,13 @@ async def test_local_uses_llama_server_schema_constrained_shape():
     assert "store" not in request
     response_format = request["response_format"]
     assert response_format["type"] == "json_schema"
-    assert "json_schema" not in response_format
-    assert_strict_objects(response_format["schema"])
+    assert response_format["json_schema"]["strict"] is True
+    assert response_format["json_schema"]["name"] == "search_interpretation"
+    schema = response_format["json_schema"]["schema"]
+    assert "$defs" not in schema
+    assert "$ref" not in str(schema)
+    assert schema["properties"]["draft"]["type"] == "object"
+    assert_strict_objects(schema)
 
 
 @pytest.mark.parametrize(
