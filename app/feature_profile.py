@@ -13,6 +13,7 @@ LOCAL_ENVIRONMENTS = ("development", "dev", "local", "test", "testing")
 CORE_ROUTERS = (
     "subscriptions",
     "clusters",
+    "search_sessions",
     "pipeline",
     "portfolio",
     "problems",
