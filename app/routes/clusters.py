@@ -31,8 +31,10 @@ from app.search_contract import (
     SEARCH_DEFAULT_LIMIT,
     SEARCH_MAX_LIMIT,
 )
+from app.search_summary_contract import SearchSummaryRequest, SearchSummaryResponse
 from app.services.search_agent import run_search_agent
 from app.services.search_interpreter import interpret_search, load_search_filter_options
+from app.services.search_summary import SearchSummaryFailure, generate_grounded_search_summary
 from app.services.web_search import WebSearchFailure, search_web_evidence
 from app.web_search_contract import WebSearchRequest, WebSearchResponse
 
@@ -589,6 +591,31 @@ async def search_external_evidence(
         if exc.category == "timeout":
             raise HTTPException(status_code=504, detail="External search timed out") from None
         raise HTTPException(status_code=503, detail="External search is unavailable") from None
+
+
+@router.post("/search/summary", response_model=SearchSummaryResponse)
+async def summarize_confirmed_search(
+    body: SearchSummaryRequest,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+    settings: Settings = Depends(get_settings),
+):
+    """Summarize only server-reloaded evidence from confirmed Search results."""
+    if not settings.search_summaries_enabled:
+        raise HTTPException(status_code=404, detail="Not found")
+    try:
+        return await generate_grounded_search_summary(body, uid, settings, db)
+    except SQLAlchemyError:
+        await db.rollback()
+        logger.warning("search summary unavailable category=database")
+        raise HTTPException(status_code=503, detail="Search summary is unavailable") from None
+    except (SearchSummaryFailure, WebSearchFailure) as exc:
+        logger.warning("search summary unavailable category=%s", exc.category)
+        if exc.category in {"search_run_not_found", "clusters_not_found"}:
+            raise HTTPException(status_code=404, detail="Search evidence was not found") from None
+        if exc.category == "timeout":
+            raise HTTPException(status_code=504, detail="Search summary timed out") from None
+        raise HTTPException(status_code=503, detail="Search summary is unavailable") from None
 
 
 @router.get("/browse")

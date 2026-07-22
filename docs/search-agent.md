@@ -62,3 +62,22 @@ References:
 - https://console.groq.com/docs/tool-use/built-in-tools/web-search
 - https://console.groq.com/docs/compound/built-in-tools
 - https://console.groq.com/docs/your-data
+
+## Optional grounded summaries
+
+`POST /clusters/search/summary` is hidden unless
+`SEARCH_SUMMARIES_ENABLED=true`. It requires `confirmed: true`, an owned Search
+run ID, and one to five cluster IDs. The selected clusters must be a subset of
+the IDs persisted for that confirmed run. The server then reloads those
+clusters and their bounded top evidence items from the database; the client
+cannot send text for the model to summarize.
+
+An optional `web_query` runs through the separately gated external evidence
+adapter. The summary model receives only the server-built database evidence and
+normalized web snippets. The overview and every finding must cite exact
+evidence IDs, and the server rejects the complete response if any citation is
+unknown or if no database citation is present. Provider failure returns an
+unavailable response; the API does not fabricate a fallback summary.
+
+Keep summaries disabled in production until the staging rollout has verified
+grounding quality, latency, provider privacy controls, and cost.

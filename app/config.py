@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     search_web_enabled: bool = False
     search_web_model: str = "groq/compound-mini"
     search_web_timeout_seconds: float = 12.0
+    search_summaries_enabled: bool = False
 
     # Anthropic (Claude) — opportunity "recommended next step" generation
     anthropic_api_key: str = ""
