@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -72,6 +73,50 @@ def strict_json_schema(model: type[BaseModel]) -> dict[str, Any]:
 
     make_strict(schema)
     return schema
+
+
+def inline_local_schema_refs(schema: dict[str, Any]) -> dict[str, Any]:
+    """Inline local JSON Schema references for llama.cpp grammar conversion."""
+    source = copy.deepcopy(schema)
+
+    def resolve_pointer(pointer: str) -> Any:
+        if not pointer.startswith("#/"):
+            raise ValueError("Only local JSON Schema references are supported")
+        value: Any = source
+        for raw_part in pointer[2:].split("/"):
+            part = raw_part.replace("~1", "/").replace("~0", "~")
+            if not isinstance(value, dict) or part not in value:
+                raise ValueError("Unresolvable local JSON Schema reference")
+            value = value[part]
+        return value
+
+    def inline(node: Any, active_refs: frozenset[str] = frozenset()) -> Any:
+        if isinstance(node, list):
+            return [inline(value, active_refs) for value in node]
+        if not isinstance(node, dict):
+            return node
+
+        reference = node.get("$ref")
+        if isinstance(reference, str):
+            if reference in active_refs:
+                raise ValueError("Recursive JSON Schema references are not supported")
+            resolved = copy.deepcopy(resolve_pointer(reference))
+            siblings = {key: value for key, value in node.items() if key != "$ref"}
+            if not isinstance(resolved, dict):
+                raise ValueError("JSON Schema reference must resolve to an object")
+            resolved.update(siblings)
+            return inline(resolved, active_refs | {reference})
+
+        return {
+            key: inline(value, active_refs)
+            for key, value in node.items()
+            if key not in {"$defs", "definitions"}
+        }
+
+    inlined = inline(source)
+    if not isinstance(inlined, dict):
+        raise ValueError("JSON Schema root must be an object")
+    return inlined
 
 
 def _base_url(value: str, default: str) -> str:
@@ -187,7 +232,14 @@ class LocalSearchInterpreterProvider(_OpenAICompatibleChatProvider):
     name: ProviderName = "local"
 
     def _response_format(self, schema: dict[str, Any]) -> dict[str, Any]:
-        return {"type": "json_schema", "schema": schema}
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": SCHEMA_NAME,
+                "strict": True,
+                "schema": inline_local_schema_refs(schema),
+            },
+        }
 
     def _completion_limit(self) -> dict[str, int]:
         return {"max_tokens": MAX_COMPLETION_TOKENS}

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.prompts.search_interpreter import SEARCH_INTERPRETER_INSTRUCTIONS
 from app.search_contract import ClusterSearchQuery, SearchInterpretationModelOutput
 from app.services.search_interpreter_provider import (
     GROQ_BASE_URL,
@@ -49,7 +50,7 @@ def settings(**overrides):
         "search_interpreter_provider": "local",
         "search_interpreter_base_url": "",
         "search_interpreter_model": "",
-        "search_interpreter_timeout_seconds": 8.0,
+        "search_interpreter_timeout_seconds": 30.0,
         "groq_api_key": "",
     }
     values.update(overrides)
@@ -78,6 +79,12 @@ def assert_strict_objects(node):
     elif isinstance(node, list):
         for value in node:
             assert_strict_objects(value)
+
+
+def test_interpreter_prompt_requires_neutral_filters_for_new_searches():
+    assert "Never invent or tighten a filter" in SEARCH_INTERPRETER_INSTRUCTIONS
+    assert "observed_after null" in SEARCH_INTERPRETER_INSTRUCTIONS
+    assert "preserve current_draft filters" in SEARCH_INTERPRETER_INSTRUCTIONS
 
 
 def test_provider_configuration_selects_local_and_groq_defaults():
@@ -132,7 +139,7 @@ async def test_groq_uses_strict_json_schema_chat_completions_shape():
     assert factory.kwargs == {
         "api_key": "groq-secret",
         "base_url": GROQ_BASE_URL,
-        "timeout": 8.0,
+        "timeout": 30.0,
         "max_retries": 0,
     }
     request = factory.client.chat.completions.kwargs
@@ -175,8 +182,13 @@ async def test_local_uses_llama_server_schema_constrained_shape():
     assert "store" not in request
     response_format = request["response_format"]
     assert response_format["type"] == "json_schema"
-    assert "json_schema" not in response_format
-    assert_strict_objects(response_format["schema"])
+    assert response_format["json_schema"]["strict"] is True
+    assert response_format["json_schema"]["name"] == "search_interpretation"
+    schema = response_format["json_schema"]["schema"]
+    assert "$defs" not in schema
+    assert "$ref" not in str(schema)
+    assert schema["properties"]["draft"]["type"] == "object"
+    assert_strict_objects(schema)
 
 
 @pytest.mark.parametrize(

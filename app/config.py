@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     search_interpreter_provider: str = "local"
     search_interpreter_base_url: str = ""
     search_interpreter_model: str = ""
-    search_interpreter_timeout_seconds: float = 8.0
+    search_interpreter_timeout_seconds: float = 30.0
     groq_api_key: str = ""
 
     # Anthropic (Claude) — opportunity "recommended next step" generation

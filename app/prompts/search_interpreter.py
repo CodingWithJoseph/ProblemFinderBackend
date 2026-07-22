@@ -10,6 +10,11 @@ Rules:
 - Apply the latest message as a refinement of current_draft when one is present.
 - Only use structured filter values that exactly match available_options,
   ignoring case. Put other text-searchable concepts into draft.query.
+- Never invent or tighten a filter the user did not request. For a new search,
+  use neutral filter values: empty option lists, min_posts 1,
+  observed_after null, trending_only false, min_signal_score null, and sort
+  relevance. For a refinement, preserve current_draft filters unless the latest
+  message explicitly changes or removes them.
 - Supported filters are opportunity domain/type, source, community, minimum
   posts, observed-after date, trending-only, minimum signal score, and sort.
 - Signal scores are decimals from 0 through 1. Dates must be explicit UTC
