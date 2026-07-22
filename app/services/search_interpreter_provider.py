@@ -43,6 +43,16 @@ class SearchInterpreterProviderConfig:
     api_key: str = field(repr=False)
 
 
+@dataclass(frozen=True)
+class SearchAgentToolCall:
+    """One normalized, provider-independent function call."""
+
+    call_id: str
+    name: str
+    arguments: dict[str, Any]
+    assistant_message: dict[str, Any]
+
+
 class SearchInterpreterProvider(Protocol):
     name: ProviderName
 
@@ -52,6 +62,14 @@ class SearchInterpreterProvider(Protocol):
         instructions: str,
         payload: dict[str, Any],
     ) -> SearchInterpretationModelOutput: ...
+
+    async def next_agent_tool_call(
+        self,
+        *,
+        instructions: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> SearchAgentToolCall: ...
 
 
 def strict_json_schema(model: type[BaseModel]) -> dict[str, Any]:
@@ -224,6 +242,91 @@ class _OpenAICompatibleChatProvider:
             return SearchInterpretationModelOutput.model_validate(parsed)
         except ValidationError:
             raise SearchInterpreterProviderFailure("schema_invalid") from None
+
+    async def next_agent_tool_call(
+        self,
+        *,
+        instructions: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> SearchAgentToolCall:
+        request = {
+            "model": self.config.model,
+            "messages": [
+                {"role": "system", "content": instructions},
+                *messages,
+            ],
+            "tools": tools,
+            "tool_choice": "required",
+            "parallel_tool_calls": False,
+            "temperature": 0,
+            "reasoning_effort": "low",
+            "stream": False,
+            **self._completion_limit(),
+        }
+
+        try:
+            response = await asyncio.wait_for(
+                self._client.chat.completions.create(**request),
+                timeout=self.config.timeout_seconds + 0.5,
+            )
+        except (asyncio.TimeoutError, APITimeoutError):
+            raise SearchInterpreterProviderFailure("timeout") from None
+        except (APIConnectionError, ConnectionError):
+            raise SearchInterpreterProviderFailure("connection") from None
+        except Exception:
+            raise SearchInterpreterProviderFailure("provider_error") from None
+
+        try:
+            message = response.choices[0].message
+            if getattr(message, "refusal", None):
+                raise SearchInterpreterProviderFailure("refusal")
+            tool_calls = message.tool_calls
+            if not isinstance(tool_calls, list) or len(tool_calls) != 1:
+                raise SearchInterpreterProviderFailure("invalid_response")
+
+            tool_call = tool_calls[0]
+            call_id = str(tool_call.id).strip()
+            name = str(tool_call.function.name).strip()
+            raw_arguments = tool_call.function.arguments
+            if not call_id or len(call_id) > 200 or not name or len(name) > 100:
+                raise SearchInterpreterProviderFailure("invalid_response")
+            if isinstance(raw_arguments, str):
+                arguments = json.loads(raw_arguments)
+                serialized_arguments = raw_arguments
+            elif isinstance(raw_arguments, dict):
+                arguments = raw_arguments
+                serialized_arguments = json.dumps(raw_arguments, ensure_ascii=False)
+            else:
+                raise SearchInterpreterProviderFailure("invalid_response")
+            if not isinstance(arguments, dict):
+                raise SearchInterpreterProviderFailure("invalid_response")
+        except SearchInterpreterProviderFailure:
+            raise
+        except json.JSONDecodeError:
+            raise SearchInterpreterProviderFailure("invalid_json") from None
+        except (AttributeError, IndexError, TypeError):
+            raise SearchInterpreterProviderFailure("invalid_response") from None
+
+        return SearchAgentToolCall(
+            call_id=call_id,
+            name=name,
+            arguments=arguments,
+            assistant_message={
+                "role": "assistant",
+                "content": message.content,
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": serialized_arguments,
+                        },
+                    }
+                ],
+            },
+        )
 
 
 class LocalSearchInterpreterProvider(_OpenAICompatibleChatProvider):

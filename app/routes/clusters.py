@@ -22,6 +22,7 @@ from app.db import get_db
 from app.auth import get_uid
 from app.config import PIPELINE_VERSION
 from app.models import Cluster, ClusterItem, ClusterSnapshot, ClusterSignal, Pipeline
+from app.search_agent_contract import SearchAgentResponse
 from app.search_contract import (
     ClusterSearchQuery,
     SearchFilterOptions,
@@ -30,6 +31,7 @@ from app.search_contract import (
     SEARCH_DEFAULT_LIMIT,
     SEARCH_MAX_LIMIT,
 )
+from app.services.search_agent import run_search_agent
 from app.services.search_interpreter import interpret_search, load_search_filter_options
 
 router = APIRouter(prefix="/clusters", tags=["clusters"])
@@ -557,6 +559,16 @@ async def interpret_cluster_search(
 ):
     """Translate one conversational turn into a draft without running search."""
     return await interpret_search(body, uid, db)
+
+
+@router.post("/search/agent", response_model=SearchAgentResponse)
+async def run_cluster_search_agent(
+    body: SearchInterpretRequest,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Run a bounded tool loop that always stops before database search execution."""
+    return await run_search_agent(body, uid, db)
 
 
 @router.get("/browse")

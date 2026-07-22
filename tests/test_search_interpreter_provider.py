@@ -45,6 +45,27 @@ class FakeClientFactory:
         return self.client
 
 
+class FakeToolCompletions:
+    def __init__(self, tool_calls):
+        self.tool_calls = tool_calls
+        self.kwargs = None
+
+    async def create(self, **kwargs):
+        self.kwargs = kwargs
+        message = SimpleNamespace(content=None, refusal=None, tool_calls=self.tool_calls)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+
+class FakeToolClientFactory:
+    def __init__(self, tool_calls):
+        self.client = SimpleNamespace(
+            chat=SimpleNamespace(completions=FakeToolCompletions(tool_calls))
+        )
+
+    def __call__(self, **kwargs):
+        return self.client
+
+
 def settings(**overrides):
     values = {
         "search_interpreter_provider": "local",
@@ -189,6 +210,94 @@ async def test_local_uses_llama_server_schema_constrained_shape():
     assert "$ref" not in str(schema)
     assert schema["properties"]["draft"]["type"] == "object"
     assert_strict_objects(schema)
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "expected_limit"),
+    [
+        ("local", "max_tokens"),
+        ("groq", "max_completion_tokens"),
+    ],
+)
+async def test_provider_normalizes_one_required_agent_tool_call(
+    provider_name,
+    expected_limit,
+):
+    config = resolve_search_interpreter_provider_config(settings(
+        search_interpreter_provider=provider_name,
+        search_interpreter_base_url=(
+            GROQ_BASE_URL if provider_name == "groq" else LOCAL_DEFAULT_BASE_URL
+        ),
+        groq_api_key="groq-secret" if provider_name == "groq" else "",
+    ))
+    raw_tool_call = SimpleNamespace(
+        id="call-1",
+        function=SimpleNamespace(
+            name="get_search_filter_options",
+            arguments="{}",
+        ),
+    )
+    factory = FakeToolClientFactory([raw_tool_call])
+    provider = build_search_interpreter_provider(config, client_factory=factory)
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "get_search_filter_options",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False,
+            },
+        },
+    }]
+
+    call = await provider.next_agent_tool_call(
+        instructions="Use tools only.",
+        messages=[{"role": "user", "content": "search request"}],
+        tools=tools,
+    )
+
+    assert call.call_id == "call-1"
+    assert call.name == "get_search_filter_options"
+    assert call.arguments == {}
+    request = factory.client.chat.completions.kwargs
+    assert request["tool_choice"] == "required"
+    assert request["parallel_tool_calls"] is False
+    assert request["temperature"] == 0
+    assert request["reasoning_effort"] == "low"
+    assert request["tools"] == tools
+    assert request[expected_limit] == 1_200
+    assert "response_format" not in request
+    assert "user" not in request
+    assert "store" not in request
+
+
+@pytest.mark.parametrize(
+    ("tool_calls", "category"),
+    [
+        ([], "invalid_response"),
+        ([SimpleNamespace(
+            id="call-1",
+            function=SimpleNamespace(name="prepare_search_draft", arguments="not-json"),
+        )], "invalid_json"),
+    ],
+)
+async def test_provider_rejects_invalid_agent_tool_responses(tool_calls, category):
+    config = resolve_search_interpreter_provider_config(settings())
+    provider = build_search_interpreter_provider(
+        config,
+        client_factory=FakeToolClientFactory(tool_calls),
+    )
+
+    with pytest.raises(SearchInterpreterProviderFailure) as failure:
+        await provider.next_agent_tool_call(
+            instructions="Use tools only.",
+            messages=[{"role": "user", "content": "search request"}],
+            tools=[],
+        )
+
+    assert failure.value.category == category
 
 
 @pytest.mark.parametrize(
