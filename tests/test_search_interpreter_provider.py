@@ -49,7 +49,7 @@ def settings(**overrides):
         "search_interpreter_provider": "local",
         "search_interpreter_base_url": "",
         "search_interpreter_model": "",
-        "search_interpreter_timeout_seconds": 8.0,
+        "search_interpreter_timeout_seconds": 30.0,
         "groq_api_key": "",
     }
     values.update(overrides)
@@ -132,7 +132,7 @@ async def test_groq_uses_strict_json_schema_chat_completions_shape():
     assert factory.kwargs == {
         "api_key": "groq-secret",
         "base_url": GROQ_BASE_URL,
-        "timeout": 8.0,
+        "timeout": 30.0,
         "max_retries": 0,
     }
     request = factory.client.chat.completions.kwargs

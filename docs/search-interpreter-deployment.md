@@ -15,8 +15,12 @@ alias of `gpt-oss-20b`:
 SEARCH_INTERPRETER_PROVIDER=local
 SEARCH_INTERPRETER_BASE_URL=http://127.0.0.1:8080/v1
 SEARCH_INTERPRETER_MODEL=gpt-oss-20b
-SEARCH_INTERPRETER_TIMEOUT_SECONDS=8
+SEARCH_INTERPRETER_TIMEOUT_SECONDS=30
 ```
+
+Schema-constrained generation can take roughly 20-30 seconds on the local
+20B model, so keep the local timeout at 30 seconds unless the deployed model is
+known to respond faster.
 
 When the backend runs in Docker and the model server runs on the Windows host,
 use `http://host.docker.internal:8080/v1` instead. Local mode does not require an
