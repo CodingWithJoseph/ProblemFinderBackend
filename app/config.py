@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     search_interpreter_timeout_seconds: float = 30.0
     groq_api_key: str = ""
 
+    # Optional, post-confirmation external evidence search. This stays off in
+    # every environment unless explicitly enabled.
+    search_web_enabled: bool = False
+    search_web_model: str = "groq/compound-mini"
+    search_web_timeout_seconds: float = 12.0
+
     # Anthropic (Claude) — opportunity "recommended next step" generation
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-4-6"

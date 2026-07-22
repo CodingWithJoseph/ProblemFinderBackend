@@ -27,9 +27,38 @@ are neither returned nor logged.
 
 - database query execution
 - automatic execution without confirmation
-- external or web search
 - AI-generated result summaries
 - arbitrary tools, SQL, columns, or operators
 
 Those capabilities can be added later as separately reviewed tools without
 weakening the current confirmation boundary.
+
+## Optional external evidence search
+
+`POST /clusters/search/web` is a separate, authenticated post-confirmation
+operation. It is not available to the draft-building agent, so interpreting a
+message cannot silently trigger an external request. The request must contain
+`confirmed: true` and the deployment must explicitly set
+`SEARCH_WEB_ENABLED=true`.
+
+The adapter permits only Groq Compound or Compound Mini and enables only the
+provider's `web_search` tool. It discards the provider's generated answer and
+returns at most five normalized citation records. Insecure URLs, local/private
+addresses, credential-bearing URLs, fragments, tracking parameters, and
+duplicates are removed.
+
+Recommended rollout:
+
+1. Keep `SEARCH_WEB_ENABLED=false` in local development and production.
+2. Enable it in staging with `SEARCH_WEB_MODEL=groq/compound-mini`.
+3. Verify Groq Zero Data Retention, source quality, latency, and spend.
+4. Enable it in production only after that review.
+
+Groq's built-in web search is not a HIPAA Covered Cloud Service. Do not send
+protected health information through this feature.
+
+References:
+
+- https://console.groq.com/docs/tool-use/built-in-tools/web-search
+- https://console.groq.com/docs/compound/built-in-tools
+- https://console.groq.com/docs/your-data
