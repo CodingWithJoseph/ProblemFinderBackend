@@ -31,6 +31,7 @@ from app.search_contract import (
     SEARCH_DEFAULT_LIMIT,
     SEARCH_MAX_LIMIT,
 )
+from app.search_normalization import meaningful_search_terms
 from app.services.search_agent import run_search_agent
 from app.services.search_interpreter import interpret_search, load_search_filter_options
 from app.services.web_search import WebSearchFailure, search_web_evidence
@@ -383,9 +384,11 @@ def _item_text_match(pattern: str):
 def _search_text_expressions(query: str):
     conditions = []
     score_parts = []
-    terms: list[tuple[str, tuple[int, int, int]]] = [(query, (8, 5, 3))]
-    seen = {query.casefold()}
-    for token in (token for token in query.split() if len(token) >= 2):
+    meaningful_terms = meaningful_search_terms(query)
+    normalized_phrase = " ".join(meaningful_terms) or query
+    terms: list[tuple[str, tuple[int, int, int]]] = [(normalized_phrase, (8, 5, 3))]
+    seen = {normalized_phrase.casefold()}
+    for token in meaningful_terms:
         key = token.casefold()
         if key in seen:
             continue

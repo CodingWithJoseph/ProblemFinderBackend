@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 
 from sqlalchemy import func, select
@@ -13,6 +14,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import PIPELINE_VERSION, get_settings
 from app.models import ClusterItem
 from app.prompts.search_interpreter import SEARCH_INTERPRETER_INSTRUCTIONS
+from app.search_normalization import (
+    DOMAIN_ALIASES,
+    REFINEMENT_CONTROL_WORDS,
+    SEARCH_STOP_WORDS,
+    mentions_any,
+    normalize_phrase,
+    query_has_content_beyond_aliases,
+    resolved_domain_aliases,
+    search_tokens,
+)
 from app.search_contract import (
     ClusterSearchQuery,
     SearchFilterOptions,
@@ -85,6 +96,91 @@ def _canonicalize_values(
     return normalized
 
 
+def _explicit_refinement_fields(
+    message: str,
+    options: SearchFilterOptions,
+) -> set[str]:
+    """Identify fields the latest message is allowed to change.
+
+    The provider still interprets the values, but the server applies them as a
+    patch over the current draft. This prevents an unrelated sort refinement
+    from silently changing the minimum-post threshold or another filter.
+    """
+    normalized = normalize_phrase(message)
+    tokens = set(search_tokens(message))
+    reset_all = bool(re.search(r"\b(clear|remove|reset)\s+(all\s+)?filters?\b", normalized))
+    if reset_all:
+        return {
+            "query",
+            "opportunity_domains",
+            "opportunity_types",
+            "sources",
+            "communities",
+            "min_posts",
+            "observed_after",
+            "trending_only",
+            "min_signal_score",
+            "sort",
+        }
+
+    fields: set[str] = set()
+    if "post" in tokens or "posts" in tokens:
+        fields.add("min_posts")
+    if tokens & {"sort", "rank", "order", "newest", "latest", "largest", "strongest", "best", "relevance"}:
+        fields.add("sort")
+    if "trending" in tokens:
+        fields.update({"trending_only", "sort"})
+    if "signal" in tokens and (
+        tokens & {"above", "at", "least", "minimum", "over", "threshold"}
+        or any(token.isdigit() for token in tokens)
+        or "%" in message
+    ):
+        fields.add("min_signal_score")
+    if tokens & {"after", "before", "date", "day", "days", "month", "months", "observed", "recent", "since", "week", "weeks"}:
+        fields.add("observed_after")
+
+    domain_aliases = [alias for alias in DOMAIN_ALIASES if mentions_any(message, [alias])]
+    if tokens & {"domain", "industry", "sector"} or domain_aliases or mentions_any(message, options.opportunity_domains):
+        fields.add("opportunity_domains")
+    if "type" in tokens or mentions_any(message, options.opportunity_types):
+        fields.add("opportunity_types")
+    if tokens & {"platform", "source"} or mentions_any(message, options.sources):
+        fields.add("sources")
+    if tokens & {"community", "forum", "subreddit"} or mentions_any(message, options.communities):
+        fields.add("communities")
+
+    ignored_tokens = set(SEARCH_STOP_WORDS) | set(REFINEMENT_CONTROL_WORDS)
+    ignored_tokens.update(token for value in (
+        *options.opportunity_domains,
+        *options.opportunity_types,
+        *options.sources,
+        *options.communities,
+        *domain_aliases,
+    ) for token in search_tokens(value))
+    remaining = [
+        token
+        for token in search_tokens(message)
+        if not token.isdigit() and token not in ignored_tokens
+    ]
+    if remaining or re.search(r"\b(clear|remove)\s+(the\s+)?(keyword|query|text search)\b", normalized):
+        fields.add("query")
+    return fields
+
+
+def _apply_refinement_patch(
+    candidate: ClusterSearchQuery,
+    current: ClusterSearchQuery,
+    message: str,
+    options: SearchFilterOptions,
+) -> ClusterSearchQuery:
+    values = current.model_dump()
+    for field in _explicit_refinement_fields(message, options):
+        values[field] = getattr(candidate, field)
+    values["limit"] = current.limit
+    values["offset"] = 0
+    return ClusterSearchQuery.model_validate(values)
+
+
 def _validated_model_output(
     output: SearchInterpretationModelOutput,
     request: SearchInterpretRequest,
@@ -111,6 +207,31 @@ def _validated_model_output(
         "community",
         server_assumptions,
     )
+
+    aliases = resolved_domain_aliases(request.message, options.opportunity_domains)
+    for alias, canonical in aliases:
+        if canonical not in draft.opportunity_domains:
+            draft.opportunity_domains.append(canonical)
+            server_assumptions.append(
+                f'Mapped "{alias}" to database domain "{canonical}".'
+            )
+
+    if request.current_draft is not None:
+        draft = _apply_refinement_patch(
+            draft,
+            request.current_draft,
+            request.message,
+            options,
+        )
+    elif draft.query and aliases and not query_has_content_beyond_aliases(
+        draft.query,
+        [alias for alias, _ in aliases],
+    ):
+        # A request like "show me problems in healthcare" is completely
+        # represented by the canonical domain filter. Keeping the conversational
+        # filler as keyword text would broaden the SQL match unnecessarily.
+        draft.query = None
+
     draft.limit = request.current_draft.limit if request.current_draft else 20
     draft.offset = 0
     if draft.query is None and draft.sort == "relevance":

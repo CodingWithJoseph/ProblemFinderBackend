@@ -5,7 +5,12 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.search_contract import ClusterSearchQuery, SearchInterpretationModelOutput
+from app.search_contract import (
+    ClusterSearchQuery,
+    SearchFilterOptions,
+    SearchInterpretationModelOutput,
+    SearchInterpretRequest,
+)
 from app.services import search_interpreter
 from app.services.search_interpreter_provider import SearchInterpreterProviderFailure
 from conftest import FakeResult
@@ -41,6 +46,83 @@ def stub_filter_options(fake_db):
         FakeResult(rows=[("hackernews",), ("reddit",)]),
         FakeResult(rows=[("r/freelance",), ("r/startups",)]),
     ])
+
+
+def test_validation_maps_healthcare_alias_to_live_domain_and_removes_filler_query():
+    output = SearchInterpretationModelOutput(
+        draft=ClusterSearchQuery(query="problems in healthcare"),
+        assumptions=[],
+        unsupported=[],
+        clarification_question=None,
+    )
+
+    validated = search_interpreter._validated_model_output(
+        output,
+        SearchInterpretRequest(message="Show me problems in healthcare"),
+        SearchFilterOptions(opportunity_domains=["Healthcare and Social Care"]),
+    )
+
+    assert validated.draft.query is None
+    assert validated.draft.opportunity_domains == ["Healthcare and Social Care"]
+    assert validated.assumptions == [
+        'Mapped "healthcare" to database domain "Healthcare and Social Care".'
+    ]
+
+
+def test_validation_applies_refinement_as_patch_and_preserves_unmentioned_filters():
+    current = ClusterSearchQuery(
+        query="healthcare staffing",
+        sources=["reddit"],
+        min_posts=10,
+        sort="relevance",
+    )
+    output = SearchInterpretationModelOutput(
+        draft=ClusterSearchQuery(
+            query="healthcare staffing",
+            sources=["reddit"],
+            min_posts=20,
+            sort="signal_score",
+        ),
+        assumptions=[],
+        unsupported=[],
+        clarification_question=None,
+    )
+
+    validated = search_interpreter._validated_model_output(
+        output,
+        SearchInterpretRequest(
+            message="Sort them by strongest signal",
+            current_draft=current,
+        ),
+        SearchFilterOptions(sources=["reddit"]),
+    )
+
+    assert validated.draft.query == "healthcare staffing"
+    assert validated.draft.sources == ["reddit"]
+    assert validated.draft.min_posts == 10
+    assert validated.draft.sort == "signal_score"
+
+
+def test_validation_allows_explicit_minimum_post_refinement():
+    current = ClusterSearchQuery(query="healthcare", min_posts=10)
+    output = SearchInterpretationModelOutput(
+        draft=ClusterSearchQuery(query="least 25 posts", min_posts=25),
+        assumptions=[],
+        unsupported=[],
+        clarification_question=None,
+    )
+
+    validated = search_interpreter._validated_model_output(
+        output,
+        SearchInterpretRequest(
+            message="Require at least 25 posts",
+            current_draft=current,
+        ),
+        SearchFilterOptions(),
+    )
+
+    assert validated.draft.min_posts == 25
+    assert validated.draft.query == "healthcare"
 
 
 async def test_interpret_search_returns_canonical_confirmable_draft_without_running_search(

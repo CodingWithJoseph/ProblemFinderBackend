@@ -66,6 +66,29 @@ class FakeToolClientFactory:
         return self.client
 
 
+class SequencedToolCompletions:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = 0
+
+    async def create(self, **kwargs):
+        self.calls += 1
+        tool_calls = self.responses.pop(0)
+        message = SimpleNamespace(content=None, refusal=None, tool_calls=tool_calls)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+
+class SequencedToolClientFactory:
+    def __init__(self, responses):
+        self.completions = SequencedToolCompletions(responses)
+        self.client = SimpleNamespace(
+            chat=SimpleNamespace(completions=self.completions)
+        )
+
+    def __call__(self, **kwargs):
+        return self.client
+
+
 def settings(**overrides):
     values = {
         "search_interpreter_provider": "local",
@@ -196,7 +219,7 @@ async def test_local_uses_llama_server_schema_constrained_shape():
     request = factory.client.chat.completions.kwargs
     assert request["model"] == "my-gpt-oss-alias"
     assert request["stream"] is False
-    assert request["max_tokens"] == 1_200
+    assert request["max_tokens"] == 2_400
     assert "max_completion_tokens" not in request
     assert "tools" not in request
     assert "user" not in request
@@ -267,7 +290,7 @@ async def test_provider_normalizes_one_required_agent_tool_call(
     assert request["temperature"] == 0
     assert request["reasoning_effort"] == "low"
     assert request["tools"] == tools
-    assert request[expected_limit] == 1_200
+    assert request[expected_limit] == (2_400 if provider_name == "local" else 1_200)
     assert "response_format" not in request
     assert "user" not in request
     assert "store" not in request
@@ -298,6 +321,30 @@ async def test_provider_rejects_invalid_agent_tool_responses(tool_calls, categor
         )
 
     assert failure.value.category == category
+
+
+async def test_provider_retries_one_malformed_agent_response():
+    valid_call = SimpleNamespace(
+        id="call-2",
+        function=SimpleNamespace(
+            name="get_search_filter_options",
+            arguments="{}",
+        ),
+    )
+    factory = SequencedToolClientFactory([[], [valid_call]])
+    provider = build_search_interpreter_provider(
+        resolve_search_interpreter_provider_config(settings()),
+        client_factory=factory,
+    )
+
+    call = await provider.next_agent_tool_call(
+        instructions="Use tools only.",
+        messages=[{"role": "user", "content": "search request"}],
+        tools=[],
+    )
+
+    assert call.call_id == "call-2"
+    assert factory.completions.calls == 2
 
 
 @pytest.mark.parametrize(

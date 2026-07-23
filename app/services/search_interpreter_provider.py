@@ -22,6 +22,8 @@ GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 GROQ_DEFAULT_MODEL = "openai/gpt-oss-20b"
 SCHEMA_NAME = "search_interpretation"
 MAX_COMPLETION_TOKENS = 1_200
+LOCAL_MAX_COMPLETION_TOKENS = 2_400
+MALFORMED_RESPONSE_ATTEMPTS = 2
 
 ProviderName = Literal["local", "groq"]
 
@@ -265,68 +267,76 @@ class _OpenAICompatibleChatProvider:
             **self._completion_limit(),
         }
 
-        try:
-            response = await asyncio.wait_for(
-                self._client.chat.completions.create(**request),
-                timeout=self.config.timeout_seconds + 0.5,
-            )
-        except (asyncio.TimeoutError, APITimeoutError):
-            raise SearchInterpreterProviderFailure("timeout") from None
-        except (APIConnectionError, ConnectionError):
-            raise SearchInterpreterProviderFailure("connection") from None
-        except Exception:
-            raise SearchInterpreterProviderFailure("provider_error") from None
+        for attempt in range(MALFORMED_RESPONSE_ATTEMPTS):
+            try:
+                response = await asyncio.wait_for(
+                    self._client.chat.completions.create(**request),
+                    timeout=self.config.timeout_seconds + 0.5,
+                )
+            except (asyncio.TimeoutError, APITimeoutError):
+                raise SearchInterpreterProviderFailure("timeout") from None
+            except (APIConnectionError, ConnectionError):
+                raise SearchInterpreterProviderFailure("connection") from None
+            except Exception:
+                raise SearchInterpreterProviderFailure("provider_error") from None
 
-        try:
-            message = response.choices[0].message
-            if getattr(message, "refusal", None):
-                raise SearchInterpreterProviderFailure("refusal")
-            tool_calls = message.tool_calls
-            if not isinstance(tool_calls, list) or len(tool_calls) != 1:
-                raise SearchInterpreterProviderFailure("invalid_response")
+            try:
+                message = response.choices[0].message
+                if getattr(message, "refusal", None):
+                    raise SearchInterpreterProviderFailure("refusal")
+                tool_calls = message.tool_calls
+                if not isinstance(tool_calls, list) or len(tool_calls) != 1:
+                    raise SearchInterpreterProviderFailure("invalid_response")
 
-            tool_call = tool_calls[0]
-            call_id = str(tool_call.id).strip()
-            name = str(tool_call.function.name).strip()
-            raw_arguments = tool_call.function.arguments
-            if not call_id or len(call_id) > 200 or not name or len(name) > 100:
-                raise SearchInterpreterProviderFailure("invalid_response")
-            if isinstance(raw_arguments, str):
-                arguments = json.loads(raw_arguments)
-                serialized_arguments = raw_arguments
-            elif isinstance(raw_arguments, dict):
-                arguments = raw_arguments
-                serialized_arguments = json.dumps(raw_arguments, ensure_ascii=False)
+                tool_call = tool_calls[0]
+                call_id = str(tool_call.id).strip()
+                name = str(tool_call.function.name).strip()
+                raw_arguments = tool_call.function.arguments
+                if not call_id or len(call_id) > 200 or not name or len(name) > 100:
+                    raise SearchInterpreterProviderFailure("invalid_response")
+                if isinstance(raw_arguments, str):
+                    arguments = json.loads(raw_arguments)
+                    serialized_arguments = raw_arguments
+                elif isinstance(raw_arguments, dict):
+                    arguments = raw_arguments
+                    serialized_arguments = json.dumps(raw_arguments, ensure_ascii=False)
+                else:
+                    raise SearchInterpreterProviderFailure("invalid_response")
+                if not isinstance(arguments, dict):
+                    raise SearchInterpreterProviderFailure("invalid_response")
+            except json.JSONDecodeError:
+                failure = SearchInterpreterProviderFailure("invalid_json")
+            except (AttributeError, IndexError, TypeError):
+                failure = SearchInterpreterProviderFailure("invalid_response")
+            except SearchInterpreterProviderFailure as exc:
+                failure = exc
             else:
-                raise SearchInterpreterProviderFailure("invalid_response")
-            if not isinstance(arguments, dict):
-                raise SearchInterpreterProviderFailure("invalid_response")
-        except SearchInterpreterProviderFailure:
-            raise
-        except json.JSONDecodeError:
-            raise SearchInterpreterProviderFailure("invalid_json") from None
-        except (AttributeError, IndexError, TypeError):
-            raise SearchInterpreterProviderFailure("invalid_response") from None
+                return SearchAgentToolCall(
+                    call_id=call_id,
+                    name=name,
+                    arguments=arguments,
+                    assistant_message={
+                        "role": "assistant",
+                        "content": message.content,
+                        "tool_calls": [
+                            {
+                                "id": call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": name,
+                                    "arguments": serialized_arguments,
+                                },
+                            }
+                        ],
+                    },
+                )
 
-        return SearchAgentToolCall(
-            call_id=call_id,
-            name=name,
-            arguments=arguments,
-            assistant_message={
-                "role": "assistant",
-                "content": message.content,
-                "tool_calls": [
-                    {
-                        "id": call_id,
-                        "type": "function",
-                        "function": {
-                            "name": name,
-                            "arguments": serialized_arguments,
-                        },
-                    }
-                ],
-            },
-        )
+            if failure.category not in {"invalid_json", "invalid_response"}:
+                raise failure
+            if attempt + 1 >= MALFORMED_RESPONSE_ATTEMPTS:
+                raise failure
+
+        raise SearchInterpreterProviderFailure("invalid_response")
 
 
 class LocalSearchInterpreterProvider(_OpenAICompatibleChatProvider):
@@ -345,7 +355,7 @@ class LocalSearchInterpreterProvider(_OpenAICompatibleChatProvider):
         }
 
     def _completion_limit(self) -> dict[str, int]:
-        return {"max_tokens": MAX_COMPLETION_TOKENS}
+        return {"max_tokens": LOCAL_MAX_COMPLETION_TOKENS}
 
 
 class GroqSearchInterpreterProvider(_OpenAICompatibleChatProvider):

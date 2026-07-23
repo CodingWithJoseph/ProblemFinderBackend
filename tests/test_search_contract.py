@@ -44,3 +44,19 @@ def test_search_builder_only_compiles_allowlisted_filters():
     assert "cluster_signals" in sql
     assert "last_observed" in sql
     assert "clusters.trending IS true" in sql
+
+
+def test_search_builder_drops_conversational_stop_words_from_text_matching():
+    base, order_clauses = _build_cluster_search(
+        ClusterSearchQuery(query="show me problems in healthcare")
+    )
+    compiled = base.order_by(*order_clauses).compile(dialect=postgresql.dialect())
+    patterns = {
+        value.casefold()
+        for value in compiled.params.values()
+        if isinstance(value, str) and value.startswith("%")
+    }
+
+    assert "%healthcare%" in patterns
+    assert "%problems%" not in patterns
+    assert "%in%" not in patterns
