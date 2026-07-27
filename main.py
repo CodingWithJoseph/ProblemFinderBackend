@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -8,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.routes.subscriptions import router as subscriptions_router
 from app.routes.clusters import router as clusters_router
 from app.routes.search_sessions import router as search_sessions_router
+from app.routes.signal_workspace import router as signal_workspace_router
 from app.routes.pipeline import router as pipeline_router
 from app.routes.monitor_ingest import public_router as monitor_public_router
 from app.routes.monitor import router as monitor_router
@@ -90,9 +92,25 @@ def _start_background_scheduler():
 @asynccontextmanager
 async def lifespan(app: "FastAPI"):
     scheduler = _start_background_scheduler()
+    signal_stop = asyncio.Event()
+    signal_worker = None
+    if settings.signal_analysis_worker_enabled:
+        from app.services.signal_analysis_worker import run_signal_worker
+
+        signal_worker = asyncio.create_task(
+            run_signal_worker(signal_stop, settings=settings),
+            name="signal-analysis-worker",
+        )
     try:
         yield
     finally:
+        signal_stop.set()
+        if signal_worker:
+            signal_worker.cancel()
+            try:
+                await signal_worker
+            except asyncio.CancelledError:
+                pass
         if scheduler:
             scheduler.shutdown(wait=False)
 
@@ -130,6 +148,7 @@ async def track_user_activity(request: Request, call_next):
 app.include_router(subscriptions_router)
 app.include_router(clusters_router)
 app.include_router(search_sessions_router)
+app.include_router(signal_workspace_router)
 app.include_router(pipeline_router)
 # Goals routes share the /portfolio prefix but must be registered before the
 # portfolio router so the static /portfolio/goals and /portfolio/getting-started

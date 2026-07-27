@@ -55,6 +55,18 @@ class Settings(BaseSettings):
     search_web_model: str = "groq/compound-mini"
     search_web_timeout_seconds: float = 12.0
 
+    # Signal workspace analysis. Blank values inherit the conversational search
+    # provider settings so local llama.cpp and Groq share configuration by
+    # default.
+    signal_analysis_provider: str = ""
+    signal_analysis_base_url: str = ""
+    signal_analysis_model: str = ""
+    signal_analysis_timeout_seconds: float = 90.0
+    signal_analysis_max_evidence: int = 30
+    signal_analysis_min_evidence: int = 3
+    signal_analysis_worker_enabled: bool = True
+    signal_analysis_poll_seconds: float = 2.0
+
     # Anthropic (Claude) — opportunity "recommended next step" generation
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-4-6"
