@@ -7,7 +7,7 @@ output or dangling citations never replaces the last usable analysis.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
@@ -183,6 +183,62 @@ class SignalAnalysisModelOutput(SignalContractModel):
     alternatives: list[SignalAlternative]
     assumptions: list[SignalAssumption]
     recommended_focus: SignalRecommendedFocus | None
+
+
+class SignalCitation(SignalContractModel):
+    evidence_id: str = Field(min_length=1)
+    label: str = Field(min_length=1, max_length=160)
+
+
+class SignalProposal(SignalContractModel):
+    id: str = Field(min_length=1)
+    kind: Literal[
+        "revise_thesis",
+        "create_problem_unit",
+        "update_problem_unit",
+        "merge_problem_units",
+        "create_audience",
+        "create_assumption",
+        "link_evidence",
+        "validation_handoff",
+    ]
+    title: str = Field(min_length=1, max_length=160)
+    summary: str = Field(min_length=1)
+    evidence_ids: list[str] = Field(default_factory=list)
+    status: Literal["pending", "accepted", "rejected"] = "pending"
+    target_kind: str | None = None
+    target_id: str | None = None
+    changes: dict[str, Any] = Field(default_factory=dict)
+
+
+class SignalConversationModelOutput(SignalContractModel):
+    text: str = Field(min_length=1)
+    citations: list[SignalCitation] = Field(default_factory=list)
+    proposal: SignalProposal | None = None
+    insufficient_evidence: bool = False
+
+
+class SignalConversationSummary(SignalContractModel):
+    id: str
+    title: str
+    updated_at: str
+    archived: bool
+
+
+class SignalConversationTurnResponse(SignalContractModel):
+    id: str
+    role: Literal["user", "assistant"]
+    text: str
+    created_at: str
+    citations: list[SignalCitation] = Field(default_factory=list)
+    proposal: SignalProposal | None = None
+    insufficient_evidence: bool = False
+
+
+class SignalConversationResponse(SignalContractModel):
+    id: str
+    title: str
+    turns: list[SignalConversationTurnResponse] = Field(default_factory=list)
 
 
 class SignalCaseDocument(SignalContractModel):

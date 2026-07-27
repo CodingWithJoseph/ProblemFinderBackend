@@ -22,12 +22,27 @@ from app.models import (
     SignalAnalysisCase,
     SignalAnalysisJob,
     SignalAnalysisVersion,
+    SignalCaseOverride,
 )
 from app.signal_contract import SignalAnalysisProgress, SignalCaseDocument
 
 
 SignalJobKind = Literal["initial", "refresh"]
 ACTIVE_JOB_STATUSES = ("queued", "running")
+SIGNAL_OVERRIDE_FIELDS = {
+    "thesis": {
+        "statement", "audience", "context", "coreProblem", "consequence",
+        "workaround", "confirmed",
+    },
+    "claim": {"text", "confirmed", "rejected"},
+    "problem_unit": {"title", "description", "pinned", "rejected"},
+    "audience": {
+        "name", "description", "language", "communities", "reachChannels", "unknowns",
+    },
+    "assumption": {"question", "whyItMatters", "resolutionEvidence", "resolved"},
+    "evidence": {"pinned", "userNote"},
+    "recommended_focus": {"title", "rationale", "suggestedValidationStep"},
+}
 
 
 def utc_now() -> datetime:
@@ -253,6 +268,120 @@ async def queue_signal_refresh(
     return job
 
 
+async def load_signal_overrides(
+    db: AsyncSession,
+    case_id: str,
+    uid: str,
+) -> list[SignalCaseOverride]:
+    return list((await db.execute(
+        select(SignalCaseOverride)
+        .where(
+            SignalCaseOverride.case_id == case_id,
+            SignalCaseOverride.user_id == uid,
+        )
+        .order_by(SignalCaseOverride.created_at)
+    )).scalars().all())
+
+
+async def upsert_signal_override(
+    db: AsyncSession,
+    case: SignalAnalysisCase,
+    uid: str,
+    object_kind: str,
+    object_id: str,
+    patch: dict,
+) -> SignalCaseOverride:
+    validate_signal_override_patch(object_kind, patch)
+    existing = (await db.execute(
+        select(SignalCaseOverride).where(
+            SignalCaseOverride.case_id == case.id,
+            SignalCaseOverride.user_id == uid,
+            SignalCaseOverride.object_kind == object_kind,
+            SignalCaseOverride.object_id == object_id,
+        )
+    )).scalar_one_or_none()
+    now = utc_now()
+    if existing is None:
+        existing = SignalCaseOverride(
+            id=str(uuid.uuid4()),
+            case_id=case.id,
+            user_id=uid,
+            object_kind=object_kind,
+            object_id=object_id,
+            patch=dict(patch),
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(existing)
+    else:
+        existing.patch = {**(existing.patch or {}), **patch}
+        existing.updated_at = now
+    await db.commit()
+    return existing
+
+
+def validate_signal_override_patch(object_kind: str, patch: dict) -> None:
+    allowed = SIGNAL_OVERRIDE_FIELDS.get(object_kind)
+    if allowed is None:
+        raise ValueError("Unsupported Signal object kind")
+    if not patch:
+        raise ValueError("Override patch must not be empty")
+    unsupported = sorted(set(patch) - allowed)
+    if unsupported:
+        raise ValueError(f"Unsupported override fields: {', '.join(unsupported)}")
+
+
+def apply_signal_overrides(
+    document: SignalCaseDocument,
+    overrides: Iterable[SignalCaseOverride],
+) -> SignalCaseDocument:
+    payload = document.model_dump(mode="json", by_alias=True)
+    collections = {
+        "claim": "claims",
+        "problem_unit": "problemUnits",
+        "audience": "audiences",
+        "assumption": "assumptions",
+        "evidence": "evidence",
+    }
+    for override in overrides:
+        validate_signal_override_patch(override.object_kind, override.patch or {})
+        target = None
+        if override.object_kind == "thesis":
+            target = payload.get("thesis")
+        elif override.object_kind == "recommended_focus":
+            target = payload.get("recommendedFocus")
+        else:
+            collection_name = collections.get(override.object_kind)
+            rows = payload.get(collection_name, []) if collection_name else []
+            target = next(
+                (row for row in rows if str(row.get("id")) == str(override.object_id)),
+                None,
+            )
+        # A regeneration may remove an object. Keep its override stored for
+        # auditability, but only apply it while the target still exists.
+        if target is not None:
+            target.update(override.patch or {})
+    return SignalCaseDocument.model_validate(payload)
+
+
+def signal_object_exists(
+    document: SignalCaseDocument,
+    object_kind: str,
+    object_id: str,
+) -> bool:
+    if object_kind == "thesis":
+        return document.thesis is not None and object_id == "thesis"
+    if object_kind == "recommended_focus":
+        return document.recommended_focus is not None and object_id == "recommended-focus"
+    collections = {
+        "claim": document.claims,
+        "problem_unit": document.problem_units,
+        "audience": document.audiences,
+        "assumption": document.assumptions,
+        "evidence": document.evidence,
+    }
+    return any(str(row.id) == object_id for row in collections.get(object_kind, []))
+
+
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
-

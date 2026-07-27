@@ -10,7 +10,7 @@ from typing import Any, Literal, Protocol
 from urllib.parse import urlparse
 
 from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from app.config import Settings
 from app.services.search_interpreter_provider import (
@@ -21,7 +21,7 @@ from app.services.search_interpreter_provider import (
     inline_local_schema_refs,
     strict_json_schema,
 )
-from app.signal_contract import SignalAnalysisModelOutput
+from app.signal_contract import SignalAnalysisModelOutput, SignalConversationModelOutput
 
 
 ProviderName = Literal["local", "groq"]
@@ -55,6 +55,13 @@ class SignalAnalysisProvider(Protocol):
         instructions: str,
         payload: dict[str, Any],
     ) -> SignalAnalysisModelOutput: ...
+
+    async def ask(
+        self,
+        *,
+        instructions: str,
+        payload: dict[str, Any],
+    ) -> SignalConversationModelOutput: ...
 
 
 def resolve_signal_analysis_provider_config(settings: Settings) -> SignalAnalysisProviderConfig:
@@ -113,13 +120,46 @@ class OpenAICompatibleSignalAnalysisProvider:
         instructions: str,
         payload: dict[str, Any],
     ) -> SignalAnalysisModelOutput:
-        schema = strict_json_schema(SignalAnalysisModelOutput)
+        result = await self._generate_structured(
+            output_model=SignalAnalysisModelOutput,
+            schema_name=SIGNAL_SCHEMA_NAME,
+            instructions=instructions,
+            payload=payload,
+            max_tokens=SIGNAL_MAX_COMPLETION_TOKENS,
+        )
+        return SignalAnalysisModelOutput.model_validate(result)
+
+    async def ask(
+        self,
+        *,
+        instructions: str,
+        payload: dict[str, Any],
+    ) -> SignalConversationModelOutput:
+        result = await self._generate_structured(
+            output_model=SignalConversationModelOutput,
+            schema_name="signal_conversation",
+            instructions=instructions,
+            payload=payload,
+            max_tokens=2_500,
+        )
+        return SignalConversationModelOutput.model_validate(result)
+
+    async def _generate_structured(
+        self,
+        *,
+        output_model: type[BaseModel],
+        schema_name: str,
+        instructions: str,
+        payload: dict[str, Any],
+        max_tokens: int,
+    ) -> BaseModel:
+        schema = strict_json_schema(output_model)
         if self.name == "local":
             schema = inline_local_schema_refs(schema)
         response_format = {
             "type": "json_schema",
             "json_schema": {
-                "name": SIGNAL_SCHEMA_NAME,
+                "name": schema_name,
                 "strict": True,
                 "schema": schema,
             },
@@ -141,7 +181,7 @@ class OpenAICompatibleSignalAnalysisProvider:
                     "max_tokens"
                     if self.name == "local"
                     else "max_completion_tokens"
-                ): SIGNAL_MAX_COMPLETION_TOKENS,
+                ): max_tokens,
             }
             content = ""
             validation_summary: list[dict[str, str]] = []
@@ -165,7 +205,7 @@ class OpenAICompatibleSignalAnalysisProvider:
                 if not isinstance(content, str) or not content.strip():
                     raise SignalAnalysisProviderFailure("empty_response")
                 parsed = json.loads(content)
-                return SignalAnalysisModelOutput.model_validate(parsed)
+                return output_model.model_validate(parsed)
             except SignalAnalysisProviderFailure:
                 raise
             except json.JSONDecodeError:
@@ -234,4 +274,3 @@ def _valid_base_url(value: str) -> str:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise SignalAnalysisProviderFailure("invalid_configuration")
     return normalized
-

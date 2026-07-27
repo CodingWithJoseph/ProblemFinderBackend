@@ -114,6 +114,33 @@ async def test_local_provider_uses_strict_schema_and_repairs_once():
     assert request["response_format"]["json_schema"]["schema"]["additionalProperties"] is False
 
 
+async def test_conversation_uses_smaller_structured_completion():
+    factory = FakeClientFactory([
+        json.dumps({
+            "text": "The evidence is limited.",
+            "citations": [],
+            "proposal": None,
+            "insufficientEvidence": True,
+        }),
+    ])
+    provider = build_signal_analysis_provider(
+        resolve_signal_analysis_provider_config(settings()),
+        client_factory=factory,
+    )
+
+    result = await provider.ask(
+        instructions="Answer from evidence",
+        payload={"case": {}},
+    )
+
+    assert result.insufficient_evidence is True
+    assert factory.completions.requests[0]["max_tokens"] == 2_500
+    assert (
+        factory.completions.requests[0]["response_format"]["json_schema"]["name"]
+        == "signal_conversation"
+    )
+
+
 def test_groq_provider_defaults_to_official_endpoint():
     config = resolve_signal_analysis_provider_config(settings(
         signal_analysis_provider="groq",
@@ -124,4 +151,3 @@ def test_groq_provider_defaults_to_official_endpoint():
 
     assert config.base_url == GROQ_BASE_URL
     assert config.api_key == "secret"
-
