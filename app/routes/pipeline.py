@@ -30,6 +30,7 @@ from app.routes.clusters import (
     distinct_solution_angles,
     representative_problem_statement,
 )
+from app.services.signal_cases import persist_new_signal_case
 
 logger = logging.getLogger(__name__)
 
@@ -792,6 +793,7 @@ async def watch_cluster(
     await db.refresh(card)
     db.add(_stage_event(card.id, card.stage, card.created_at))
     await db.commit()
+    await persist_new_signal_case(db, card, uid)
     await _seed_breakdown_from_cluster(card, cluster_int_id, uid, db)
     return {"is_watched": True, "pipeline_id": str(card.id)}
 
@@ -1083,6 +1085,7 @@ async def create_pipeline(
     await db.refresh(card)
     db.add(_stage_event(card.id, card.stage, card.created_at))
     await db.commit()
+    await persist_new_signal_case(db, card, uid)
 
     background_tasks.add_task(_compute_and_write_metrics, str(card.id), list(body.post_ids))
 

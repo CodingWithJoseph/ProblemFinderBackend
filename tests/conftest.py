@@ -77,6 +77,7 @@ from app.models import (  # noqa: E402
 )
 from app.routes.clusters import router as clusters_router  # noqa: E402
 from app.routes.search_sessions import router as search_sessions_router  # noqa: E402
+from app.routes.signal_workspace import router as signal_workspace_router  # noqa: E402
 from app.routes.problems import router as problems_router  # noqa: E402
 from app.routes.pipeline import router as pipeline_router  # noqa: E402
 from app.routes.monitor_ingest import public_router as monitor_public_router  # noqa: E402
@@ -597,6 +598,7 @@ def app(fake_db):
     application = FastAPI()
     application.include_router(clusters_router)
     application.include_router(search_sessions_router)
+    application.include_router(signal_workspace_router)
     application.include_router(problems_router)
     application.include_router(pipeline_router)
     # Mirror production ordering: goals routes share the /portfolio prefix and
