@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -91,9 +92,25 @@ def _start_background_scheduler():
 @asynccontextmanager
 async def lifespan(app: "FastAPI"):
     scheduler = _start_background_scheduler()
+    signal_stop = asyncio.Event()
+    signal_worker = None
+    if settings.signal_analysis_worker_enabled:
+        from app.services.signal_analysis_worker import run_signal_worker
+
+        signal_worker = asyncio.create_task(
+            run_signal_worker(signal_stop, settings=settings),
+            name="signal-analysis-worker",
+        )
     try:
         yield
     finally:
+        signal_stop.set()
+        if signal_worker:
+            signal_worker.cancel()
+            try:
+                await signal_worker
+            except asyncio.CancelledError:
+                pass
         if scheduler:
             scheduler.shutdown(wait=False)
 

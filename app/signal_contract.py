@@ -169,6 +169,22 @@ class SignalRecommendedFocus(SignalContractModel):
     suggested_validation_step: str = Field(min_length=1)
 
 
+class SignalAnalysisModelOutput(SignalContractModel):
+    """Schema-constrained content returned by the analysis model.
+
+    Project context, metrics and evidence text are intentionally excluded. They
+    come from authoritative database rows when the final case is assembled.
+    """
+
+    thesis: SignalThesis | None
+    claims: list[SignalClaim]
+    problem_units: list[SignalProblemUnit]
+    audiences: list[SignalAudience]
+    alternatives: list[SignalAlternative]
+    assumptions: list[SignalAssumption]
+    recommended_focus: SignalRecommendedFocus | None
+
+
 class SignalCaseDocument(SignalContractModel):
     """The complete document served to the three Signal workspace screens."""
 

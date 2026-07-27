@@ -41,6 +41,7 @@ os.environ.setdefault("STRIPE_ELITE_MONTHLY_PRICE_ID", "price_elite_m")
 os.environ.setdefault("STRIPE_ELITE_YEARLY_PRICE_ID", "price_elite_y")
 os.environ.setdefault("OPENAI_API_KEY", "sk-test")
 os.environ.setdefault("ALLOWED_ORIGINS", "http://localhost:3000")
+os.environ.setdefault("SIGNAL_ANALYSIS_WORKER_ENABLED", "false")
 
 sys.modules.setdefault("firebase_admin", MagicMock())
 stripe_stub = MagicMock()
