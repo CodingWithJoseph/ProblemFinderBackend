@@ -32,7 +32,7 @@ def test_pending_empty_when_all_applied():
 
 
 def test_migration_number_is_leading_id():
-    assert _mig("0045_project_journey_goals").number == "0045"
+    assert _mig("0047_signal_workspace").number == "0047"
 
 
 def test_migrations_up_to_baseline_is_inclusive():

@@ -1,6 +1,6 @@
 # Test-only dependencies for the backend API suite.
 #
-# firebase-admin and stripe are stubbed in conftest.py (no real credentials
+# firebase-admin is stubbed in conftest.py (no real credentials
 # needed), so both are omitted to keep CI light. asyncpg is required only so the
 # async engine can be constructed (no real connection is ever opened — get_db is
 # overridden).
