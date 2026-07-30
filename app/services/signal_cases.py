@@ -56,15 +56,12 @@ def signal_source_fingerprint(items: Iterable[ClusterItem]) -> str:
     for item in items:
         normalized.append({
             "id": str(item.id),
-            "content_hash": item.content_hash,
             "title": item.title,
             "body": item.body,
             "problem_statement": item.problem_statement,
-            "solution_angle": item.solution_angle,
             "score": item.score,
             "num_comments": item.num_comments,
             "posted_at": _iso(item.posted_at),
-            "scraped_at": _iso(item.scraped_at),
         })
     normalized.sort(key=lambda row: row["id"])
     payload = json.dumps(
@@ -78,10 +75,9 @@ def signal_source_fingerprint(items: Iterable[ClusterItem]) -> str:
 
 def signal_source_updated_at(items: Iterable[ClusterItem]) -> datetime | None:
     timestamps = [
-        timestamp
+        item.posted_at
         for item in items
-        for timestamp in (item.scraped_at, item.posted_at)
-        if timestamp is not None
+        if item.posted_at is not None
     ]
     return max(timestamps) if timestamps else None
 
@@ -116,8 +112,6 @@ def build_empty_case_document(
             "source_updated_at": _iso(case.source_updated_at),
         },
         metrics={
-            "signal_strength": None,
-            "momentum_30d": None,
             "freshness_days": None,
             "evidence_count": len(card.post_ids or []),
             "author_count": None,

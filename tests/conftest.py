@@ -15,7 +15,7 @@ Strategy
 import os
 import sys
 import uuid
-from datetime import datetime, date, timezone
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -46,9 +46,7 @@ from app.db import get_db  # noqa: E402
 from app.auth import get_uid  # noqa: E402
 from app.models import (  # noqa: E402
     Cluster,
-    ClusterSignal,
     ClusterItem,
-    ClusterSnapshot,
     SearchRun,
     SearchSession,
     SearchTurn,
@@ -202,47 +200,10 @@ def make_cluster(**kw):
         id=42,
         name="Freelance invoicing pain",
         summary="Freelancers struggle to get invoices paid on time.",
-        signal_score=0.82,
         pipeline_version="v2",
-        trending=True,
-        first_seen=date(2026, 5, 1),
-        last_seen_date=date(2026, 5, 20),
-        author_count=37,
-        community_count=4,
-        source_breakdown=[{"site": "r/freelance", "count": 12}],
-        post_volume_by_date=[{"date": "2026-05-01", "count": 3}],
     )
     defaults.update(kw)
     return Cluster(**defaults)
-
-
-def make_cluster_signal(**kw):
-    defaults = dict(
-        cluster_id=42,
-        input_fingerprint="fp-42",
-        generated_at=datetime(2026, 5, 21, tzinfo=timezone.utc),
-        status="ready",
-        last_error=None,
-        signal_score=0.91,
-        recency=0.88,
-        momentum_7d=0.2,
-        momentum_30d=0.4,
-        momentum_90d=None,
-        post_volume_by_week=[{"week": "2026-W20", "count": 4}, {"week": "2026-W21", "count": 7}],
-        total_posts=12,
-        author_count=8,
-        community_count=3,
-        platform_count=1,
-        source_communities=["r/freelance", "r/bookkeeping"],
-        avg_comments=6.5,
-        avg_votes=42.0,
-        top_problem_statements=[{
-            "post_id": "post-1",
-            "problem_statement": "Freelancers waste hours chasing invoices.",
-        }],
-    )
-    defaults.update(kw)
-    return ClusterSignal(**defaults)
 
 
 def make_cluster_item(**kw):
@@ -256,38 +217,16 @@ def make_cluster_item(**kw):
         title="Invoicing eats my whole week",
         body="Freelancers waste hours chasing invoices.",
         url="https://reddit.com/r/freelance/1",
-        permalink=None,
         author="freelancer42",
         score=120,
         num_comments=12,
         posted_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
-        scraped_at=datetime(2026, 5, 2, tzinfo=timezone.utc),
         raw_json={"upvote_ratio": 0.95, "top_comments": [{"body": "Same problem here"}]},
-        content_hash=None,
-        opportunity_type="software",
-        opportunity_domain="fintech",
         problem_statement="Freelancers waste hours every week chasing unpaid invoices.",
-        solution_angle="Automate invoice reminders and reconciliation for freelancers.",
-        distance_to_centroid=0.1,
         similarity_score=0.91,
-        assigned_by="model",
-        model_version="v2",
     )
     defaults.update(kw)
     return ClusterItem(**defaults)
-
-
-def make_snapshot(**kw):
-    defaults = dict(
-        id=1,
-        cluster_id=42,
-        date=date(2026, 5, 20),
-        post_count=50,
-        sample_posts=[],
-        avg_comments=8.0,
-    )
-    defaults.update(kw)
-    return ClusterSnapshot(**defaults)
 
 
 def make_pipeline(**kw):

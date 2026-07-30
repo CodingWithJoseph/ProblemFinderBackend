@@ -1,9 +1,7 @@
 """Deterministic normalization helpers for conversational Search.
 
 The model may suggest filters, but these helpers keep common language and
-database text matching predictable. Alias targets are deliberately bounded to
-known product vocabulary and are only returned when the target is present in
-the database's canonical filter options.
+database text matching predictable.
 """
 
 from __future__ import annotations
@@ -80,27 +78,11 @@ REFINEMENT_CONTROL_WORDS = frozenset({
     "remove",
     "require",
     "requirement",
-    "score",
-    "signal",
     "since",
     "sort",
     "source",
-    "strongest",
-    "trending",
     "without",
 })
-
-# Alias -> preferred canonical labels. A target is used only when an exact
-# case-insensitive match exists in the live filter options.
-DOMAIN_ALIASES: dict[str, tuple[str, ...]] = {
-    "healthcare": ("Healthcare and Social Care", "Healthcare"),
-    "health care": ("Healthcare and Social Care", "Healthcare"),
-    "health system": ("Healthcare and Social Care", "Healthcare"),
-    "health systems": ("Healthcare and Social Care", "Healthcare"),
-    "hospital": ("Healthcare and Social Care", "Healthcare"),
-    "hospitals": ("Healthcare and Social Care", "Healthcare"),
-    "medical": ("Healthcare and Social Care", "Healthcare"),
-}
 
 
 def normalize_phrase(value: str) -> str:
@@ -131,46 +113,3 @@ def phrase_is_present(message: str, phrase: str) -> bool:
 
 def mentions_any(message: str, values: Iterable[str]) -> bool:
     return any(phrase_is_present(message, value) for value in values if value)
-
-
-def resolved_domain_aliases(message: str, available: list[str]) -> list[tuple[str, str]]:
-    """Resolve positive domain aliases to canonical live option values."""
-    canonical = {normalize_phrase(value): value for value in available}
-    normalized_message = normalize_phrase(message)
-    message_tokens = normalized_message.split()
-    resolved: list[tuple[str, str]] = []
-
-    for alias, targets in DOMAIN_ALIASES.items():
-        normalized_alias = normalize_phrase(alias)
-        if not phrase_is_present(normalized_message, normalized_alias):
-            continue
-
-        alias_tokens = normalized_alias.split()
-        try:
-            start = next(
-                index
-                for index in range(len(message_tokens) - len(alias_tokens) + 1)
-                if message_tokens[index:index + len(alias_tokens)] == alias_tokens
-            )
-        except StopIteration:
-            continue
-        prefix = set(message_tokens[max(0, start - 3):start])
-        if prefix & {"exclude", "not", "remove", "without"}:
-            continue
-
-        for target in targets:
-            match = canonical.get(normalize_phrase(target))
-            if match is not None and all(existing != match for _, existing in resolved):
-                resolved.append((alias, match))
-                break
-
-    return resolved
-
-
-def query_has_content_beyond_aliases(query: str, aliases: Iterable[str]) -> bool:
-    alias_tokens = {
-        token
-        for alias in aliases
-        for token in search_tokens(alias)
-    }
-    return any(term not in alias_tokens for term in meaningful_search_terms(query))

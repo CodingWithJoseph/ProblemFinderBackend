@@ -17,7 +17,6 @@ from app.config import PIPELINE_VERSION, Settings, get_settings
 from app.db import AsyncSessionLocal
 from app.models import (
     ClusterItem,
-    ClusterSignal,
     Pipeline,
     SignalAnalysisCase,
     SignalAnalysisJob,
@@ -175,8 +174,7 @@ async def execute_signal_job(
     case.updated_at = utc_now()
     await db.commit()
 
-    cluster_signal = await load_cluster_signal(db, card)
-    payload = build_analysis_payload(card, selected, cluster_signal)
+    payload = build_analysis_payload(card, selected)
     try:
         output = await provider.generate(
             instructions=SIGNAL_ANALYSIS_INSTRUCTIONS,
@@ -191,7 +189,6 @@ async def execute_signal_job(
             case,
             all_items,
             selected,
-            cluster_signal,
             output,
         )
         next_version = int(await db.scalar(
@@ -232,15 +229,6 @@ async def load_signal_source_items(db: AsyncSession, card: Pipeline) -> list[Clu
     return list(result.scalars().all())
 
 
-async def load_cluster_signal(db: AsyncSession, card: Pipeline) -> ClusterSignal | None:
-    cluster_id = _cluster_id(card)
-    if cluster_id is None:
-        return None
-    return (await db.execute(
-        select(ClusterSignal).where(ClusterSignal.cluster_id == cluster_id)
-    )).scalar_one_or_none()
-
-
 def select_representative_evidence(
     items: Iterable[ClusterItem],
     *,
@@ -264,7 +252,7 @@ def select_representative_evidence(
     by_recency = sorted(
         usable,
         key=lambda item: (
-            -_timestamp(item.posted_at or item.scraped_at),
+            -_timestamp(item.posted_at),
             str(item.id),
         ),
     )
@@ -294,8 +282,9 @@ def select_representative_evidence(
 def build_analysis_payload(
     card: Pipeline,
     items: list[ClusterItem],
-    signal: ClusterSignal | None,
 ) -> dict:
+    authors = {item.author for item in items if item.author}
+    platforms = {item.platform for item in items if item.platform}
     return {
         "project": {
             "name": card.project_name or card.name,
@@ -303,11 +292,9 @@ def build_analysis_payload(
             "stage": card.stage,
         },
         "metrics": {
-            "signalStrength": signal.signal_score if signal else None,
-            "momentum30d": signal.momentum_30d if signal else None,
-            "totalPosts": signal.total_posts if signal else len(items),
-            "authorCount": signal.author_count if signal else None,
-            "sourceDiversity": signal.platform_count if signal else None,
+            "totalPosts": len(items),
+            "authorCount": len(authors),
+            "sourceDiversity": len(platforms),
         },
         "evidence": [
             {
@@ -318,9 +305,9 @@ def build_analysis_payload(
                 "community": item.community,
                 "score": item.score,
                 "commentCount": item.num_comments,
-                "observedAt": _iso(item.posted_at or item.scraped_at),
+                "observedAt": _iso(item.posted_at),
                 "problemStatement": item.problem_statement,
-                "currentWorkaround": item.solution_angle,
+                "currentWorkaround": None,
             }
             for item in items
         ],
@@ -332,7 +319,6 @@ def build_case_document(
     case: SignalAnalysisCase,
     all_items: list[ClusterItem],
     selected: list[ClusterItem],
-    signal: ClusterSignal | None,
     output: SignalAnalysisModelOutput,
 ) -> SignalCaseDocument:
     claim_links: dict[str, list[str]] = {}
@@ -356,10 +342,10 @@ def build_case_document(
             "platform": item.platform,
             "community": item.community,
             "author": item.author,
-            "observed_at": _iso(item.posted_at or item.scraped_at),
+            "observed_at": _iso(item.posted_at),
             "score": item.score,
             "comment_count": item.num_comments,
-            "source_url": item.url or item.permalink,
+            "source_url": item.url,
             "stance": "supporting" if cited else "excluded",
             "claim_ids": claim_links.get(item_id, []),
             "problem_unit_ids": unit_links.get(item_id, []),
@@ -392,12 +378,10 @@ def build_case_document(
             "source_updated_at": _iso(latest),
         },
         metrics={
-            "signal_strength": signal.signal_score if signal else None,
-            "momentum_30d": signal.momentum_30d if signal else None,
             "freshness_days": freshness_days,
             "evidence_count": len(all_items),
-            "author_count": signal.author_count if signal else len(authors),
-            "source_diversity": signal.platform_count if signal else len(platforms),
+            "author_count": len(authors),
+            "source_diversity": len(platforms),
         },
         thesis=output.thesis,
         claims=output.claims,

@@ -16,9 +16,7 @@ def _item(item_id: str, *, body: str, at: datetime) -> ClusterItem:
         id=item_id,
         title=f"Evidence {item_id}",
         body=body,
-        content_hash=f"hash-{body}",
         posted_at=at,
-        scraped_at=at + timedelta(minutes=5),
         score=10,
         num_comments=2,
     )
@@ -41,7 +39,7 @@ def test_source_updated_at_uses_latest_observation():
     first = _item("a", body="one", at=now)
     second = _item("b", body="two", at=now + timedelta(days=1))
 
-    assert signal_source_updated_at([second, first]) == second.scraped_at
+    assert signal_source_updated_at([second, first]) == second.posted_at
 
 
 def test_new_case_and_job_are_linked_and_queued():
@@ -158,8 +156,6 @@ def _stored_case_payload(pipeline_id: str) -> dict:
             "sourceUpdatedAt": "2026-07-26T00:00:00+00:00",
         },
         "metrics": {
-            "signalStrength": 0.5,
-            "momentum30d": None,
             "freshnessDays": 1,
             "evidenceCount": 1,
             "authorCount": 1,

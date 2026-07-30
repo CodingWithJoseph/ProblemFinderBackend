@@ -31,8 +31,6 @@ def _item(
         score=score,
         num_comments=score // 2,
         posted_at=observed_at,
-        scraped_at=observed_at,
-        content_hash=f"hash-{item_id}",
     )
 
 
@@ -109,7 +107,6 @@ def test_case_assembly_rejects_model_citation_not_in_selected_evidence():
             case,
             [item],
             [item],
-            None,
             _output("missing"),
         )
 
@@ -125,7 +122,6 @@ def test_case_assembly_uses_authoritative_evidence_content():
         case,
         [item],
         [item],
-        None,
         _output("evidence-1"),
     )
 

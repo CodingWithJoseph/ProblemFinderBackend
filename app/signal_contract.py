@@ -59,8 +59,6 @@ class SignalAnalysisProgress(SignalContractModel):
 
 
 class SignalMetricSnapshot(SignalContractModel):
-    signal_strength: float | None = Field(default=None, ge=0, le=1)
-    momentum_30d: float | None = Field(default=None, alias="momentum30d")
     freshness_days: int | None = Field(default=None, ge=0)
     evidence_count: int = Field(ge=0)
     author_count: int | None = Field(default=None, ge=0)

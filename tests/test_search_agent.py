@@ -57,8 +57,6 @@ def use_provider(monkeypatch, provider):
 
 def stub_filter_options(fake_db):
     fake_db.stub(execute=[
-        FakeResult(rows=[("devtools",), ("fintech",)]),
-        FakeResult(rows=[("service",), ("software",)]),
         FakeResult(rows=[("hackernews",), ("reddit",)]),
         FakeResult(rows=[("r/freelance",), ("r/startups",)]),
     ])
@@ -68,7 +66,6 @@ def prepared_output(*, clarification_question=None) -> dict:
     return SearchInterpretationModelOutput(
         draft=ClusterSearchQuery(
             query="late invoice payments",
-            opportunity_domains=["FINTECH"],
             sources=["REDDIT"],
             min_posts=5,
             sort="relevance",
@@ -114,7 +111,6 @@ async def test_search_agent_inspects_options_then_prepares_confirmable_draft(
     assert body["fallback_used"] is False
     assert body["needs_confirmation"] is True
     assert body["stop_reason"] == "confirmation_required"
-    assert body["draft"]["opportunity_domains"] == ["fintech"]
     assert body["draft"]["sources"] == ["reddit"]
     assert body["draft"]["limit"] == 20
     assert body["draft"]["offset"] == 0
@@ -122,7 +118,7 @@ async def test_search_agent_inspects_options_then_prepares_confirmable_draft(
         {"sequence": 1, "action": "inspect_filter_options", "outcome": "completed"},
         {"sequence": 2, "action": "prepare_search_draft", "outcome": "completed"},
     ]
-    assert execute_count == 4  # Metadata only; no cluster search was executed.
+    assert execute_count == 2  # Metadata only; no cluster search was executed.
     second_messages = provider.requests[1]["messages"]
     assert "available_options" in second_messages[-1]["content"]
     assert "test-uid" not in json.dumps(provider.requests)

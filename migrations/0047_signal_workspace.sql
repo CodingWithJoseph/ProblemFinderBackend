@@ -1,7 +1,7 @@
 -- 0047_signal_workspace.sql
 --
 -- Versioned, citation-safe analysis storage for the three-screen Signal
--- workspace. Existing cluster_signals rows remain the source-metrics store.
+-- workspace. Metrics and evidence come from the current cluster_items payload.
 -- These tables contain user-owned analysis cases, immutable generated versions,
 -- non-destructive user overrides, background jobs and grounded conversations.
 

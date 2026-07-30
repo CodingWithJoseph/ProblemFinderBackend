@@ -26,15 +26,11 @@ def make_session(**overrides):
 def draft():
     return {
         "query": "late invoice payments",
-        "opportunity_domains": ["fintech"],
-        "opportunity_types": ["software"],
         "sources": ["reddit"],
         "communities": ["r/freelance"],
         "min_posts": 5,
         "observed_after": None,
-        "trending_only": False,
-        "min_signal_score": 0.7,
-        "sort": "signal_score",
+        "sort": "largest",
         "limit": 20,
         "offset": 0,
     }
@@ -51,8 +47,6 @@ def interpretation():
         "needs_confirmation": True,
         "fallback_used": False,
         "available_options": {
-            "opportunity_domains": ["fintech"],
-            "opportunity_types": ["software"],
             "sources": ["reddit"],
             "communities": ["r/freelance"],
         },

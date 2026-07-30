@@ -19,8 +19,6 @@ def _document() -> dict:
             "sourceUpdatedAt": "2026-07-26T10:00:00+00:00",
         },
         "metrics": {
-            "signalStrength": 0.78,
-            "momentum30d": 12.5,
             "freshnessDays": 1,
             "evidenceCount": 1,
             "authorCount": 1,
