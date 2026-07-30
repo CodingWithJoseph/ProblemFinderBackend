@@ -13,10 +13,7 @@ asyncpg
 pydantic-settings
 python-dotenv
 firebase-admin
-stripe
 openai
 anthropic
 httpx
 pgvector
-resend
-apscheduler

@@ -1,13 +1,12 @@
+
 """Cluster discovery + detail, backed entirely by the flat ``cluster_items`` table.
 
-The simplified 6-table schema collapsed ``source_posts`` ⋈ ``cluster_members`` ⋈
+The simplified 6-table schema collapsed ``source_posts`` â‹ˆ ``cluster_members`` â‹ˆ
 ``opportunities`` into one ``cluster_items`` row per post. Every post-level read
 in this module is a single-table ``cluster_items`` query filtered to the current
 ``PIPELINE_VERSION``. Clusters are ranked by the pipeline's ``signal_score``.
 
-The per-item ``problem_statement`` / ``solution_angle`` (LLM-derived) power the
-MVP Problem-breakdown (cluster detail), Evidence (items) and Task-list
-(distinct solution angles) views.
+The per-item ``problem_statement`` / ``solution_angle`` fields power the problem breakdown, evidence views, and Signal opportunity analysis.
 """
 from collections import Counter
 from datetime import datetime, timezone
@@ -20,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.auth import get_uid
-from app.config import PIPELINE_VERSION, Settings, get_settings
+from app.config import PIPELINE_VERSION
 from app.models import Cluster, ClusterItem, ClusterSnapshot, ClusterSignal, Pipeline
 from app.search_agent_contract import SearchAgentResponse
 from app.search_contract import (
@@ -34,8 +33,6 @@ from app.search_contract import (
 from app.search_normalization import meaningful_search_terms
 from app.services.search_agent import run_search_agent
 from app.services.search_interpreter import interpret_search, load_search_filter_options
-from app.services.web_search import WebSearchFailure, search_web_evidence
-from app.web_search_contract import WebSearchRequest, WebSearchResponse
 
 router = APIRouter(prefix="/clusters", tags=["clusters"])
 logger = logging.getLogger(__name__)
@@ -116,9 +113,9 @@ async def _signal_for_cluster(cluster_id: int, db: AsyncSession) -> ClusterSigna
         return None
 
 
-# ──────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # cluster_items helpers (shared with pipeline.py / problems.py / dashboard.py)
-# ──────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _item_observed_at(it: ClusterItem):
     return it.posted_at or it.scraped_at
@@ -171,28 +168,6 @@ def representative_problem_statement(items: list[ClusterItem]) -> str | None:
         if it.problem_statement and it.problem_statement.strip():
             return it.problem_statement.strip()
     return None
-
-
-def distinct_solution_angles(items: list[ClusterItem]) -> list[dict]:
-    """De-duplicated solution angles for a cluster, ranked by best supporting
-    post (``items`` must already be score-sorted desc)."""
-    seen: dict[str, dict] = {}
-    for it in items:
-        angle = (it.solution_angle or "").strip()
-        if not angle:
-            continue
-        key = angle.lower()
-        if key not in seen:
-            seen[key] = {
-                "solutionAngle": angle,
-                "problemStatement": (it.problem_statement or "").strip() or None,
-                "evidenceCount": 1,
-                "topPostId": it.id,
-                "topScore": it.score,
-            }
-        else:
-            seen[key]["evidenceCount"] += 1
-    return list(seen.values())
 
 
 def _sort_items(items: list[ClusterItem]) -> list[ClusterItem]:
@@ -268,9 +243,9 @@ def _item_stats_subquery():
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Watched-cluster state (user pipeline cards)
-# ──────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async def _watched_cluster_ids(uid: str, cluster_ids: list[int], db: AsyncSession) -> set[int]:
     if not cluster_ids:
@@ -292,9 +267,9 @@ async def _watched_cluster_ids(uid: str, cluster_ids: list[int], db: AsyncSessio
     return watched
 
 
-# ──────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Serializers
-# ──────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _serialize_cluster(c: Cluster, *, post_count: int | None = None, signal: ClusterSignal | None = None) -> dict:
     return {
@@ -335,9 +310,9 @@ def _serialize_discovery_cluster(c: Cluster, items: list[ClusterItem], watched_i
     }
 
 
-# ──────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Discovery: search + browse
-# ──────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _skip_filter(value: str | None) -> bool:
     return value is None or value.strip() == "" or value.strip().lower() == "all"
@@ -576,24 +551,6 @@ async def run_cluster_search_agent(
     return await run_search_agent(body, uid, db)
 
 
-@router.post("/search/web", response_model=WebSearchResponse)
-async def search_external_evidence(
-    body: WebSearchRequest,
-    uid: str = Depends(get_uid),
-    settings: Settings = Depends(get_settings),
-):
-    """Run a gated external search only after explicit user confirmation."""
-    _ = uid
-    if not settings.search_web_enabled:
-        raise HTTPException(status_code=404, detail="Not found")
-    try:
-        return await search_web_evidence(body, settings)
-    except WebSearchFailure as exc:
-        if exc.category == "timeout":
-            raise HTTPException(status_code=504, detail="External search timed out") from None
-        raise HTTPException(status_code=503, detail="External search is unavailable") from None
-
-
 @router.get("/browse")
 async def browse_clusters(
     limit: int = Query(SEARCH_DEFAULT_LIMIT, ge=1, le=SEARCH_MAX_LIMIT),
@@ -694,28 +651,9 @@ async def get_trending_clusters(
     }
 
 
-@router.get("/domains")
-async def list_cluster_domains(
-    db: AsyncSession = Depends(get_db),
-    uid: str = Depends(get_uid),
-):
-    """Distinct opportunity_domain values across cluster_items (Search filter source)."""
-    result = await db.execute(
-        select(ClusterItem.opportunity_domain)
-        .where(
-            ClusterItem.pipeline_version == PIPELINE_VERSION,
-            ClusterItem.opportunity_domain.isnot(None),
-            func.trim(ClusterItem.opportunity_domain) != "",
-        )
-        .distinct()
-        .order_by(ClusterItem.opportunity_domain.asc())
-    )
-    return {"data": [d for (d,) in result.all()]}
-
-
-# ──────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Cluster detail + sub-resources
-# ──────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async def _fetch_cluster(cluster_id: int, db: AsyncSession) -> Cluster | None:
     result = await db.execute(
@@ -764,44 +702,6 @@ async def get_cluster(
         "pageSize": pageSize,
         "totalPosts": total_posts,
     }
-
-
-@router.get("/{cluster_id}/items")
-async def get_cluster_items(
-    cluster_id: int,
-    page: int = Query(1, ge=1),
-    pageSize: int = Query(50, ge=1, le=200),
-    db: AsyncSession = Depends(get_db),
-    uid: str = Depends(get_uid),
-):
-    """Evidence list — the cluster's items for the full side-by-side post view."""
-    if not await _fetch_cluster(cluster_id, db):
-        raise HTTPException(status_code=404, detail="Cluster not found")
-
-    total = await count_cluster_items(db, cluster_id)
-    items = await load_cluster_items(db, cluster_id, limit=pageSize, offset=(page - 1) * pageSize)
-    return {
-        "clusterId": cluster_id,
-        "page": page,
-        "pageSize": pageSize,
-        "total": total,
-        "data": [serialize_evidence_item(it) for it in items],
-    }
-
-
-@router.get("/{cluster_id}/tasks")
-async def get_cluster_tasks(
-    cluster_id: int,
-    db: AsyncSession = Depends(get_db),
-    uid: str = Depends(get_uid),
-):
-    """Task list — distinct proposed solution angles for the cluster, ranked by
-    their best supporting post."""
-    if not await _fetch_cluster(cluster_id, db):
-        raise HTTPException(status_code=404, detail="Cluster not found")
-
-    items = await load_cluster_items(db, cluster_id, limit=TASKS_SCAN_LIMIT)
-    return {"clusterId": cluster_id, "data": distinct_solution_angles(items)}
 
 
 @router.get("/{cluster_id}/snapshots")

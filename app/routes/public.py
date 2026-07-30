@@ -7,7 +7,7 @@ simplified pipeline writes one flat ``cluster_items`` row per post).
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,21 +43,6 @@ def _serialize_post(it: ClusterItem) -> dict:
         "title": it.title,
         "reddit_score": it.score,
         "subreddit": it.community,
-    }
-
-
-def _serialize_post_full(it: ClusterItem) -> dict:
-    upvote_ratio = it.raw_json.get("upvote_ratio") if isinstance(it.raw_json, dict) else None
-    return {
-        **_serialize_post(it),
-        "body": it.body,
-        "url": it.url or it.permalink,
-        "author": it.author,
-        "comment_count": it.num_comments,
-        "upvote_ratio": upvote_ratio,
-        "problem_statement": it.problem_statement,
-        "solution_angle": it.solution_angle,
-        "posted_at": _iso(it.posted_at),
     }
 
 
@@ -144,34 +129,6 @@ async def public_clusters(
             _serialize_cluster(c, items_map.get(c.id, []), SAMPLE_POST_COUNT)
             for c in clusters
         ]
-    }
-
-
-@router.get("/clusters/{cluster_id}")
-async def public_cluster_detail(
-    cluster_id: int,
-    response: Response,
-    db: AsyncSession = Depends(get_db),
-):
-    """Full cluster detail plus all of its posts (v2 only)."""
-    _add_cors(response)
-
-    cluster = (await db.execute(
-        select(Cluster).where(
-            Cluster.id == cluster_id,
-            Cluster.pipeline_version == PIPELINE_VERSION,
-        )
-    )).scalar_one_or_none()
-    if not cluster:
-        raise HTTPException(status_code=404, detail="Cluster not found")
-
-    items = (await _items_by_cluster([cluster_id], db)).get(cluster_id, [])
-
-    return {
-        "data": {
-            **_serialize_cluster(cluster, items, SAMPLE_POST_COUNT),
-            "posts": [_serialize_post_full(it) for it in items],
-        }
     }
 
 
