@@ -79,9 +79,7 @@ def _serialize_cluster(c: Cluster, items: list[ClusterItem], sample_count: int) 
         "id": c.id,
         "name": c.name,
         "summary": c.summary,
-        "signal_score": c.signal_score,
         "post_count": len(items),
-        "trending_status": "trending" if c.trending else None,
         "date_range_start": summary["date_range_start"],
         "date_range_end": summary["date_range_end"],
         "subreddits": summary["subreddits"],
@@ -96,7 +94,7 @@ async def public_clusters(
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
-    """Top clusters by signal_score (v2 only)."""
+    """Largest published clusters (v2 only)."""
     _add_cors(response)
 
     item_counts = (
@@ -116,7 +114,7 @@ async def public_clusters(
         select(Cluster)
         .join(item_counts, item_counts.c.cluster_id == Cluster.id)
         .where(Cluster.pipeline_version == PIPELINE_VERSION)
-        .order_by(Cluster.signal_score.desc().nullslast(), item_counts.c.post_count.desc())
+        .order_by(item_counts.c.post_count.desc(), Cluster.id.asc())
         .offset(offset)
         .limit(limit)
     )
@@ -176,7 +174,6 @@ async def compute_stats(db: AsyncSession) -> dict:
     return {
         "conversationsAnalyzed": item_count,
         "clustersDetected": cluster_count,
-        "opportunitiesFound": item_count,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
     }
 

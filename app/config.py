@@ -34,9 +34,6 @@ class Settings(BaseSettings):
     signal_analysis_worker_enabled: bool = True
     signal_analysis_poll_seconds: float = 2.0
 
-    anthropic_api_key: str = ""
-    anthropic_model: str = "claude-sonnet-4-6"
-
     allowed_origins: str = "http://localhost:3000"
 
     @property

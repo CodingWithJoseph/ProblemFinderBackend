@@ -7,6 +7,6 @@ from app.config import get_settings
 openai_client = AsyncOpenAI(api_key=get_settings().openai_api_key)
 
 # text-embedding-3-small -> 1536 dimensions. Matches problems.embedding and
-# opportunities.embedding column widths.
+# cluster_items.embedding column width.
 EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIM = 1536

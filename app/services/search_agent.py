@@ -50,8 +50,8 @@ def _agent_tools() -> list[dict[str, Any]]:
             "function": {
                 "name": FILTER_OPTIONS_TOOL,
                 "description": (
-                    "Read the canonical opportunity domains, opportunity types, "
-                    "sources, and communities available to structured search filters."
+                    "Read the canonical sources and communities available to "
+                    "structured search filters."
                 ),
                 "strict": True,
                 "parameters": {

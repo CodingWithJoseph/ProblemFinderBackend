@@ -41,16 +41,14 @@ def use_provider(monkeypatch, provider):
 
 def stub_filter_options(fake_db):
     fake_db.stub(execute=[
-        FakeResult(rows=[("devtools",), ("fintech",)]),
-        FakeResult(rows=[("service",), ("software",)]),
         FakeResult(rows=[("hackernews",), ("reddit",)]),
         FakeResult(rows=[("r/freelance",), ("r/startups",)]),
     ])
 
 
-def test_validation_maps_healthcare_alias_to_live_domain_and_removes_filler_query():
+def test_validation_canonicalizes_live_source_options():
     output = SearchInterpretationModelOutput(
-        draft=ClusterSearchQuery(query="problems in healthcare"),
+        draft=ClusterSearchQuery(query="invoice pain", sources=["REDDIT"]),
         assumptions=[],
         unsupported=[],
         clarification_question=None,
@@ -58,15 +56,13 @@ def test_validation_maps_healthcare_alias_to_live_domain_and_removes_filler_quer
 
     validated = search_interpreter._validated_model_output(
         output,
-        SearchInterpretRequest(message="Show me problems in healthcare"),
-        SearchFilterOptions(opportunity_domains=["Healthcare and Social Care"]),
+        SearchInterpretRequest(message="Show invoice pain from Reddit"),
+        SearchFilterOptions(sources=["reddit"]),
     )
 
-    assert validated.draft.query is None
-    assert validated.draft.opportunity_domains == ["Healthcare and Social Care"]
-    assert validated.assumptions == [
-        'Mapped "healthcare" to database domain "Healthcare and Social Care".'
-    ]
+    assert validated.draft.query == "invoice pain"
+    assert validated.draft.sources == ["reddit"]
+    assert validated.assumptions == []
 
 
 def test_validation_applies_refinement_as_patch_and_preserves_unmentioned_filters():
@@ -81,7 +77,7 @@ def test_validation_applies_refinement_as_patch_and_preserves_unmentioned_filter
             query="healthcare staffing",
             sources=["reddit"],
             min_posts=20,
-            sort="signal_score",
+            sort="largest",
         ),
         assumptions=[],
         unsupported=[],
@@ -91,7 +87,7 @@ def test_validation_applies_refinement_as_patch_and_preserves_unmentioned_filter
     validated = search_interpreter._validated_model_output(
         output,
         SearchInterpretRequest(
-            message="Sort them by strongest signal",
+            message="Sort them by largest",
             current_draft=current,
         ),
         SearchFilterOptions(sources=["reddit"]),
@@ -100,7 +96,7 @@ def test_validation_applies_refinement_as_patch_and_preserves_unmentioned_filter
     assert validated.draft.query == "healthcare staffing"
     assert validated.draft.sources == ["reddit"]
     assert validated.draft.min_posts == 10
-    assert validated.draft.sort == "signal_score"
+    assert validated.draft.sort == "largest"
 
 
 def test_validation_allows_explicit_minimum_post_refinement():
@@ -144,14 +140,10 @@ async def test_interpret_search_returns_canonical_confirmable_draft_without_runn
     model_output = SearchInterpretationModelOutput(
         draft=ClusterSearchQuery(
             query="late invoice payments",
-            opportunity_domains=["FINTECH", "not-a-domain"],
-            opportunity_types=["software"],
             sources=["REDDIT"],
             communities=["r/freelance"],
             min_posts=5,
-            trending_only=True,
-            min_signal_score=0.7,
-            sort="signal_score",
+            sort="largest",
             limit=50,
             offset=999,
         ),
@@ -166,7 +158,7 @@ async def test_interpret_search_returns_canonical_confirmable_draft_without_runn
         "/clusters/search/interpret",
         headers=auth_headers,
         json={
-            "message": "only show strong fintech software problems from Reddit",
+            "message": "only show invoice problems from Reddit",
             "current_draft": {
                 "query": "invoice problems",
                 "limit": 10,
@@ -180,21 +172,18 @@ async def test_interpret_search_returns_canonical_confirmable_draft_without_runn
     assert body["fallback_used"] is False
     assert body["needs_confirmation"] is True
     assert body["needs_clarification"] is False
-    assert body["draft"]["opportunity_domains"] == ["fintech"]
-    assert body["draft"]["opportunity_types"] == ["software"]
     assert body["draft"]["sources"] == ["reddit"]
     assert body["draft"]["limit"] == 10
     assert body["draft"]["offset"] == 0
-    assert "not-a-domain" in body["assumptions"][0]
     assert "Confirm these filters" in body["confirmation"]
-    assert body["available_options"]["opportunity_domains"] == ["devtools", "fintech"]
+    assert body["available_options"]["sources"] == ["hackernews", "reddit"]
 
     payload = provider.calls[0]["payload"]
     assert payload["current_utc"].endswith("+00:00")
-    assert payload["latest_user_message"] == "only show strong fintech software problems from Reddit"
+    assert payload["latest_user_message"] == "only show invoice problems from Reddit"
     assert payload["current_draft"]["offset"] == 30
     assert "test-uid" not in json.dumps(provider.calls)
-    assert execute_count == 4  # Filter-option reads only; interpretation never runs search.
+    assert execute_count == 2  # Filter-option reads only; interpretation never runs search.
 
 
 async def test_interpret_search_surfaces_one_clarification(
@@ -247,7 +236,6 @@ async def test_interpret_search_falls_back_for_provider_failures(
             "message": "only accounting firms",
             "current_draft": {
                 "query": "invoice problems",
-                "opportunity_domains": ["fintech"],
                 "min_posts": 4,
                 "limit": 15,
                 "offset": 45,
@@ -260,7 +248,6 @@ async def test_interpret_search_falls_back_for_provider_failures(
     assert body["fallback_used"] is True
     assert body["needs_confirmation"] is True
     assert body["draft"]["query"] == "only accounting firms"
-    assert body["draft"]["opportunity_domains"] == ["fintech"]
     assert body["draft"]["min_posts"] == 4
     assert body["draft"]["limit"] == 15
     assert body["draft"]["offset"] == 0
@@ -283,7 +270,7 @@ async def test_interpret_search_falls_back_when_filter_options_fail(
     body = resp.json()
     assert body["fallback_used"] is True
     assert body["draft"]["query"] == "fintech invoice problems"
-    assert body["available_options"]["opportunity_domains"] == []
+    assert body["available_options"]["sources"] == []
 
 
 async def test_interpret_search_falls_back_when_groq_key_is_missing(
@@ -347,8 +334,6 @@ async def test_search_filter_options_endpoint(client, fake_db, auth_headers):
 
     assert resp.status_code == 200
     assert resp.json() == {
-        "opportunity_domains": ["devtools", "fintech"],
-        "opportunity_types": ["service", "software"],
         "sources": ["hackernews", "reddit"],
         "communities": ["r/freelance", "r/startups"],
     }

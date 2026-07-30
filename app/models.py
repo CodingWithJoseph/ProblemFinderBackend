@@ -1,95 +1,39 @@
 
 import uuid
 from app.db import Base
-from datetime import datetime, date, timezone
+from datetime import datetime, timezone
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID, ARRAY
-from sqlalchemy import String, Text, Integer, BigInteger, Boolean, Float, Date, TIMESTAMP, ForeignKey
+from sqlalchemy import String, Text, Integer, Boolean, Float, TIMESTAMP, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
-# Embedding width produced by the AI pipeline (text-embedding-3-large). Both the
-# per-item embedding and the cluster centroid use this dimensionality. Mapped as
-# deferred so list/detail queries never pull the vector over the wire.
+# Embedding width produced by the AI pipeline (text-embedding-3-large). Mapped
+# as deferred so list/detail queries never pull the vector over the wire.
 EMBEDDING_DIM = 3072
 
 
 # ============================================================
-# Pipeline-produced tables (simplified 6-table Supabase schema)
+# Pipeline-produced public tables
 #
 # The AI pipeline (ProblemFinderAI) writes these; the API only reads them. The
-# product tables include pipeline_runs, clusters, cluster_items,
-# cluster_neighbors and cluster_signals. The API models the read surfaces it
-# needs for discovery and the Signal workspace.
+# v2 public publish contract contains only clusters and cluster_items.
 # ============================================================
 
 
 class Cluster(Base):
     __tablename__ = "clusters"
 
-    # Pipeline-written columns (see ProblemFinderAI transform_cluster: the
-    # publish step writes id, name, summary, signal_score, pipeline_version).
+    # Exact ProblemFinderAI v2 public cluster payload.
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Deterministic 0.0-1.0 signal score (volume + recency). Primary ranking key
-    # for the dashboard, trending and discovery feeds.
-    signal_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     pipeline_version: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Lightweight cluster-level analytics the API surfaces directly.
-    trending: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    first_seen: Mapped[date | None] = mapped_column(Date, nullable=True)
-    source: Mapped[str | None] = mapped_column(String, nullable=True)
-    last_seen_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    author_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    community_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    source_breakdown: Mapped[list | None] = mapped_column(JSONB, nullable=True)
-    post_volume_by_date: Mapped[list | None] = mapped_column(JSONB, nullable=True)
-    # pgvector centroid used by the pipeline for assignment; deferred so it is
-    # never loaded unless explicitly requested.
-    centroid: Mapped[list | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True, deferred=True)
-
-
-class ClusterSignal(Base):
-    """Read model for the founder-facing ``cluster_signals`` payload.
-
-    Mirrors the live Supabase schema column-for-column (verified via
-    ``information_schema``): all 21 columns are mapped, including
-    ``input_fingerprint`` / ``last_error`` and the ``created_at`` / ``updated_at``
-    bookkeeping timestamps (NOT NULL, ``now()`` defaults). ``status`` is a
-    ``cluster_signal_status`` enum in Postgres; mapping it as text is read-safe.
-    """
-
-    __tablename__ = "cluster_signals"
-
-    cluster_id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    input_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
-    generated_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
-    status: Mapped[str | None] = mapped_column(Text, nullable=True)
-    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    signal_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    recency: Mapped[float | None] = mapped_column(Float, nullable=True)
-    momentum_7d: Mapped[float | None] = mapped_column(Float, nullable=True)
-    momentum_30d: Mapped[float | None] = mapped_column(Float, nullable=True)
-    momentum_90d: Mapped[float | None] = mapped_column(Float, nullable=True)
-    post_volume_by_week: Mapped[list | None] = mapped_column(JSONB, nullable=True)
-    total_posts: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    author_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    community_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    platform_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    source_communities: Mapped[list | None] = mapped_column(JSONB, nullable=True)
-    avg_comments: Mapped[float | None] = mapped_column(Float, nullable=True)
-    avg_votes: Mapped[float | None] = mapped_column(Float, nullable=True)
-    top_problem_statements: Mapped[list | None] = mapped_column(JSONB, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
 
 
 class ClusterItem(Base):
-    """One conveyor row per external post â€” the flat table that replaced the
-    old ``source_posts`` â‹ˆ ``cluster_members`` â‹ˆ ``opportunities`` triad.
+    """One public source item assigned to a problem cluster.
 
     ``cluster_id`` is NULL until the pipeline assigns the item to a cluster. The
-    LLM-derived ``problem_statement`` / ``solution_angle`` fields support
-    Signal and problem-breakdown views.
+    normalized ``problem_statement`` supports Search, Signal, and Breakdown.
     """
 
     __tablename__ = "cluster_items"
@@ -104,36 +48,14 @@ class ClusterItem(Base):
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     body: Mapped[str | None] = mapped_column(Text, nullable=True)
     url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    permalink: Mapped[str | None] = mapped_column(Text, nullable=True)
     author: Mapped[str | None] = mapped_column(Text, nullable=True)
     score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     num_comments: Mapped[int | None] = mapped_column(Integer, nullable=True)
     posted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
-    scraped_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     raw_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    content_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Classifier output.
-    opportunity_type: Mapped[str | None] = mapped_column(Text, nullable=True)
-    opportunity_domain: Mapped[str | None] = mapped_column(Text, nullable=True)
     problem_statement: Mapped[str | None] = mapped_column(Text, nullable=True)
-    solution_angle: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Assignment metadata.
-    distance_to_centroid: Mapped[float | None] = mapped_column(Float, nullable=True)
     similarity_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    assigned_by: Mapped[str | None] = mapped_column(Text, nullable=True)
-    model_version: Mapped[str | None] = mapped_column(Text, nullable=True)
     embedding: Mapped[list | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True, deferred=True)
-
-
-class ClusterSnapshot(Base):
-    __tablename__ = "cluster_snapshots"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    cluster_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    post_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    sample_posts: Mapped[list | None] = mapped_column(JSONB, nullable=True)
-    avg_comments: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 # ============================================================

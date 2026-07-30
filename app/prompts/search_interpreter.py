@@ -14,14 +14,13 @@ Rules:
   ignoring case. Put other text-searchable concepts into draft.query.
 - Never invent or tighten a filter the user did not request. For a new search,
   use neutral filter values: empty option lists, min_posts 1,
-  observed_after null, trending_only false, min_signal_score null, and sort
-  relevance. For a refinement, preserve current_draft filters unless the latest
-  message explicitly changes or removes them.
-- Supported filters are opportunity domain/type, source, community, minimum
-  posts, observed-after date, trending-only, minimum signal score, and sort.
-- Signal scores are decimals from 0 through 1. Dates must be explicit UTC
-  datetimes. Resolve relative dates from current_utc in the input. Never infer a
-  date when the user's wording is materially unclear.
+  observed_after null, and sort relevance. For a refinement, preserve
+  current_draft filters unless the latest message explicitly changes or removes
+  them.
+- Supported filters are source, community, minimum posts, observed-after date,
+  and sort.
+- Dates must be explicit UTC datetimes. Resolve relative dates from current_utc
+  in the input. Never infer a date when the user's wording is materially unclear.
 - Keep limit unchanged from current_draft or use 20. Always return offset 0.
 - If one material ambiguity prevents a faithful search, ask one concise
   clarification_question. Otherwise return null.

@@ -15,13 +15,10 @@ from app.config import PIPELINE_VERSION, get_settings
 from app.models import ClusterItem
 from app.prompts.search_interpreter import SEARCH_INTERPRETER_INSTRUCTIONS
 from app.search_normalization import (
-    DOMAIN_ALIASES,
     REFINEMENT_CONTROL_WORDS,
     SEARCH_STOP_WORDS,
     mentions_any,
     normalize_phrase,
-    query_has_content_beyond_aliases,
-    resolved_domain_aliases,
     search_tokens,
 )
 from app.search_contract import (
@@ -60,8 +57,6 @@ async def _distinct_values(db: AsyncSession, column) -> list[str]:
 async def load_search_filter_options(db: AsyncSession) -> SearchFilterOptions:
     """Read bounded canonical filter values for prompting and filter editing."""
     return SearchFilterOptions(
-        opportunity_domains=await _distinct_values(db, ClusterItem.opportunity_domain),
-        opportunity_types=await _distinct_values(db, ClusterItem.opportunity_type),
         sources=await _distinct_values(db, ClusterItem.platform),
         communities=await _distinct_values(db, ClusterItem.community),
     )
@@ -112,38 +107,21 @@ def _explicit_refinement_fields(
     if reset_all:
         return {
             "query",
-            "opportunity_domains",
-            "opportunity_types",
             "sources",
             "communities",
             "min_posts",
             "observed_after",
-            "trending_only",
-            "min_signal_score",
             "sort",
         }
 
     fields: set[str] = set()
     if "post" in tokens or "posts" in tokens:
         fields.add("min_posts")
-    if tokens & {"sort", "rank", "order", "newest", "latest", "largest", "strongest", "best", "relevance"}:
+    if tokens & {"sort", "rank", "order", "newest", "latest", "largest", "best", "relevance"}:
         fields.add("sort")
-    if "trending" in tokens:
-        fields.update({"trending_only", "sort"})
-    if "signal" in tokens and (
-        tokens & {"above", "at", "least", "minimum", "over", "threshold"}
-        or any(token.isdigit() for token in tokens)
-        or "%" in message
-    ):
-        fields.add("min_signal_score")
     if tokens & {"after", "before", "date", "day", "days", "month", "months", "observed", "recent", "since", "week", "weeks"}:
         fields.add("observed_after")
 
-    domain_aliases = [alias for alias in DOMAIN_ALIASES if mentions_any(message, [alias])]
-    if tokens & {"domain", "industry", "sector"} or domain_aliases or mentions_any(message, options.opportunity_domains):
-        fields.add("opportunity_domains")
-    if "type" in tokens or mentions_any(message, options.opportunity_types):
-        fields.add("opportunity_types")
     if tokens & {"platform", "source"} or mentions_any(message, options.sources):
         fields.add("sources")
     if tokens & {"community", "forum", "subreddit"} or mentions_any(message, options.communities):
@@ -151,11 +129,8 @@ def _explicit_refinement_fields(
 
     ignored_tokens = set(SEARCH_STOP_WORDS) | set(REFINEMENT_CONTROL_WORDS)
     ignored_tokens.update(token for value in (
-        *options.opportunity_domains,
-        *options.opportunity_types,
         *options.sources,
         *options.communities,
-        *domain_aliases,
     ) for token in search_tokens(value))
     remaining = [
         token
@@ -188,18 +163,6 @@ def _validated_model_output(
 ) -> SearchInterpretationModelOutput:
     server_assumptions: list[str] = []
     draft = output.draft.model_copy(deep=True)
-    draft.opportunity_domains = _canonicalize_values(
-        draft.opportunity_domains,
-        options.opportunity_domains,
-        "opportunity domain",
-        server_assumptions,
-    )
-    draft.opportunity_types = _canonicalize_values(
-        draft.opportunity_types,
-        options.opportunity_types,
-        "opportunity type",
-        server_assumptions,
-    )
     draft.sources = _canonicalize_values(draft.sources, options.sources, "source", server_assumptions)
     draft.communities = _canonicalize_values(
         draft.communities,
@@ -208,14 +171,6 @@ def _validated_model_output(
         server_assumptions,
     )
 
-    aliases = resolved_domain_aliases(request.message, options.opportunity_domains)
-    for alias, canonical in aliases:
-        if canonical not in draft.opportunity_domains:
-            draft.opportunity_domains.append(canonical)
-            server_assumptions.append(
-                f'Mapped "{alias}" to database domain "{canonical}".'
-            )
-
     if request.current_draft is not None:
         draft = _apply_refinement_patch(
             draft,
@@ -223,15 +178,6 @@ def _validated_model_output(
             request.message,
             options,
         )
-    elif draft.query and aliases and not query_has_content_beyond_aliases(
-        draft.query,
-        [alias for alias, _ in aliases],
-    ):
-        # A request like "show me problems in healthcare" is completely
-        # represented by the canonical domain filter. Keeping the conversational
-        # filler as keyword text would broaden the SQL match unnecessarily.
-        draft.query = None
-
     draft.limit = request.current_draft.limit if request.current_draft else 20
     draft.offset = 0
     if draft.query is None and draft.sort == "relevance":
@@ -253,10 +199,6 @@ def _confirmation_for(draft: ClusterSearchQuery) -> str:
     parts: list[str] = []
     if draft.query:
         parts.append(f'text matching "{draft.query}"')
-    if draft.opportunity_domains:
-        parts.append(f'domains: {display(draft.opportunity_domains)}')
-    if draft.opportunity_types:
-        parts.append(f'types: {display(draft.opportunity_types)}')
     if draft.sources:
         parts.append(f'sources: {display(draft.sources)}')
     if draft.communities:
@@ -265,10 +207,6 @@ def _confirmation_for(draft: ClusterSearchQuery) -> str:
         parts.append(f'at least {draft.min_posts} posts')
     if draft.observed_after:
         parts.append(f'observed after {draft.observed_after.date().isoformat()}')
-    if draft.trending_only:
-        parts.append("trending only")
-    if draft.min_signal_score is not None:
-        parts.append(f'minimum signal score {draft.min_signal_score:g}')
     parts.append(f'sorted by {draft.sort.replace("_", " ")}')
     return "I understood this as " + "; ".join(parts) + ". Confirm these filters to run the database search."
 

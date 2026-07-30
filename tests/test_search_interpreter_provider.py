@@ -126,9 +126,10 @@ def assert_strict_objects(node):
 
 
 def test_interpreter_prompt_requires_neutral_filters_for_new_searches():
+    flattened = " ".join(SEARCH_INTERPRETER_INSTRUCTIONS.split())
     assert "Never invent or tighten a filter" in SEARCH_INTERPRETER_INSTRUCTIONS
-    assert "observed_after null" in SEARCH_INTERPRETER_INSTRUCTIONS
-    assert "preserve current_draft filters" in SEARCH_INTERPRETER_INSTRUCTIONS
+    assert "observed_after null" in flattened
+    assert "preserve current_draft filters" in flattened
 
 
 def test_provider_configuration_selects_local_and_groq_defaults():
