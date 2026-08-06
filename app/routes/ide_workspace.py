@@ -170,7 +170,7 @@ async def _ready_workspace(
     if problem_version is None or solution_case is None or solution_version is None or solution_case.status != "ready":
         raise HTTPException(
             status_code=409,
-            detail="Generate a ready Problem Breakdown and MVP solution before connecting an IDE",
+            detail="Complete Analysis and Design before connecting an IDE",
         )
     return card, problem_version, solution_case, solution_version
 

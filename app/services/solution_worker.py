@@ -51,7 +51,7 @@ SAFE_FAILURES = {
     "provider_error": "Solution generation could not be completed.",
     "validation": "Solution generation could not verify feature traceability.",
     "missing_case": "The project is no longer available.",
-    "problem_case_not_ready": "Finish the Problem Breakdown before generating an MVP solution.",
+    "problem_case_not_ready": "Complete Analysis before generating a solution.",
 }
 
 

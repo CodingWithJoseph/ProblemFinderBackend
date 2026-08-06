@@ -1,7 +1,7 @@
 {
   "name": "immensity-mcp-server",
   "version": "0.1.0",
-  "description": "Project-scoped MCP server for the Immensity MVP Build Warroom",
+  "description": "Project-scoped MCP server for Immensity Design",
   "type": "module",
   "bin": {
     "immensity-mcp": "dist/index.js"
