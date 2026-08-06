@@ -1,13 +1,18 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Must match ProblemFinderAI's src/util/constants.py::PIPELINE_VERSION.
 PIPELINE_VERSION = "v2"
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=Path(__file__).parent.parent / ".env",
+        extra="ignore",
+    )
+
     app_name: str = "Immensity API"
     environment: str = "development"
     debug: bool = False
@@ -34,16 +39,13 @@ class Settings(BaseSettings):
     signal_analysis_worker_enabled: bool = True
     signal_analysis_poll_seconds: float = 2.0
 
+    solution_worker_enabled: bool = True
+
     allowed_origins: str = "http://localhost:3000"
 
     @property
     def origins_list(self) -> list[str]:
         return [origin.strip() for origin in self.allowed_origins.split(",")]
-
-    class Config:
-        env_file = Path(__file__).parent.parent / ".env"
-        extra = "ignore"
-
 
 @lru_cache
 def get_settings() -> Settings:

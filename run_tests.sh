@@ -5,5 +5,5 @@
 # execution always share the same interpreter.
 set -euo pipefail
 
-python -m pip install -r requirements-test.txt
+python -m pip install -r requirements.txt -r requirements-test.txt
 python -m pytest tests/ -v --tb=short

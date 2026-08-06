@@ -15,8 +15,32 @@ RETAINED_TABLES = {
     "signal_analysis_jobs",
     "signal_conversations",
     "signal_conversation_turns",
+    "solution_cases",
+    "solution_versions",
+    "solution_jobs",
+    "ide_access_tokens",
+    "solution_task_states",
     "problems",
 }
+
+
+def test_solution_warroom_migration_is_versioned_and_traceable():
+    sql = _sql("0050_solution_warroom.sql")
+
+    for table in {"solution_cases", "solution_versions", "solution_jobs"}:
+        assert f"create table if not exists {table}" in sql
+    assert "problem_case_version integer not null" in sql
+    assert "unique (case_id, version)" in sql
+
+
+def test_ide_mcp_migration_uses_hashed_revocable_project_tokens():
+    sql = _sql("0051_ide_mcp_access.sql")
+
+    assert "create table if not exists ide_access_tokens" in sql
+    assert "token_hash varchar(64) not null unique" in sql
+    assert "revoked_at timestamptz null" in sql
+    assert "create table if not exists solution_task_states" in sql
+    assert "unique (case_id, task_id)" in sql
 
 
 def _sql(name: str) -> str:

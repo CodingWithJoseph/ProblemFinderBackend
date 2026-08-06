@@ -3,9 +3,12 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+.pytest-temp/
+.npm-cache/
 .venv/
 venv/
 dist/
+node_modules/
 *.egg-info/
 
 .idea

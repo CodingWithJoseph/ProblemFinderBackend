@@ -37,6 +37,7 @@ os.environ.setdefault("FIREBASE_CREDENTIALS_PATH", "unused-in-tests.json")
 os.environ.setdefault("OPENAI_API_KEY", "sk-test")
 os.environ.setdefault("ALLOWED_ORIGINS", "http://localhost:3000")
 os.environ.setdefault("SIGNAL_ANALYSIS_WORKER_ENABLED", "false")
+os.environ.setdefault("SOLUTION_WORKER_ENABLED", "false")
 
 sys.modules.setdefault("firebase_admin", MagicMock())
 
@@ -56,6 +57,8 @@ from app.models import (  # noqa: E402
 from app.routes.clusters import router as clusters_router  # noqa: E402
 from app.routes.search_sessions import router as search_sessions_router  # noqa: E402
 from app.routes.signal_workspace import router as signal_workspace_router  # noqa: E402
+from app.routes.solution_workspace import router as solution_workspace_router  # noqa: E402
+from app.routes.ide_workspace import router as ide_workspace_router  # noqa: E402
 from app.routes.problems import router as problems_router  # noqa: E402
 from app.routes.pipeline import router as pipeline_router  # noqa: E402
 from app.routes.public import router as public_router  # noqa: E402
@@ -282,6 +285,8 @@ def app(fake_db):
     application.include_router(clusters_router)
     application.include_router(search_sessions_router)
     application.include_router(signal_workspace_router)
+    application.include_router(solution_workspace_router)
+    application.include_router(ide_workspace_router)
     application.include_router(problems_router)
     application.include_router(pipeline_router)
     application.include_router(public_router)

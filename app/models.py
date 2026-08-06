@@ -310,6 +310,130 @@ class SignalConversationTurn(Base):
     )
 
 
+class SolutionCase(Base):
+    __tablename__ = "solution_cases"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    pipeline_id: Mapped[str] = mapped_column(
+        PGUUID(as_uuid=False),
+        ForeignKey("pipeline.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    progress_step: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    progress_label: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    safe_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    problem_case_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    request: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    current_version_id: Mapped[str | None] = mapped_column(
+        PGUUID(as_uuid=False),
+        ForeignKey("solution_versions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class SolutionVersion(Base):
+    __tablename__ = "solution_versions"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    case_id: Mapped[str] = mapped_column(
+        PGUUID(as_uuid=False),
+        ForeignKey("solution_cases.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(48), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    model: Mapped[str] = mapped_column(String(160), nullable=False)
+    problem_case_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    document: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class SolutionJob(Base):
+    __tablename__ = "solution_jobs"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    case_id: Mapped[str] = mapped_column(
+        PGUUID(as_uuid=False),
+        ForeignKey("solution_cases.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    requested_by: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    lease_owner: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    error_category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    safe_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class IdeAccessToken(Base):
+    __tablename__ = "ide_access_tokens"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    pipeline_id: Mapped[str] = mapped_column(
+        PGUUID(as_uuid=False),
+        ForeignKey("pipeline.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    token_prefix: Mapped[str] = mapped_column(String(24), nullable=False)
+    last_used_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class SolutionTaskState(Base):
+    __tablename__ = "solution_task_states"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    case_id: Mapped[str] = mapped_column(
+        PGUUID(as_uuid=False),
+        ForeignKey("solution_cases.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    task_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="todo")
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_by: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+
 
 class Problem(Base):
     __tablename__ = "problems"
