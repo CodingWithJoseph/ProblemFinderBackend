@@ -1,6 +1,6 @@
 # Immensity backend
 
-FastAPI backend for the Discovery, Problem Breakdown, and MVP Build warrooms.
+FastAPI backend for the Discovery, Analysis, and Design workflow.
 
 ## Release additions
 

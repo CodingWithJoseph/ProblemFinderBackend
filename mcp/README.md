@@ -6,7 +6,7 @@ This local stdio server gives an IDE agent project-scoped access to a generated 
 - `get_next_task`
 - `update_task_progress`
 
-Create a token in the MVP Build Warroom, then configure an MCP-compatible IDE:
+Create a token in Design, then configure an MCP-compatible IDE:
 
 ```json
 {

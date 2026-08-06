@@ -63,7 +63,7 @@ async def generate_solution_case(
     if problem_case is None or problem_version is None:
         raise HTTPException(
             status_code=409,
-            detail="Finish the Problem Breakdown before generating an MVP solution",
+            detail="Complete Analysis before generating a solution",
         )
 
     case = await find_solution_case(db, pipeline_id, uid)
