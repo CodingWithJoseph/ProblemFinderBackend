@@ -1,18 +1,12 @@
-# Runtime dependencies for the backend API.
-#
-# NOTE: pin concrete versions from the deploy environment's `pip freeze`
-# (commit a requirements.lock.txt) — left unpinned here to avoid guessing
-# versions that differ from production. Test-only deps (pytest, pytest-asyncio,
-# aiosqlite) live in requirements-test.txt, not here.
-
-fastapi
-uvicorn
-sqlalchemy[asyncio]
-alembic
-asyncpg
-pydantic-settings
-python-dotenv
-firebase-admin
-openai
-httpx
-pgvector
+# Runtime dependencies, pinned to the verified release environment.
+fastapi==0.141.1
+uvicorn==0.52.1
+SQLAlchemy[asyncio]==2.0.51
+alembic==1.19.0
+asyncpg==0.31.0
+pydantic-settings==2.14.2
+python-dotenv==1.2.2
+firebase-admin==7.5.0
+openai==2.53.0
+httpx==0.28.1
+pgvector==0.5.0

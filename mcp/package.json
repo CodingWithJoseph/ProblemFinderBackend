@@ -1,0 +1,30 @@
+{
+  "name": "immensity-mcp-server",
+  "version": "0.1.0",
+  "description": "Project-scoped MCP server for the Immensity MVP Build Warroom",
+  "type": "module",
+  "bin": {
+    "immensity-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "typescript": "5.9.3"
+  },
+  "license": "MIT"
+}

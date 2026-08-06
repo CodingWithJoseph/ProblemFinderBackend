@@ -1,17 +1,4 @@
-# Test-only dependencies for the backend API suite.
-#
-# firebase-admin is stubbed in conftest.py (no real credentials
-# needed), so both are omitted to keep CI light. asyncpg is required only so the
-# async engine can be constructed (no real connection is ever opened — get_db is
-# overridden).
-fastapi
-sqlalchemy[asyncio]
-asyncpg
-pydantic-settings
-python-dotenv
-openai
-httpx
-pgvector
-pytest
-pytest-asyncio
-aiosqlite
+# Test-only dependencies. Install these with requirements.txt.
+pytest==9.1.1
+pytest-asyncio==1.4.0
+aiosqlite==0.22.1
