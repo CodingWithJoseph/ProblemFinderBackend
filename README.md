@@ -39,6 +39,16 @@ Apply the pending database migrations:
 python scripts\migrate.py
 ```
 
+To add one reusable test project for the Build UI, run the local-only seed with
+the Firebase UID used to sign in to the web app:
+
+```powershell
+python scripts\seed_build_test_project.py --user-id <firebase-uid>
+```
+
+The command is safe to rerun, creates no public demo route, and refuses to run
+when `ENVIRONMENT` is `production` or `prod`.
+
 ### 2. Start the Llama agent
 
 In the first terminal, start the local `gpt-oss-20b` model server. If
