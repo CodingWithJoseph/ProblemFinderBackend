@@ -1,6 +1,38 @@
 from conftest import FakeResult, TEST_UID, make_pipeline
-from app.models import SignalAnalysisVersion, SolutionCase, SolutionJob
+from datetime import datetime, timezone
+
+from app.models import SignalAnalysisVersion, SolutionCase, SolutionJob, SolutionVersion
 from app.services.signal_cases import new_signal_case_and_job
+from test_solution_contract import _document
+
+
+def _ready_solution(card):
+    now = datetime.now(timezone.utc)
+    version = SolutionVersion(
+        id="solution-version-1",
+        case_id="solution-case-1",
+        version=1,
+        schema_version="solution-case.v1",
+        provider="test",
+        model="test",
+        problem_case_version=2,
+        document=_document(),
+        generated_at=now,
+    )
+    case = SolutionCase(
+        id="solution-case-1",
+        pipeline_id=card.id,
+        user_id=TEST_UID,
+        status="ready",
+        problem_case_version=2,
+        request={"deliveryTarget": "web", "constraints": [], "preferredStack": []},
+        current_version_id=version.id,
+        approval_status="draft",
+        approved_version_id=None,
+        created_at=now,
+        updated_at=now,
+    )
+    return case, version
 
 
 async def test_get_solution_case_returns_not_started_for_owned_project(
@@ -75,3 +107,107 @@ async def test_generate_solution_requires_ready_problem_breakdown(
     )
 
     assert response.status_code == 409
+
+
+async def test_get_ready_solution_backfills_the_focused_document_package(
+    client,
+    fake_db,
+    auth_headers,
+):
+    card = make_pipeline()
+    case, version = _ready_solution(card)
+    fake_db.stub(execute=[
+        FakeResult(rows=[card]),
+        FakeResult(rows=[case]),
+        FakeResult(rows=[version]),
+    ])
+
+    response = await client.get(f"/pipeline/{card.id}/solution/case", headers=auth_headers)
+
+    assert response.status_code == 200
+    assert response.json()["approvalStatus"] == "draft"
+    assert response.json()["documents"][0]["filename"] == "docs/BUILD_CONTRACT.md"
+
+
+async def test_editing_a_build_document_creates_an_immutable_draft_version(
+    client,
+    fake_db,
+    auth_headers,
+):
+    card = make_pipeline()
+    case, version = _ready_solution(card)
+    fake_db.stub(
+        execute=[FakeResult(rows=[card]), FakeResult(rows=[case]), FakeResult(rows=[version])],
+        scalar=[1],
+    )
+
+    response = await client.patch(
+        f"/pipeline/{card.id}/solution/case/documents/requirements",
+        headers=auth_headers,
+        json={
+            "expectedVersion": 1,
+            "content": (
+                "# Requirements\n\n"
+                "| ID | Feature | Requirement |\n"
+                "| --- | --- | --- |\n"
+                "| REQ-feature-1-1 | feature-1 | Reminder is verified |\n"
+            ),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["version"] == 2
+    assert response.json()["approvalStatus"] == "draft"
+    saved = next(row for row in fake_db.added if isinstance(row, SolutionVersion))
+    assert saved.provider == "user"
+    assert version.document["version"] == 1
+    assert case.current_version_id == saved.id
+
+
+async def test_approval_pins_the_exact_current_build_version(
+    client,
+    fake_db,
+    auth_headers,
+):
+    card = make_pipeline()
+    case, version = _ready_solution(card)
+    fake_db.stub(execute=[
+        FakeResult(rows=[card]),
+        FakeResult(rows=[case]),
+        FakeResult(rows=[version]),
+    ])
+
+    response = await client.post(
+        f"/pipeline/{card.id}/solution/case/approve",
+        headers=auth_headers,
+        json={"expectedVersion": 1},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["approvalStatus"] == "approved"
+    assert response.json()["approvedVersion"] == 1
+    assert case.approved_version_id == version.id
+
+
+async def test_build_package_export_is_a_zip_download(
+    client,
+    fake_db,
+    auth_headers,
+):
+    card = make_pipeline(project_name="Invoice helper")
+    case, version = _ready_solution(card)
+    fake_db.stub(execute=[
+        FakeResult(rows=[card]),
+        FakeResult(rows=[case]),
+        FakeResult(rows=[version]),
+    ])
+
+    response = await client.get(
+        f"/pipeline/{card.id}/solution/case/export",
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    assert "invoice-helper-build-v1.zip" in response.headers["content-disposition"]
+    assert response.content.startswith(b"PK")

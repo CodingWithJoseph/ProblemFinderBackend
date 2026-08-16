@@ -43,6 +43,14 @@ def test_ide_mcp_migration_uses_hashed_revocable_project_tokens():
     assert "unique (case_id, task_id)" in sql
 
 
+def test_build_contract_migration_pins_approval_and_verification():
+    sql = _sql("0052_build_contract_foundation.sql")
+
+    assert "approved_version_id uuid" in sql
+    assert "approval_status varchar(24)" in sql
+    assert "verification jsonb" in sql
+
+
 def _sql(name: str) -> str:
     return (ROOT / "migrations" / name).read_text(encoding="utf-8").lower()
 

@@ -12,7 +12,6 @@ from app.readiness import check_database_readiness
 from app.routes.clusters import router as clusters_router
 from app.routes.pipeline import router as pipeline_router
 from app.routes.problems import router as problems_router
-from app.routes.public import router as public_router
 from app.routes.search_sessions import router as search_sessions_router
 from app.routes.signal_workspace import router as signal_workspace_router
 from app.routes.solution_workspace import router as solution_workspace_router
@@ -85,7 +84,6 @@ app.include_router(solution_workspace_router)
 app.include_router(ide_workspace_router)
 app.include_router(pipeline_router)
 app.include_router(problems_router)
-app.include_router(public_router)
 
 
 @app.get("/health")

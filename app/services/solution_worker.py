@@ -13,6 +13,7 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
+from app.build_documents import ensure_build_documents
 from app.db import AsyncSessionLocal
 from app.models import Pipeline, SolutionCase, SolutionJob, SolutionTaskState, SolutionVersion
 from app.prompts.solution_generation import SOLUTION_GENERATION_INSTRUCTIONS
@@ -231,6 +232,7 @@ async def save_solution_version(
     provider: SolutionProvider,
 ) -> None:
     now = utc_now()
+    document = ensure_build_documents(document)
     version = SolutionVersion(
         id=str(uuid.uuid4()),
         case_id=case.id,
@@ -248,6 +250,9 @@ async def save_solution_version(
     # replaces that graph, so old task IDs must not inherit completed states.
     await db.execute(delete(SolutionTaskState).where(SolutionTaskState.case_id == case.id))
     case.current_version_id = version.id
+    case.approval_status = "draft"
+    case.approved_version_id = None
+    case.approved_at = None
     case.status = "ready"
     case.progress_step = None
     case.progress_label = None

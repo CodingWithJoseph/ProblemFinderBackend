@@ -167,27 +167,9 @@ async def test_cluster_detail_404(client, fake_db, auth_headers):
     assert resp.status_code == 404
 
 
-# Public marketing API
-
-async def test_public_clusters(client, fake_db):
-    cluster = make_cluster()
-    item = make_cluster_item()
-    fake_db.stub(execute=[FakeResult(rows=[cluster]), FakeResult(rows=[item])])
-    resp = await client.get("/public/clusters")
-    assert resp.status_code == 200
-    row = resp.json()["data"][0]
-    assert "signal_score" not in row
-    assert row["post_count"] == 1
-    assert row["subreddits"] == ["r/freelance"]
-
-
-async def test_public_stats_counts_items_and_clusters(client, fake_db):
-    fake_db.stub(scalar=[18320, 324])
-    resp = await client.get("/public/stats")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["conversationsAnalyzed"] == 18320
-    assert body["clustersDetected"] == 324
+async def test_public_demo_routes_are_removed(client):
+    assert (await client.get("/public/clusters")).status_code == 404
+    assert (await client.get("/public/search?q=test")).status_code == 404
 
 
 # Problems

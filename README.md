@@ -1,17 +1,18 @@
 # Immensity backend
 
-FastAPI backend for the Discovery, Analysis, and Design workflow.
+FastAPI backend for the Discovery, Analysis, and Build workflow.
 
 ## Release additions
 
-- Versioned `solution-case.v1` contract
+- Versioned `solution-case.v1` Build Contract
 - Schema-constrained Solution Architect provider
 - Durable solution-generation worker
 - Immutable Solution Case versions
 - Problem-unit and evidence traceability validation
 - Project-scoped, revocable IDE access tokens
-- Mutable task-progress overlays
-- IDE context, next-task, and progress APIs
+- Focused Markdown package, immutable editing, approval, and ZIP export
+- Mutable task progress, blocker, and verification overlays
+- Focused document, project-status, context, and next-task APIs
 - Publish-ready stdio MCP package in `mcp/`
 
 ## Run locally
@@ -88,7 +89,7 @@ npm run build
 npm pack --dry-run
 ```
 
-Publish the package as `immensity-mcp-server` before exposing the Connect IDE action to production users.
+Publish the package as `immensity-mcp-server@0.2.0` before exposing the coding-agent action to production users. See [docs/build-workspace.md](docs/build-workspace.md) for the lifecycle and release contract.
 
 ## Release smoke test
 

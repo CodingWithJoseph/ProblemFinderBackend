@@ -61,7 +61,6 @@ from app.routes.solution_workspace import router as solution_workspace_router  #
 from app.routes.ide_workspace import router as ide_workspace_router  # noqa: E402
 from app.routes.problems import router as problems_router  # noqa: E402
 from app.routes.pipeline import router as pipeline_router  # noqa: E402
-from app.routes.public import router as public_router  # noqa: E402
 
 TEST_UID = "test-uid"
 
@@ -289,7 +288,6 @@ def app(fake_db):
     application.include_router(ide_workspace_router)
     application.include_router(problems_router)
     application.include_router(pipeline_router)
-    application.include_router(public_router)
 
     async def _get_db_override():
         yield fake_db

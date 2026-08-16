@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 
 
@@ -12,6 +12,18 @@ SOLUTION_SCHEMA_VERSION = "solution-case.v1"
 
 SolutionStatus = Literal["not_started", "queued", "generating", "ready", "failed"]
 DeliveryTarget = Literal["web", "ios", "android"]
+ApprovalStatus = Literal["draft", "approved"]
+BuildDocumentKey = Literal[
+    "build_contract",
+    "features",
+    "requirements",
+    "tasks",
+    "test_plan",
+    "decisions",
+    "agents",
+    "claude",
+    "copilot_instructions",
+]
 
 
 class SolutionContractModel(BaseModel):
@@ -109,6 +121,14 @@ class SolutionDeliveryItem(SolutionContractModel):
     status: Literal["not_started", "in_progress", "complete", "blocked"] = "not_started"
 
 
+class BuildDocument(SolutionContractModel):
+    key: BuildDocumentKey
+    title: str = Field(min_length=1, max_length=120)
+    filename: str = Field(min_length=1, max_length=240)
+    content: str = Field(min_length=1, max_length=120_000)
+    editable: bool = True
+
+
 class SolutionModelOutput(SolutionContractModel):
     mvp_goal: str = Field(min_length=1, max_length=600)
     constraints: list[str] = Field(default_factory=list, max_length=12)
@@ -118,7 +138,7 @@ class SolutionModelOutput(SolutionContractModel):
     architecture: SolutionArchitecture
     tasks: list[SolutionTask] = Field(min_length=1, max_length=30)
     test_plan: SolutionTestPlan
-    delivery_checklist: list[SolutionDeliveryItem] = Field(min_length=1, max_length=24)
+    delivery_checklist: list[SolutionDeliveryItem] = Field(default_factory=list, max_length=24)
 
     @model_validator(mode="after")
     def validate_internal_references(self) -> "SolutionModelOutput":
@@ -149,6 +169,9 @@ class SolutionCaseDocument(SolutionContractModel):
     safe_error: str | None = None
     project: SolutionProjectContext
     problem_case_version: int = Field(ge=0)
+    approval_status: ApprovalStatus = "draft"
+    approved_version: int | None = Field(default=None, ge=1)
+    approved_at: str | None = None
     mvp_goal: str | None = Field(default=None, max_length=600)
     constraints: list[str] = Field(default_factory=list, max_length=12)
     non_goals: list[str] = Field(default_factory=list, max_length=20)
@@ -158,6 +181,7 @@ class SolutionCaseDocument(SolutionContractModel):
     tasks: list[SolutionTask] = Field(default_factory=list, max_length=30)
     test_plan: SolutionTestPlan | None = None
     delivery_checklist: list[SolutionDeliveryItem] = Field(default_factory=list, max_length=24)
+    documents: list[BuildDocument] = Field(default_factory=list, max_length=12)
 
     @model_validator(mode="after")
     def validate_ready_document(self) -> "SolutionCaseDocument":
@@ -183,6 +207,22 @@ class SolutionGenerateRequest(SolutionContractModel):
     delivery_target: DeliveryTarget = "web"
     constraints: list[str] = Field(default_factory=list, max_length=12)
     preferred_stack: list[str] = Field(default_factory=list, max_length=12)
+
+
+class BuildDocumentUpdateRequest(SolutionContractModel):
+    expected_version: int = Field(ge=1)
+    content: str = Field(min_length=1, max_length=120_000)
+
+    @field_validator("content")
+    @classmethod
+    def require_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("content cannot be blank")
+        return value
+
+
+class ApproveSolutionRequest(SolutionContractModel):
+    expected_version: int = Field(ge=1)
 
 
 def _unique_ids(rows: list[SolutionContractModel], label: str) -> set[str]:
