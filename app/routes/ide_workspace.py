@@ -10,7 +10,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -69,9 +69,32 @@ class CreatedIdeToken(IdeTokenSummary):
     token: str
 
 
+class VerificationCheck(ApiModel):
+    command: str = Field(min_length=1, max_length=500)
+    outcome: Literal["passed", "failed", "skipped"]
+    details: str | None = Field(default=None, max_length=2000)
+
+
+class TaskVerification(ApiModel):
+    summary: str = Field(min_length=1, max_length=2000)
+    checks: list[VerificationCheck] = Field(min_length=1, max_length=20)
+
+
 class TaskProgressRequest(ApiModel):
     status: Literal["todo", "in_progress", "blocked", "done"]
     note: str | None = Field(default=None, max_length=2000)
+    verification: TaskVerification | None = None
+
+    @model_validator(mode="after")
+    def require_status_evidence(self) -> "TaskProgressRequest":
+        if self.status == "blocked" and not (self.note or "").strip():
+            raise ValueError("blocked tasks require a note")
+        if self.status == "done":
+            if self.verification is None:
+                raise ValueError("done tasks require a verification summary and checks")
+            if any(check.outcome != "passed" for check in self.verification.checks):
+                raise ValueError("done tasks require every submitted check to pass")
+        return self
 
 
 class IdeAccess:
@@ -170,7 +193,15 @@ async def _ready_workspace(
     if problem_version is None or solution_case is None or solution_version is None or solution_case.status != "ready":
         raise HTTPException(
             status_code=409,
-            detail="Complete Analysis and Design before connecting an IDE",
+            detail="Complete Analysis and Build before connecting a coding agent",
+        )
+    if (
+        getattr(solution_case, "approval_status", None) != "approved"
+        or getattr(solution_case, "approved_version_id", None) != solution_version.id
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Approve the current Build Contract before connecting a coding agent",
         )
     return card, problem_version, solution_case, solution_version
 
@@ -194,6 +225,7 @@ def _solution_with_task_states(
         if state is not None:
             task["status"] = state.status
             task["progressNote"] = state.note
+            task["verification"] = state.verification or None
     return document
 
 
@@ -308,6 +340,78 @@ async def get_next_ide_task(
     return {"data": next_task, "allComplete": all(value == "done" for value in statuses.values())}
 
 
+@router.get("/ide/projects/{pipeline_id}/documents")
+async def list_ide_build_documents(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    access: IdeAccess = Depends(require_ide_access),
+):
+    card, _, solution_case, solution_version = await _ready_workspace(
+        db, pipeline_id, access.user_id
+    )
+    solution = build_current_solution_document(card, solution_case, solution_version)
+    return {
+        "version": solution.version,
+        "approvalStatus": solution.approval_status,
+        "data": [
+            item.model_dump(mode="json", by_alias=True, exclude={"content"})
+            for item in solution.documents
+        ],
+    }
+
+
+@router.get("/ide/projects/{pipeline_id}/documents/{document_key}")
+async def get_ide_build_document(
+    pipeline_id: str,
+    document_key: str,
+    db: AsyncSession = Depends(get_db),
+    access: IdeAccess = Depends(require_ide_access),
+):
+    card, _, solution_case, solution_version = await _ready_workspace(
+        db, pipeline_id, access.user_id
+    )
+    solution = build_current_solution_document(card, solution_case, solution_version)
+    document = next((item for item in solution.documents if item.key == document_key), None)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Build document not found")
+    return {
+        "version": solution.version,
+        "data": document.model_dump(mode="json", by_alias=True),
+    }
+
+
+@router.get("/ide/projects/{pipeline_id}/status")
+async def get_ide_project_status(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    access: IdeAccess = Depends(require_ide_access),
+):
+    card, _, solution_case, solution_version = await _ready_workspace(
+        db, pipeline_id, access.user_id
+    )
+    states = await _task_states(db, str(solution_case.id))
+    solution = _solution_with_task_states(card, solution_case, solution_version, states)
+    counts = {status_name: 0 for status_name in ("todo", "in_progress", "blocked", "done")}
+    blocked = []
+    for task in solution["tasks"]:
+        counts[task["status"]] += 1
+        if task["status"] == "blocked":
+            blocked.append({
+                "id": task["id"],
+                "title": task["title"],
+                "note": task.get("progressNote"),
+            })
+    return {
+        "data": {
+            "buildVersion": solution["version"],
+            "approvalStatus": solution["approvalStatus"],
+            "taskCounts": counts,
+            "blockedTasks": blocked,
+            "allComplete": bool(solution["tasks"]) and counts["done"] == len(solution["tasks"]),
+        }
+    }
+
+
 @router.patch("/ide/projects/{pipeline_id}/tasks/{task_id}")
 async def update_ide_task(
     pipeline_id: str,
@@ -338,6 +442,11 @@ async def update_ide_task(
         db.add(row)
     row.status = body.status
     row.note = body.note
+    row.verification = (
+        body.verification.model_dump(mode="json", by_alias=True)
+        if body.verification
+        else {}
+    )
     row.updated_by = f"ide:{access.id}"
     row.updated_at = now
     await db.commit()
@@ -346,6 +455,7 @@ async def update_ide_task(
             "taskId": task_id,
             "status": row.status,
             "note": row.note,
+            "verification": row.verification or None,
             "updatedAt": row.updated_at,
         }
     }

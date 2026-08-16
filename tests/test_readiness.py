@@ -51,7 +51,11 @@ class FakeEngine:
 
 async def test_readiness_passes_when_release_migrations_are_applied():
     status = await check_database_readiness(
-        FakeEngine(FakeConnection(["0050_solution_warroom", "0051_ide_mcp_access"]))
+        FakeEngine(FakeConnection([
+            "0050_solution_warroom",
+            "0051_ide_mcp_access",
+            "0052_build_contract_foundation",
+        ]))
     )
 
     assert status.ready is True
@@ -64,7 +68,10 @@ async def test_readiness_lists_missing_release_migrations():
     )
 
     assert status.ready is False
-    assert status.missing_migrations == ("0051_ide_mcp_access",)
+    assert status.missing_migrations == (
+        "0051_ide_mcp_access",
+        "0052_build_contract_foundation",
+    )
 
 
 async def test_readiness_hides_database_errors():

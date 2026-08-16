@@ -1,12 +1,18 @@
-# Immensity MCP server
+# Immensity Build MCP server
 
-This local stdio server gives an IDE agent project-scoped access to a generated MVP solution. It exposes three tools:
+This local stdio server gives MCP-compatible coding agents project-scoped access to an approved Immensity Build Contract.
 
-- `get_project_context`
-- `get_next_task`
-- `update_task_progress`
+It exposes focused document reads, dependency-aware task selection, project status, blocker reporting, and verified completion. `get_project_context` remains available for clients that need the complete Problem Case and Build data in one call.
 
-Create a token in Design, then configure an MCP-compatible IDE:
+## Configuration
+
+The server needs three environment variables:
+
+- `IMMENSITY_API_URL`
+- `IMMENSITY_PROJECT_ID`
+- `IMMENSITY_PROJECT_TOKEN`
+
+Generic MCP JSON:
 
 ```json
 {
@@ -25,4 +31,4 @@ Create a token in Design, then configure an MCP-compatible IDE:
 }
 ```
 
-Tokens are scoped to one project, stored as hashes by the API, expire after 30 days, and can be revoked from the product.
+Tokens are scoped to one project, stored only as hashes by the API, expire after 30 days, and can be revoked. The API rejects MCP access unless the token's exact Build Contract version is approved.

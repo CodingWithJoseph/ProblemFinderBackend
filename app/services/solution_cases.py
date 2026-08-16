@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Pipeline, SolutionCase, SolutionJob, SolutionVersion
+from app.build_documents import ensure_build_documents
 from app.solution_contract import (
     SolutionCaseDocument,
     SolutionGenerateRequest,
@@ -39,6 +40,9 @@ def new_solution_case_and_job(
         problem_case_version=problem_case_version,
         request=request.model_dump(mode="json", by_alias=True),
         current_version_id=None,
+        approval_status="draft",
+        approved_version_id=None,
+        approved_at=None,
         created_at=now,
         updated_at=now,
     )
@@ -78,6 +82,12 @@ def build_empty_solution_document(
             generated_at=None,
         ),
         problem_case_version=case.problem_case_version if case else 0,
+        approval_status=getattr(case, "approval_status", None) or "draft",
+        approved_at=(
+            case.approved_at.isoformat()
+            if case and getattr(case, "approved_at", None)
+            else None
+        ),
     )
 
 
@@ -97,6 +107,17 @@ def build_current_solution_document(
         ),
         "safeError": case.safe_error,
         "problemCaseVersion": version.problem_case_version,
+        "approvalStatus": getattr(case, "approval_status", None) or "draft",
+        "approvedVersion": (
+            version.version
+            if getattr(case, "approved_version_id", None) == version.id
+            else None
+        ),
+        "approvedAt": (
+            case.approved_at.isoformat()
+            if getattr(case, "approved_at", None)
+            else None
+        ),
         "project": {
             "pipelineId": str(card.id),
             "projectName": card.project_name or card.name,
@@ -104,7 +125,7 @@ def build_current_solution_document(
             "generatedAt": version.generated_at.isoformat() if version.generated_at else None,
         },
     })
-    return SolutionCaseDocument.model_validate(payload)
+    return ensure_build_documents(SolutionCaseDocument.model_validate(payload))
 
 
 async def find_solution_case(
@@ -117,6 +138,21 @@ async def find_solution_case(
             SolutionCase.pipeline_id == pipeline_id,
             SolutionCase.user_id == uid,
         )
+    )).scalar_one_or_none()
+
+
+async def find_solution_case_for_update(
+    db: AsyncSession,
+    pipeline_id: str,
+    uid: str,
+) -> SolutionCase | None:
+    return (await db.execute(
+        select(SolutionCase)
+        .where(
+            SolutionCase.pipeline_id == pipeline_id,
+            SolutionCase.user_id == uid,
+        )
+        .with_for_update()
     )).scalar_one_or_none()
 
 

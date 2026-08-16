@@ -333,6 +333,13 @@ class SolutionCase(Base):
         ForeignKey("solution_versions.id", ondelete="SET NULL"),
         nullable=True,
     )
+    approval_status: Mapped[str] = mapped_column(String(24), nullable=False, default="draft")
+    approved_version_id: Mapped[str | None] = mapped_column(
+        PGUUID(as_uuid=False),
+        ForeignKey("solution_versions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
     )
@@ -425,6 +432,7 @@ class SolutionTaskState(Base):
     task_id: Mapped[str] = mapped_column(String(160), nullable=False)
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="todo")
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verification: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     updated_by: Mapped[str] = mapped_column(String(128), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)

@@ -16,8 +16,13 @@ Rules:
   competition, distribution strategy, or market fit.
 - Alternatives in the Problem Case are workflow constraints, not competitors.
 - Prefer the project's existing stack when one is supplied.
-- Include security, privacy, configuration, testing, and deployment work needed
-  for the requested web or mobile delivery target.
+- Include only architecture, configuration, privacy, and security details that
+  are necessary to implement the defined features or explicit user constraints.
+- Do not invent repository state, infrastructure, compliance, deployment,
+  store-submission, or operational requirements that are not in the input.
+- Leave deliveryChecklist empty. Immensity's handoff ends with the focused
+  Build documents, implementation tasks, and checks; it does not claim the
+  user's deployment or release work.
 - Generated object IDs must be short and stable within the response
   (feature-1, component-1, task-1, delivery-1).
 """.strip()
