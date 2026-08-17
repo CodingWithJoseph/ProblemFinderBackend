@@ -1,5 +1,8 @@
 import uuid
+import subprocess
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -47,3 +50,17 @@ def test_build_test_seed_refuses_production() -> None:
         require_local_environment("production")
 
     require_local_environment("development")
+
+
+def test_build_test_seed_script_runs_from_the_repository_root() -> None:
+    repository_root = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [sys.executable, "scripts/seed_build_test_project.py", "--help"],
+        cwd=repository_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--user-id" in result.stdout
