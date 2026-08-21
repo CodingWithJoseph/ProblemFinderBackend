@@ -13,6 +13,7 @@ FastAPI backend for the Discovery, Analysis, and Build workflow.
 - Focused Markdown package, immutable editing, approval, and ZIP export
 - Mutable task progress, blocker, and verification overlays
 - Focused document, project-status, context, and next-task APIs
+- Bidirectional website and IDE/MCP Build editing over one canonical version
 - Publish-ready stdio MCP package in `mcp/`
 
 ## Run locally
@@ -39,15 +40,17 @@ Apply the pending database migrations:
 python scripts\migrate.py
 ```
 
-To add one reusable test project for the Build UI, run the local-only seed with
+To prepare the two Build round-trip test lanes, run the local-only command with
 the Firebase UID used to sign in to the web app:
 
 ```powershell
-python scripts\seed_build_test_project.py --user-id <firebase-uid>
+python scripts\prepare_build_roundtrip_examples.py --user-id <firebase-uid>
 ```
 
-The command is safe to rerun, creates no public demo route, and refuses to run
-when `ENVIRONMENT` is `production` or `prod`.
+The command removes the old synthetic Build seed, selects up to two existing
+cluster-backed projects with completed Analysis, and moves them to Build. If
+only one eligible project exists, it is reused for both test lanes. It creates
+no fake evidence or public demo route and refuses to run in production.
 
 ### 2. Start the Llama agent
 

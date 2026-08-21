@@ -47,7 +47,7 @@ async def test_get_solution_case_returns_not_started_for_owned_project(
 
     assert response.status_code == 200
     assert response.json()["status"] == "not_started"
-    assert response.json()["project"]["deliveryTarget"] == "web"
+    assert response.json()["project"]["deliveryTargets"] == ["web"]
 
 
 async def test_generate_solution_queues_case_from_ready_problem_breakdown(
@@ -162,6 +162,45 @@ async def test_editing_a_build_document_creates_an_immutable_draft_version(
     assert saved.provider == "user"
     assert version.document["version"] == 1
     assert case.current_version_id == saved.id
+
+
+async def test_editing_a_structured_section_persists_the_same_canonical_document(
+    client,
+    fake_db,
+    auth_headers,
+):
+    card = make_pipeline()
+    case, version = _ready_solution(card)
+    fake_db.stub(
+        execute=[FakeResult(rows=[card]), FakeResult(rows=[case]), FakeResult(rows=[version])],
+        scalar=[1],
+    )
+
+    response = await client.patch(
+        f"/pipeline/{card.id}/solution/case/sections/mvp_goal",
+        headers=auth_headers,
+        json={
+            "expectedVersion": 1,
+            "value": {
+                "mvpGoal": "Let patients understand and act on one care recommendation.",
+                "primaryUsers": ["Patient", "Caregiver"],
+                "requiredCapability": "Understand and act on one care recommendation",
+                "successfulOutcome": "The next care step is clear",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["version"] == 2
+    assert response.json()["primaryUsers"] == ["Patient", "Caregiver"]
+    assert response.json()["mvpCapability"] == "Understand and act on one care recommendation"
+    assert response.json()["mvpOutcome"] == "The next care step is clear"
+    saved = next(row for row in fake_db.added if isinstance(row, SolutionVersion))
+    assert saved.provider == "user"
+    assert saved.document["mvpGoal"].startswith("Let patients")
+    assert saved.document["primaryUsers"] == ["Patient", "Caregiver"]
+    assert saved.document["mvpCapability"] == "Understand and act on one care recommendation"
+    assert saved.document["mvpOutcome"] == "The next care step is clear"
 
 
 async def test_approval_pins_the_exact_current_build_version(
