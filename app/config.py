@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     signal_analysis_worker_enabled: bool = True
     signal_analysis_poll_seconds: float = 2.0
 
+    solution_provider: str = ""
+    solution_base_url: str = ""
+    solution_model: str = ""
+    solution_timeout_seconds: float = 120.0
+    solution_reasoning_effort: str = "medium"
+    solution_max_output_tokens: int = 10_000
     solution_worker_enabled: bool = True
 
     allowed_origins: str = "http://localhost:3000"
