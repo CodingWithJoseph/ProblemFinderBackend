@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from app.build_documents import ensure_build_documents
 from app.config import get_settings
-from app.models import Pipeline, SolutionCase as SolutionCaseRow, SolutionVersion
 from app.solution_contract import SOLUTION_SCHEMA_VERSION, SolutionCaseDocument
 
 
@@ -203,6 +208,7 @@ async def seed_build_test_project(user_id: str) -> str:
     require_local_environment(settings.environment)
 
     from app.db import AsyncSessionLocal
+    from app.models import Pipeline, SolutionCase as SolutionCaseRow, SolutionVersion
 
     pipeline_id, case_id, version_id = test_project_ids(user_id)
     now = datetime.now(timezone.utc)
