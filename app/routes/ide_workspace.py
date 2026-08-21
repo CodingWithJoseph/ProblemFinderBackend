@@ -26,7 +26,26 @@ from app.models import (
     SolutionTaskState,
     SolutionVersion,
 )
-from app.services.solution_cases import build_current_solution_document
+from app.services.solution_cases import (
+    build_current_solution_document,
+    build_empty_solution_document,
+    find_current_solution_version,
+    new_solution_case_and_job,
+    queue_solution_generation,
+)
+from app.services.solution_versions import (
+    approve_solution_version,
+    save_solution_document_version,
+    save_solution_section_version,
+    solution_with_task_states,
+)
+from app.solution_contract import (
+    ApproveSolutionRequest,
+    BuildDocumentUpdateRequest,
+    SolutionGenerateRequest,
+    SolutionSectionKey,
+    SolutionSectionUpdateRequest,
+)
 
 
 router = APIRouter(tags=["ide"])
@@ -158,11 +177,18 @@ async def _owned_card(db: AsyncSession, pipeline_id: str, uid: str) -> Pipeline:
     return card
 
 
-async def _ready_workspace(
+async def _design_workspace(
     db: AsyncSession,
     pipeline_id: str,
     uid: str,
-) -> tuple[Pipeline, SignalAnalysisVersion, SolutionCase, SolutionVersion]:
+    *,
+    lock_solution: bool = False,
+) -> tuple[
+    Pipeline,
+    SignalAnalysisVersion,
+    SolutionCase | None,
+    SolutionVersion | None,
+]:
     card = await _owned_card(db, pipeline_id, uid)
     problem_case = (await db.execute(
         select(SignalAnalysisCase).where(
@@ -178,22 +204,39 @@ async def _ready_workspace(
             )
         )).scalar_one_or_none()
 
-    solution_case = (await db.execute(
-        select(SolutionCase).where(
-            SolutionCase.pipeline_id == pipeline_id,
-            SolutionCase.user_id == uid,
-        )
-    )).scalar_one_or_none()
+    solution_case_query = select(SolutionCase).where(
+        SolutionCase.pipeline_id == pipeline_id,
+        SolutionCase.user_id == uid,
+    )
+    if lock_solution:
+        solution_case_query = solution_case_query.with_for_update()
+    solution_case = (await db.execute(solution_case_query)).scalar_one_or_none()
     solution_version = None
     if solution_case and solution_case.current_version_id:
         solution_version = (await db.execute(
             select(SolutionVersion).where(SolutionVersion.id == solution_case.current_version_id)
         )).scalar_one_or_none()
 
-    if problem_version is None or solution_case is None or solution_version is None or solution_case.status != "ready":
+    if problem_version is None:
         raise HTTPException(
             status_code=409,
-            detail="Complete Analysis and Build before connecting a coding agent",
+            detail="Complete Analysis before designing the Build Contract",
+        )
+    return card, problem_version, solution_case, solution_version
+
+
+async def _ready_workspace(
+    db: AsyncSession,
+    pipeline_id: str,
+    uid: str,
+) -> tuple[Pipeline, SignalAnalysisVersion, SolutionCase, SolutionVersion]:
+    card, problem_version, solution_case, solution_version = await _design_workspace(
+        db, pipeline_id, uid
+    )
+    if solution_case is None or solution_version is None or solution_case.status != "ready":
+        raise HTTPException(
+            status_code=409,
+            detail="Complete Build before connecting a coding agent",
         )
     if (
         getattr(solution_case, "approval_status", None) != "approved"
@@ -291,6 +334,161 @@ async def revoke_ide_token(
         raise HTTPException(status_code=404, detail="IDE access token not found")
     row.revoked_at = utc_now()
     await db.commit()
+
+
+@router.get("/ide/projects/{pipeline_id}/problem-case")
+async def get_ide_problem_case(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    access: IdeAccess = Depends(require_ide_access),
+):
+    card, problem_version, _, _ = await _design_workspace(db, pipeline_id, access.user_id)
+    return {
+        "schemaVersion": "ide-problem-case.v1",
+        "project": {"id": str(card.id), "name": card.project_name or card.name},
+        "problemCase": {
+            "version": problem_version.version,
+            "schemaVersion": problem_version.schema_version,
+            "analysis": problem_version.analysis,
+        },
+    }
+
+
+@router.get("/ide/projects/{pipeline_id}/build")
+async def get_ide_build_workspace(
+    pipeline_id: str,
+    db: AsyncSession = Depends(get_db),
+    access: IdeAccess = Depends(require_ide_access),
+):
+    card, _, solution_case, solution_version = await _design_workspace(
+        db, pipeline_id, access.user_id
+    )
+    if solution_case is None:
+        return build_empty_solution_document(card)
+    if solution_version is None:
+        request = SolutionGenerateRequest.model_validate(solution_case.request or {})
+        return build_empty_solution_document(
+            card,
+            status=solution_case.status,
+            request=request,
+            case=solution_case,
+        )
+    return await solution_with_task_states(db, card, solution_case, solution_version)
+
+
+@router.post(
+    "/ide/projects/{pipeline_id}/build/generate",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def generate_ide_build_workspace(
+    pipeline_id: str,
+    body: SolutionGenerateRequest,
+    db: AsyncSession = Depends(get_db),
+    access: IdeAccess = Depends(require_ide_access),
+):
+    card, problem_version, solution_case, _ = await _design_workspace(
+        db, pipeline_id, access.user_id
+    )
+    if solution_case is None:
+        solution_case, job = new_solution_case_and_job(
+            card,
+            access.user_id,
+            body,
+            problem_version.version,
+        )
+        db.add(solution_case)
+        db.add(job)
+        await db.commit()
+    else:
+        await queue_solution_generation(
+            db,
+            solution_case,
+            access.user_id,
+            body,
+            problem_version.version,
+        )
+    current = await find_current_solution_version(db, solution_case)
+    if current is not None:
+        return build_current_solution_document(card, solution_case, current)
+    return build_empty_solution_document(
+        card,
+        status=solution_case.status,
+        request=body,
+        case=solution_case,
+    )
+
+
+@router.patch("/ide/projects/{pipeline_id}/build/sections/{section_key}")
+async def update_ide_build_section(
+    pipeline_id: str,
+    section_key: SolutionSectionKey,
+    body: SolutionSectionUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    access: IdeAccess = Depends(require_ide_access),
+):
+    card, _, solution_case, solution_version = await _design_workspace(
+        db, pipeline_id, access.user_id, lock_solution=True
+    )
+    if solution_case is None or solution_version is None or solution_case.status != "ready":
+        raise HTTPException(status_code=409, detail="Generate the Build Contract before editing it")
+    return await save_solution_section_version(
+        db,
+        card,
+        solution_case,
+        solution_version,
+        section_key,
+        body.value,
+        expected_version=body.expected_version,
+        provider="ide",
+        model="structured-editor",
+    )
+
+
+@router.patch("/ide/projects/{pipeline_id}/build/documents/{document_key}")
+async def update_ide_build_document(
+    pipeline_id: str,
+    document_key: str,
+    body: BuildDocumentUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    access: IdeAccess = Depends(require_ide_access),
+):
+    card, _, solution_case, solution_version = await _design_workspace(
+        db, pipeline_id, access.user_id, lock_solution=True
+    )
+    if solution_case is None or solution_version is None or solution_case.status != "ready":
+        raise HTTPException(status_code=409, detail="Generate the Build Contract before editing it")
+    return await save_solution_document_version(
+        db,
+        card,
+        solution_case,
+        solution_version,
+        document_key,
+        body.content,
+        expected_version=body.expected_version,
+        provider="ide",
+        model="manual",
+    )
+
+
+@router.post("/ide/projects/{pipeline_id}/build/approve")
+async def approve_ide_build_workspace(
+    pipeline_id: str,
+    body: ApproveSolutionRequest,
+    db: AsyncSession = Depends(get_db),
+    access: IdeAccess = Depends(require_ide_access),
+):
+    card, _, solution_case, solution_version = await _design_workspace(
+        db, pipeline_id, access.user_id, lock_solution=True
+    )
+    if solution_case is None or solution_version is None or solution_case.status != "ready":
+        raise HTTPException(status_code=409, detail="Generate the Build Contract before approving it")
+    return await approve_solution_version(
+        db,
+        card,
+        solution_case,
+        solution_version,
+        expected_version=body.expected_version,
+    )
 
 
 @router.get("/ide/projects/{pipeline_id}/context")

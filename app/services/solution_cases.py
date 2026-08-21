@@ -8,8 +8,8 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Pipeline, SolutionCase, SolutionJob, SolutionVersion
 from app.build_documents import ensure_build_documents
+from app.models import Pipeline, SolutionCase, SolutionJob, SolutionVersion
 from app.solution_contract import (
     SolutionCaseDocument,
     SolutionGenerateRequest,
@@ -66,7 +66,7 @@ def build_empty_solution_document(
     request: SolutionGenerateRequest | None = None,
     case: SolutionCase | None = None,
 ) -> SolutionCaseDocument:
-    target = request.delivery_target if request else "web"
+    targets = request.delivery_targets if request else ["web"]
     progress = None
     if case and case.progress_step and case.progress_label:
         progress = SolutionProgress(step=case.progress_step, label=case.progress_label)
@@ -78,7 +78,7 @@ def build_empty_solution_document(
         project=SolutionProjectContext(
             pipeline_id=str(card.id),
             project_name=card.project_name or card.name,
-            delivery_target=target,
+            delivery_targets=targets,
             generated_at=None,
         ),
         problem_case_version=case.problem_case_version if case else 0,
@@ -121,7 +121,10 @@ def build_current_solution_document(
         "project": {
             "pipelineId": str(card.id),
             "projectName": card.project_name or card.name,
-            "deliveryTarget": payload.get("project", {}).get("deliveryTarget", "web"),
+            "deliveryTargets": payload.get("project", {}).get(
+                "deliveryTargets",
+                [payload.get("project", {}).get("deliveryTarget", "web")],
+            ),
             "generatedAt": version.generated_at.isoformat() if version.generated_at else None,
         },
     })

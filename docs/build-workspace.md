@@ -6,7 +6,11 @@ Build turns one completed Problem Case into an implementation handoff. It does n
 
 `SolutionCaseDocument` is the structured contract. Every saved generation or document edit creates an immutable `solution_versions` row. The current version remains a draft until the user explicitly approves that exact version.
 
-Coding-agent access requires all of the following:
+Build-design access requires a real project with a completed current Problem
+Case. Website and IDE/MCP design edits write new immutable versions of the same
+canonical Build record, and every write includes the expected current version.
+
+Implementation access requires all of the following:
 
 - the Problem Case and Build Contract are ready;
 - `approval_status` is `approved`;
@@ -36,6 +40,7 @@ Agent instruction files are read-only derived views. User-editable Markdown is s
 
 - `GET /pipeline/{id}/solution/case`
 - `POST /pipeline/{id}/solution/case/generate`
+- `PATCH /pipeline/{id}/solution/case/sections/{key}`
 - `PATCH /pipeline/{id}/solution/case/documents/{key}`
 - `POST /pipeline/{id}/solution/case/approve`
 - `GET /pipeline/{id}/solution/case/export`
@@ -45,7 +50,14 @@ Document edits and approval use `expectedVersion` to reject stale browser writes
 
 ## Coding-agent API
 
-Project tokens authorize:
+Project tokens authorize Build design through:
+
+- current Problem Case and Build workspace reads;
+- backend-model Build generation;
+- structured section and editable document writes;
+- explicit approval of the exact current version.
+
+Once approved, the same project tokens authorize implementation through:
 
 - focused Build document listing and reads;
 - full Problem Case and Build context for compatibility;
@@ -55,11 +67,11 @@ Project tokens authorize:
 - blocker reporting with a required note;
 - completion only with a verification summary and checks that passed.
 
-The stdio MCP package maps these routes to eight focused tools. Its server instructions are intentionally short so clients that truncate MCP instructions still receive the core rules.
+The stdio MCP package maps these routes to fourteen focused tools. Its server instructions are intentionally short so clients that truncate MCP instructions still receive the core rules.
 
 ## Release requirements
 
 1. Apply migration `0052_build_contract_foundation`.
 2. Deploy the backend and frontend together because the response contract adds documents and approval state.
-3. Publish `mcp/` as `immensity-mcp-server@0.2.0` before exposing `npx` setup in production.
+3. Publish `mcp/` as `immensity-mcp-server@0.3.0` before exposing `npx` setup in production.
 4. Verify `/ready`, then run backend tests, frontend tests/build, MCP typecheck/build, and a stdio `initialize` + `tools/list` smoke test.

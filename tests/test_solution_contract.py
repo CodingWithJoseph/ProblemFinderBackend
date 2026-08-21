@@ -18,11 +18,12 @@ def _document() -> dict:
         "project": {
             "pipelineId": "pipeline-1",
             "projectName": "Invoice helper",
-            "deliveryTarget": "web",
+            "deliveryTargets": ["web"],
             "generatedAt": "2026-08-05T10:00:00+00:00",
         },
         "problemCaseVersion": 2,
         "mvpGoal": "Let a freelancer send and track an invoice reminder.",
+        "primaryUsers": ["Freelancer"],
         "constraints": ["Ship within 72 hours"],
         "nonGoals": ["Payment processing", "Market-fit scoring"],
         "primaryFlow": {
@@ -93,6 +94,18 @@ def test_solution_contract_accepts_traceable_five_feature_maximum():
     assert payload["problemCaseVersion"] == 2
     assert payload["features"][0]["problemUnitIds"] == ["unit-1"]
     assert payload["tasks"][0]["status"] == "todo"
+    assert payload["primaryUsers"] == ["Freelancer"]
+    assert payload["project"]["deliveryTargets"] == ["web"]
+
+
+def test_solution_contract_accepts_legacy_single_delivery_target():
+    payload = _document()
+    payload["project"].pop("deliveryTargets")
+    payload["project"]["deliveryTarget"] = "ios"
+
+    document = SolutionCaseDocument.model_validate(payload)
+
+    assert document.project.delivery_targets == ["ios"]
 
 
 def test_solution_contract_rejects_untraceable_feature():

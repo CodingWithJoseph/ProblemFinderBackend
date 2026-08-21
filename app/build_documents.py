@@ -134,7 +134,7 @@ def render_build_documents(document: SolutionCaseDocument) -> list[BuildDocument
 ## Source
 
 - Problem Case version: {document.problem_case_version}
-- Delivery target: {document.project.delivery_target}
+- Delivery targets: {', '.join(document.project.delivery_targets)}
 
 ## Constraints
 
@@ -333,8 +333,12 @@ def _parse_build_contract(
         raise ValueError("Non-goals requires at least one bullet")
     if _labeled_value(source, "Problem Case version", bullet=True) != str(current.problem_case_version):
         raise ValueError("Problem Case version cannot be changed in Build")
-    if _labeled_value(source, "Delivery target", bullet=True) != current.project.delivery_target:
-        raise ValueError("Delivery target must be changed through project setup")
+    try:
+        raw_targets = _labeled_value(source, "Delivery targets", bullet=True)
+    except ValueError:
+        raw_targets = _labeled_value(source, "Delivery target", bullet=True)
+    if _csv(raw_targets) != current.project.delivery_targets:
+        raise ValueError("Delivery targets must be changed through project setup")
 
     steps = [
         match.group(1).strip()

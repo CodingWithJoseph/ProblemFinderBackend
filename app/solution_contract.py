@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.alias_generators import to_camel
@@ -48,8 +48,25 @@ class SolutionProgress(SolutionContractModel):
 class SolutionProjectContext(SolutionContractModel):
     pipeline_id: str = Field(min_length=1)
     project_name: str = Field(min_length=1)
-    delivery_target: DeliveryTarget
+    delivery_targets: list[DeliveryTarget] = Field(min_length=1, max_length=3)
     generated_at: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_delivery_target(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "deliveryTargets" in value or "delivery_targets" in value:
+            return value
+        target = value.get("deliveryTarget", value.get("delivery_target", "web"))
+        return {
+            key: item
+            for key, item in value.items()
+            if key not in {"deliveryTarget", "delivery_target"}
+        } | {"deliveryTargets": [target]}
+
+    @field_validator("delivery_targets")
+    @classmethod
+    def unique_delivery_targets(cls, values: list[DeliveryTarget]) -> list[DeliveryTarget]:
+        return list(dict.fromkeys(values))
 
 
 class SolutionPrimaryFlow(SolutionContractModel):
@@ -172,7 +189,10 @@ class SolutionCaseDocument(SolutionContractModel):
     approval_status: ApprovalStatus = "draft"
     approved_version: int | None = Field(default=None, ge=1)
     approved_at: str | None = None
+    primary_users: list[str] = Field(default_factory=list, max_length=3)
     mvp_goal: str | None = Field(default=None, max_length=600)
+    mvp_capability: str | None = Field(default=None, max_length=400)
+    mvp_outcome: str | None = Field(default=None, max_length=400)
     constraints: list[str] = Field(default_factory=list, max_length=12)
     non_goals: list[str] = Field(default_factory=list, max_length=20)
     primary_flow: SolutionPrimaryFlow | None = None
@@ -182,6 +202,21 @@ class SolutionCaseDocument(SolutionContractModel):
     test_plan: SolutionTestPlan | None = None
     delivery_checklist: list[SolutionDeliveryItem] = Field(default_factory=list, max_length=24)
     documents: list[BuildDocument] = Field(default_factory=list, max_length=12)
+
+    @field_validator("primary_users")
+    @classmethod
+    def clean_primary_users(cls, values: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            item = value.strip()
+            if not item:
+                raise ValueError("primary users cannot be blank")
+            key = item.casefold()
+            if key not in seen:
+                seen.add(key)
+                cleaned.append(item)
+        return cleaned
 
     @model_validator(mode="after")
     def validate_ready_document(self) -> "SolutionCaseDocument":
@@ -204,9 +239,45 @@ class SolutionCaseDocument(SolutionContractModel):
 
 
 class SolutionGenerateRequest(SolutionContractModel):
-    delivery_target: DeliveryTarget = "web"
+    delivery_targets: list[DeliveryTarget] = Field(default_factory=lambda: ["web"], min_length=1, max_length=3)
     constraints: list[str] = Field(default_factory=list, max_length=12)
     preferred_stack: list[str] = Field(default_factory=list, max_length=12)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_delivery_target(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "deliveryTargets" in value or "delivery_targets" in value:
+            return value
+        target = value.get("deliveryTarget", value.get("delivery_target", "web"))
+        return {
+            key: item
+            for key, item in value.items()
+            if key not in {"deliveryTarget", "delivery_target"}
+        } | {"deliveryTargets": [target]}
+
+    @field_validator("delivery_targets")
+    @classmethod
+    def unique_delivery_targets(cls, values: list[DeliveryTarget]) -> list[DeliveryTarget]:
+        return list(dict.fromkeys(values))
+
+
+SolutionSectionKey = Literal[
+    "mvp_goal",
+    "delivery_targets",
+    "constraints",
+    "non_goals",
+    "primary_flow",
+    "features",
+    "architecture",
+    "tasks",
+    "test_plan",
+    "delivery_checklist",
+]
+
+
+class SolutionSectionUpdateRequest(SolutionContractModel):
+    expected_version: int = Field(ge=1)
+    value: Any
 
 
 class BuildDocumentUpdateRequest(SolutionContractModel):

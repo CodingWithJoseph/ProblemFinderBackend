@@ -57,18 +57,151 @@ const writesProgress = {
     openWorldHint: false,
 }
 
+const writesBuild = {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: false,
+}
+
+const buildSectionKey = z.enum([
+    'mvp_goal',
+    'delivery_targets',
+    'constraints',
+    'non_goals',
+    'primary_flow',
+    'features',
+    'architecture',
+    'tasks',
+    'test_plan',
+    'delivery_checklist',
+])
+
+const editableDocumentKey = z.enum([
+    'build_contract',
+    'features',
+    'requirements',
+    'tasks',
+    'test_plan',
+    'decisions',
+])
+
 function createServer(): McpServer {
     const server = new McpServer(
-        { name: 'immensity-build', version: '0.2.0' },
+        { name: 'immensity-build', version: '0.3.0' },
         {
             instructions: [
-                'Start with get_build_contract, then fetch only the documents needed for the current task.',
+                'For Build design, start with get_problem_case and get_build_workspace.',
+                'Use expectedVersion on every Build edit so concurrent website or IDE edits cannot be overwritten.',
+                'Approve the finished Build workspace before implementation.',
+                'For implementation, start with get_build_contract, then fetch only the documents needed for the current task.',
                 'Use get_next_task and respect dependencies.',
                 'Report blockers instead of changing approved scope.',
                 'Submit verification before marking work done; never claim an unrun check passed.',
                 'Do not add pricing, growth, positioning, or unrelated product behavior.',
             ].join(' '),
         },
+    )
+
+    server.registerTool(
+        'get_problem_case',
+        {
+            title: 'Get analyzed Problem Case',
+            description: 'Return the current analyzed problem evidence used as the source for Build design.',
+            inputSchema: z.object({}),
+            annotations: readOnly,
+        },
+        async () => toolResult(await api(`${projectPath}/problem-case`)),
+    )
+
+    server.registerTool(
+        'get_build_workspace',
+        {
+            title: 'Get current Build workspace',
+            description: 'Return the same current Build draft or approved version shown in the website.',
+            inputSchema: z.object({}),
+            annotations: readOnly,
+        },
+        async () => toolResult(await api(`${projectPath}/build`)),
+    )
+
+    server.registerTool(
+        'generate_build_workspace',
+        {
+            title: 'Generate Build workspace',
+            description: 'Generate a Build draft from the current analyzed Problem Case using the configured backend model.',
+            inputSchema: z.object({
+                deliveryTargets: z.array(z.enum(['web', 'ios', 'android'])).min(1).max(3).default(['web']),
+                constraints: z.array(z.string().min(1).max(500)).max(20).default([]),
+                preferredStack: z.array(z.string().min(1).max(120)).max(20).default([]),
+            }),
+            annotations: writesBuild,
+        },
+        async ({ deliveryTargets, constraints, preferredStack }) => toolResult(await api(
+            `${projectPath}/build/generate`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ deliveryTargets, constraints, preferredStack }),
+            },
+        )),
+    )
+
+    server.registerTool(
+        'update_build_section',
+        {
+            title: 'Update Build section',
+            description: 'Persist one structured Build section as a new version visible in the website.',
+            inputSchema: z.object({
+                section: buildSectionKey,
+                expectedVersion: z.number().int().positive(),
+                value: z.unknown().describe('Complete replacement value for the selected canonical section'),
+            }),
+            annotations: writesBuild,
+        },
+        async ({ section, expectedVersion, value }) => toolResult(await api(
+            `${projectPath}/build/sections/${section}`,
+            {
+                method: 'PATCH',
+                body: JSON.stringify({ expectedVersion, value }),
+            },
+        )),
+    )
+
+    server.registerTool(
+        'update_build_document',
+        {
+            title: 'Update Build document',
+            description: 'Persist an editable Build markdown document as a new canonical version visible in the website.',
+            inputSchema: z.object({
+                key: editableDocumentKey,
+                expectedVersion: z.number().int().positive(),
+                content: z.string().min(1),
+            }),
+            annotations: writesBuild,
+        },
+        async ({ key, expectedVersion, content }) => toolResult(await api(
+            `${projectPath}/build/documents/${key}`,
+            {
+                method: 'PATCH',
+                body: JSON.stringify({ expectedVersion, content }),
+            },
+        )),
+    )
+
+    server.registerTool(
+        'approve_build_workspace',
+        {
+            title: 'Approve Build workspace',
+            description: 'Freeze the exact current Build version so implementation tools can use it.',
+            inputSchema: z.object({
+                expectedVersion: z.number().int().positive(),
+            }),
+            annotations: writesBuild,
+        },
+        async ({ expectedVersion }) => toolResult(await api(
+            `${projectPath}/build/approve`,
+            { method: 'POST', body: JSON.stringify({ expectedVersion }) },
+        )),
     )
 
     server.registerTool(

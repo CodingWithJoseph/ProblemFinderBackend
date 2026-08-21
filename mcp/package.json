@@ -1,7 +1,7 @@
 {
   "name": "immensity-mcp-server",
-  "version": "0.2.0",
-  "description": "Project-scoped MCP server for approved Immensity Build Contracts",
+  "version": "0.3.0",
+  "description": "Project-scoped MCP server for designing and implementing Immensity Build Contracts",
   "type": "module",
   "bin": {
     "immensity-mcp": "dist/index.js"

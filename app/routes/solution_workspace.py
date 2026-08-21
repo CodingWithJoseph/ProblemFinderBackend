@@ -1,15 +1,11 @@
 """Build workspace endpoints backed by immutable Solution Case versions."""
 
-import uuid
-
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_uid
-from app.build_documents import build_export_zip, replace_build_document
+from app.build_documents import build_export_zip
 from app.db import get_db
-from app.models import SolutionVersion
 from app.routes.pipeline import _get_pipeline_card
 from app.services.signal_cases import find_current_version, find_signal_case
 from app.services.solution_cases import (
@@ -20,14 +16,20 @@ from app.services.solution_cases import (
     find_solution_case_for_update,
     new_solution_case_and_job,
     queue_solution_generation,
-    utc_now,
+)
+from app.services.solution_versions import (
+    approve_solution_version,
+    save_solution_document_version,
+    save_solution_section_version,
+    solution_with_task_states,
 )
 from app.solution_contract import (
-    SOLUTION_SCHEMA_VERSION,
     ApproveSolutionRequest,
     BuildDocumentUpdateRequest,
     SolutionCaseDocument,
     SolutionGenerateRequest,
+    SolutionSectionKey,
+    SolutionSectionUpdateRequest,
 )
 
 
@@ -56,7 +58,7 @@ async def get_solution_case(
             request=request,
             case=case,
         )
-    return build_current_solution_document(card, case, current)
+    return await solution_with_task_states(db, card, case, current)
 
 
 @router.post(
@@ -111,6 +113,35 @@ async def generate_solution_case(
 
 
 @router.patch(
+    "/{pipeline_id}/solution/case/sections/{section_key}",
+    response_model=SolutionCaseDocument,
+)
+async def update_solution_section(
+    pipeline_id: str,
+    section_key: SolutionSectionKey,
+    body: SolutionSectionUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    card = await _get_pipeline_card(pipeline_id, db, uid)
+    case = await find_solution_case_for_update(db, pipeline_id, uid)
+    current = await find_current_solution_version(db, case) if case else None
+    if case is None or current is None or case.status != "ready":
+        raise HTTPException(status_code=409, detail="Generate the Build Contract before editing it")
+    return await save_solution_section_version(
+        db,
+        card,
+        case,
+        current,
+        section_key,
+        body.value,
+        expected_version=body.expected_version,
+        provider="user",
+        model="structured-editor",
+    )
+
+
+@router.patch(
     "/{pipeline_id}/solution/case/documents/{document_key}",
     response_model=SolutionCaseDocument,
 )
@@ -126,58 +157,17 @@ async def update_solution_document(
     current = await find_current_solution_version(db, case) if case else None
     if case is None or current is None or case.status != "ready":
         raise HTTPException(status_code=409, detail="Generate the Build Contract before editing it")
-    if current.version != body.expected_version:
-        raise HTTPException(
-            status_code=409,
-            detail="The Build Contract changed. Reload before saving your edit.",
-        )
-
-    next_version = int(await db.scalar(
-        select(func.coalesce(func.max(SolutionVersion.version), 0)).where(
-            SolutionVersion.case_id == case.id
-        )
-    ) or 0) + 1
-    try:
-        document = replace_build_document(
-            build_current_solution_document(card, case, current),
-            document_key,
-            body.content.strip() + "\n",
-            next_version=next_version,
-        )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Build document not found") from exc
-    except PermissionError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail="This agent instruction file is generated from the Build Contract",
-        ) from exc
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail=f"The edited document is not structurally valid: {exc}",
-        ) from exc
-
-    now = utc_now()
-    version = SolutionVersion(
-        id=str(uuid.uuid4()),
-        case_id=str(case.id),
-        version=next_version,
-        schema_version=SOLUTION_SCHEMA_VERSION,
+    return await save_solution_document_version(
+        db,
+        card,
+        case,
+        current,
+        document_key,
+        body.content,
+        expected_version=body.expected_version,
         provider="user",
         model="manual",
-        problem_case_version=document.problem_case_version,
-        document=document.model_dump(mode="json", by_alias=True),
-        generated_at=now,
     )
-    db.add(version)
-    await db.flush()
-    case.current_version_id = version.id
-    case.approval_status = "draft"
-    case.approved_version_id = None
-    case.approved_at = None
-    case.updated_at = now
-    await db.commit()
-    return build_current_solution_document(card, case, version)
 
 
 @router.post(
@@ -195,19 +185,13 @@ async def approve_solution_case(
     current = await find_current_solution_version(db, case) if case else None
     if case is None or current is None or case.status != "ready":
         raise HTTPException(status_code=409, detail="Generate the Build Contract before approving it")
-    if current.version != body.expected_version:
-        raise HTTPException(
-            status_code=409,
-            detail="The Build Contract changed. Reload before approving it.",
-        )
-
-    now = utc_now()
-    case.approval_status = "approved"
-    case.approved_version_id = current.id
-    case.approved_at = now
-    case.updated_at = now
-    await db.commit()
-    return build_current_solution_document(card, case, current)
+    return await approve_solution_version(
+        db,
+        card,
+        case,
+        current,
+        expected_version=body.expected_version,
+    )
 
 
 @router.get("/{pipeline_id}/solution/case/export")

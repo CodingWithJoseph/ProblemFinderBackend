@@ -189,10 +189,13 @@ async def execute_solution_job(
             project=SolutionProjectContext(
                 pipeline_id=str(card.id),
                 project_name=card.project_name or card.name,
-                delivery_target=request.delivery_target,
+                delivery_targets=request.delivery_targets,
                 generated_at=utc_now().isoformat(),
             ),
             problem_case_version=problem_document.version,
+            primary_users=[output.primary_flow.actor],
+            mvp_capability=output.mvp_goal,
+            mvp_outcome=output.primary_flow.success_outcome,
             **output.model_dump(),
         )
         await save_solution_version(db, job, case, document, provider)
