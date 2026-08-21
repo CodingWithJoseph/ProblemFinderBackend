@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     signal_analysis_worker_enabled: bool = True
     signal_analysis_poll_seconds: float = 2.0
 
-    solution_provider: str = "ollama"
+    solution_provider: str = ""
     solution_base_url: str = ""
     solution_model: str = ""
     solution_timeout_seconds: float = 120.0

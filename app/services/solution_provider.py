@@ -13,23 +13,17 @@ from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.services.search_interpreter_provider import (
-    GROQ_BASE_URL,
-    GROQ_DEFAULT_MODEL,
-    LOCAL_DEFAULT_BASE_URL,
-    LOCAL_DEFAULT_MODEL,
-    inline_local_schema_refs,
-    strict_json_schema,
+from app.services.search_interpreter_provider import inline_local_schema_refs, strict_json_schema
+from app.services.signal_analysis_provider import (
+    SignalAnalysisProviderFailure,
+    resolve_signal_analysis_provider_config,
 )
-from app.services.signal_analysis_provider import SignalAnalysisProviderFailure
 from app.solution_contract import SolutionModelOutput
 
 
-SolutionProviderName = Literal["openai", "ollama", "local", "groq"]
+SolutionProviderName = Literal["openai", "local", "groq"]
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 OPENAI_DEFAULT_MODEL = "gpt-5.6-terra"
-OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
-OLLAMA_DEFAULT_MODEL = "gpt-oss:20b"
 SOLUTION_REPAIR_ATTEMPTS = 2
 VALID_REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
 
@@ -58,7 +52,7 @@ class SolutionProvider(Protocol):
 
 
 def resolve_solution_provider_config(settings: Settings) -> SolutionProviderConfig:
-    provider = settings.solution_provider.strip().lower() or "ollama"
+    provider = settings.solution_provider.strip().lower()
     timeout = max(5.0, min(float(settings.solution_timeout_seconds), 300.0))
     max_output_tokens = max(2_000, min(int(settings.solution_max_output_tokens), 20_000))
     reasoning_effort = settings.solution_reasoning_effort.strip().lower() or "medium"
@@ -67,6 +61,18 @@ def resolve_solution_provider_config(settings: Settings) -> SolutionProviderConf
 
     configured_base_url = settings.solution_base_url.strip().rstrip("/")
     configured_model = settings.solution_model.strip()
+
+    if not provider:
+        inherited = resolve_signal_analysis_provider_config(settings)
+        return SolutionProviderConfig(
+            name=inherited.name,
+            base_url=inherited.base_url,
+            model=inherited.model,
+            timeout_seconds=inherited.timeout_seconds,
+            max_output_tokens=max_output_tokens,
+            reasoning_effort=reasoning_effort,
+            api_key=inherited.api_key,
+        )
 
     if provider == "openai":
         api_key = settings.openai_api_key.strip()
@@ -79,45 +85,6 @@ def resolve_solution_provider_config(settings: Settings) -> SolutionProviderConf
             name="openai",
             base_url=base_url,
             model=configured_model or OPENAI_DEFAULT_MODEL,
-            timeout_seconds=timeout,
-            max_output_tokens=max_output_tokens,
-            reasoning_effort=reasoning_effort,
-            api_key=api_key,
-        )
-
-    if provider == "ollama":
-        return SolutionProviderConfig(
-            name="ollama",
-            base_url=_valid_base_url(configured_base_url or OLLAMA_BASE_URL),
-            model=configured_model or OLLAMA_DEFAULT_MODEL,
-            timeout_seconds=timeout,
-            max_output_tokens=max_output_tokens,
-            reasoning_effort=reasoning_effort,
-            api_key="ollama",
-        )
-
-    if provider == "local":
-        return SolutionProviderConfig(
-            name="local",
-            base_url=_valid_base_url(configured_base_url or LOCAL_DEFAULT_BASE_URL),
-            model=configured_model or LOCAL_DEFAULT_MODEL,
-            timeout_seconds=timeout,
-            max_output_tokens=max_output_tokens,
-            reasoning_effort=reasoning_effort,
-            api_key="local-not-a-secret",
-        )
-
-    if provider == "groq":
-        api_key = settings.groq_api_key.strip()
-        if not api_key:
-            raise SignalAnalysisProviderFailure("missing_credentials")
-        base_url = _valid_base_url(configured_base_url or GROQ_BASE_URL)
-        if base_url != GROQ_BASE_URL:
-            raise SignalAnalysisProviderFailure("invalid_configuration")
-        return SolutionProviderConfig(
-            name="groq",
-            base_url=base_url,
-            model=configured_model or GROQ_DEFAULT_MODEL,
             timeout_seconds=timeout,
             max_output_tokens=max_output_tokens,
             reasoning_effort=reasoning_effort,
@@ -225,7 +192,7 @@ class OpenAICompatibleSolutionProvider:
         payload: dict[str, Any],
     ) -> SolutionModelOutput:
         schema = strict_json_schema(SolutionModelOutput)
-        if self.name in {"local", "ollama"}:
+        if self.name == "local":
             schema = inline_local_schema_refs(schema)
         response_format = {
             "type": "json_schema",
@@ -249,11 +216,9 @@ class OpenAICompatibleSolutionProvider:
                 "temperature": 0,
                 "stream": False,
                 (
-                    "max_tokens" if self.name in {"local", "ollama"} else "max_completion_tokens"
+                    "max_tokens" if self.name == "local" else "max_completion_tokens"
                 ): self.config.max_output_tokens,
             }
-            if self.name == "ollama":
-                request["reasoning_effort"] = self.config.reasoning_effort
             content = ""
             validation_summary: list[dict[str, str]] = []
             try:

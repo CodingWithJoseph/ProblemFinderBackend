@@ -5,8 +5,6 @@ import pytest
 
 from app.services.signal_analysis_provider import SignalAnalysisProviderFailure
 from app.services.solution_provider import (
-    OLLAMA_BASE_URL,
-    OLLAMA_DEFAULT_MODEL,
     OPENAI_BASE_URL,
     OPENAI_DEFAULT_MODEL,
     build_solution_provider,
@@ -61,20 +59,20 @@ class FakeResponsesClientFactory:
 
 def _settings():
     return SimpleNamespace(
-        solution_provider="local",
-        solution_base_url="http://127.0.0.1:8080/v1",
-        solution_model="gpt-oss-20b",
+        solution_provider="",
+        solution_base_url="",
+        solution_model="",
         solution_timeout_seconds=90.0,
         solution_reasoning_effort="low",
         solution_max_output_tokens=10_000,
         openai_api_key="",
-        signal_analysis_provider="local",
-        signal_analysis_base_url="http://127.0.0.1:8080/v1",
-        signal_analysis_model="gpt-oss-20b",
+        signal_analysis_provider="",
+        signal_analysis_base_url="",
+        signal_analysis_model="",
         signal_analysis_timeout_seconds=90.0,
         search_interpreter_provider="local",
-        search_interpreter_base_url="",
-        search_interpreter_model="",
+        search_interpreter_base_url="http://127.0.0.1:8080/v1",
+        search_interpreter_model="gpt-oss-20b",
         groq_api_key="",
     )
 
@@ -148,30 +146,14 @@ async def test_solution_provider_uses_strict_schema_and_repairs_once():
     assert request["response_format"]["json_schema"]["schema"]["additionalProperties"] is False
 
 
-async def test_ollama_solution_provider_uses_openai_compatible_structured_output():
-    settings = _settings()
-    settings.solution_provider = "ollama"
-    settings.solution_base_url = ""
-    settings.solution_model = ""
-    settings.solution_reasoning_effort = "medium"
-    factory = FakeClientFactory([json.dumps(_output())])
+def test_solution_provider_inherits_existing_local_provider_settings():
+    config = resolve_solution_provider_config(_settings())
 
-    config = resolve_solution_provider_config(settings)
-    provider = build_solution_provider(config, client_factory=factory)
-    result = await provider.generate(instructions="Design", payload={"problemCase": {}})
-
-    assert result.mvp_goal == "Send one invoice reminder."
-    assert config.name == "ollama"
-    assert config.base_url == OLLAMA_BASE_URL
-    assert config.model == OLLAMA_DEFAULT_MODEL
-    assert factory.options["api_key"] == "ollama"
-    request = factory.completions.requests[0]
-    assert request["model"] == OLLAMA_DEFAULT_MODEL
-    assert request["max_tokens"] == 10_000
-    assert request["reasoning_effort"] == "medium"
-    assert request["temperature"] == 0
-    assert request["response_format"]["type"] == "json_schema"
-    assert request["response_format"]["json_schema"]["strict"] is True
+    assert config.name == "local"
+    assert config.base_url == "http://127.0.0.1:8080/v1"
+    assert config.model == "gpt-oss-20b"
+    assert config.timeout_seconds == 90.0
+    assert config.api_key == "local-not-a-secret"
 
 
 async def test_openai_solution_provider_uses_responses_api_and_cost_controls():
