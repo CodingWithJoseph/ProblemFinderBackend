@@ -21,7 +21,11 @@ from app.services.search_interpreter_provider import (
     inline_local_schema_refs,
     strict_json_schema,
 )
-from app.signal_contract import SignalAnalysisModelOutput, SignalConversationModelOutput
+from app.signal_contract import (
+    SignalAnalysisModelOutput,
+    SignalConversationModelOutput,
+    SignalProblemAnalysisOutput,
+)
 
 
 ProviderName = Literal["local", "groq"]
@@ -55,6 +59,13 @@ class SignalAnalysisProvider(Protocol):
         instructions: str,
         payload: dict[str, Any],
     ) -> SignalAnalysisModelOutput: ...
+
+    async def analyze_problems(
+        self,
+        *,
+        instructions: str,
+        payload: dict[str, Any],
+    ) -> SignalProblemAnalysisOutput: ...
 
     async def ask(
         self,
@@ -128,6 +139,21 @@ class OpenAICompatibleSignalAnalysisProvider:
             max_tokens=SIGNAL_MAX_COMPLETION_TOKENS,
         )
         return SignalAnalysisModelOutput.model_validate(result)
+
+    async def analyze_problems(
+        self,
+        *,
+        instructions: str,
+        payload: dict[str, Any],
+    ) -> SignalProblemAnalysisOutput:
+        result = await self._generate_structured(
+            output_model=SignalProblemAnalysisOutput,
+            schema_name="signal_problem_analysis",
+            instructions=instructions,
+            payload=payload,
+            max_tokens=SIGNAL_MAX_COMPLETION_TOKENS,
+        )
+        return SignalProblemAnalysisOutput.model_validate(result)
 
     async def ask(
         self,

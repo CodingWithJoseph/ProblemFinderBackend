@@ -22,7 +22,10 @@ from app.models import (
     SignalAnalysisJob,
     SignalAnalysisVersion,
 )
-from app.prompts.signal_analysis import SIGNAL_ANALYSIS_INSTRUCTIONS
+from app.prompts.signal_analysis import (
+    SIGNAL_ANALYSIS_INSTRUCTIONS,
+    SIGNAL_CONSOLIDATION_INSTRUCTIONS,
+)
 from app.services.signal_analysis_provider import (
     SignalAnalysisProvider,
     SignalAnalysisProviderFailure,
@@ -37,11 +40,13 @@ from app.signal_contract import (
     SIGNAL_ANALYSIS_SCHEMA_VERSION,
     SignalAnalysisModelOutput,
     SignalCaseDocument,
+    SignalProblemAnalysisOutput,
 )
 
 
 logger = logging.getLogger(__name__)
 LEASE_SECONDS = 240
+CONSOLIDATION_BATCH_SIZE = 4
 SAFE_FAILURES = {
     "timeout": "Signal analysis timed out. You can retry without losing the previous version.",
     "connection": "The Signal analysis provider is unavailable. You can retry later.",
@@ -155,31 +160,35 @@ async def execute_signal_job(
         return
 
     all_items = await load_signal_source_items(db, card)
-    selected = select_representative_evidence(
-        all_items,
-        max_items=max(1, int(settings.signal_analysis_max_evidence)),
-    )
+    usable_items = usable_signal_items(all_items)
     fingerprint = signal_source_fingerprint(all_items)
     updated_at = signal_source_updated_at(all_items)
     job.source_fingerprint = fingerprint
     case.source_fingerprint = fingerprint
     case.source_updated_at = updated_at
 
-    if len(selected) < max(1, int(settings.signal_analysis_min_evidence)):
+    if len(usable_items) < max(1, int(settings.signal_analysis_min_evidence)):
         await complete_insufficient_evidence(db, job, case)
         return
 
     case.progress_step = "analyzing_problem"
-    case.progress_label = "Analyzing the problem"
+    case.progress_label = "Analyzing the full source cluster"
     case.updated_at = utc_now()
     await db.commit()
 
-    payload = build_analysis_payload(card, selected)
     try:
-        output = await provider.generate(
-            instructions=SIGNAL_ANALYSIS_INSTRUCTIONS,
-            payload=payload,
+        problem_output = await analyze_full_cluster(
+            db,
+            case,
+            card,
+            usable_items,
+            provider,
+            chunk_size=max(1, int(settings.signal_analysis_max_evidence)),
         )
+        if not problem_output.problems:
+            await complete_insufficient_evidence(db, job, case)
+            return
+        output = build_problem_model_output(problem_output, usable_items)
         case.progress_step = "validating_citations"
         case.progress_label = "Validating evidence citations"
         await db.commit()
@@ -188,7 +197,7 @@ async def execute_signal_job(
             card,
             case,
             all_items,
-            selected,
+            usable_items,
             output,
         )
         next_version = int(await db.scalar(
@@ -227,6 +236,172 @@ async def load_signal_source_items(db: AsyncSession, card: Pipeline) -> list[Clu
         statement = statement.where(ClusterItem.id.in_(card.post_ids or []))
     result = await db.execute(statement.order_by(ClusterItem.score.desc().nullslast()))
     return list(result.scalars().all())
+
+
+def usable_signal_items(items: Iterable[ClusterItem]) -> list[ClusterItem]:
+    """Keep source rows that contain enough text for problem analysis."""
+
+    return [
+        item
+        for item in items
+        if any(
+            value and str(value).strip()
+            for value in (item.problem_statement, item.body, item.title)
+        )
+    ]
+
+
+async def analyze_full_cluster(
+    db: AsyncSession,
+    case: SignalAnalysisCase,
+    card: Pipeline,
+    items: list[ClusterItem],
+    provider: SignalAnalysisProvider,
+    *,
+    chunk_size: int,
+) -> SignalProblemAnalysisOutput:
+    """Analyze every usable source row, then merge batches to one problem set."""
+
+    chunks = [items[index:index + chunk_size] for index in range(0, len(items), chunk_size)]
+    outputs: list[SignalProblemAnalysisOutput] = []
+    for index, chunk in enumerate(chunks, start=1):
+        case.progress_label = f"Analyzing source batch {index} of {len(chunks)}"
+        case.updated_at = utc_now()
+        await db.commit()
+        output = await provider.analyze_problems(
+            instructions=SIGNAL_ANALYSIS_INSTRUCTIONS,
+            payload=build_analysis_payload(card, chunk, total_items=len(items)),
+        )
+        if output.problems:
+            outputs.append(output)
+
+    if not outputs:
+        return SignalProblemAnalysisOutput(problems=[])
+    return await consolidate_problem_outputs(db, case, card, provider, outputs)
+
+
+async def consolidate_problem_outputs(
+    db: AsyncSession,
+    case: SignalAnalysisCase,
+    card: Pipeline,
+    provider: SignalAnalysisProvider,
+    outputs: list[SignalProblemAnalysisOutput],
+) -> SignalProblemAnalysisOutput:
+    """Reduce chunk results in bounded groups until one coherent set remains."""
+
+    current = outputs
+    pass_number = 1
+    while len(current) > 1:
+        merged: list[SignalProblemAnalysisOutput] = []
+        groups = [
+            current[index:index + CONSOLIDATION_BATCH_SIZE]
+            for index in range(0, len(current), CONSOLIDATION_BATCH_SIZE)
+        ]
+        for index, group in enumerate(groups, start=1):
+            if len(group) == 1:
+                merged.append(group[0])
+                continue
+            case.progress_label = f"Combining problem set {index} of {len(groups)}"
+            case.updated_at = utc_now()
+            await db.commit()
+            merged.append(await provider.analyze_problems(
+                instructions=SIGNAL_CONSOLIDATION_INSTRUCTIONS,
+                payload={
+                    "project": {
+                        "name": card.project_name or card.name,
+                        "clusterName": card.name if card.source_cluster_id else None,
+                    },
+                    "consolidationPass": pass_number,
+                    "candidateProblems": _candidate_payloads(group),
+                },
+            ))
+        current = [output for output in merged if output.problems]
+        if not current:
+            return SignalProblemAnalysisOutput(problems=[])
+        pass_number += 1
+    return current[0]
+
+
+def _candidate_payloads(outputs: list[SignalProblemAnalysisOutput]) -> list[dict]:
+    rows: list[dict] = []
+    for output_index, output in enumerate(outputs, start=1):
+        id_map = {
+            problem.id: f"batch-{output_index}:{problem.id}"
+            for problem in output.problems
+        }
+        for problem in output.problems:
+            rows.append({
+                "candidateId": id_map[problem.id],
+                "title": problem.title,
+                "description": problem.description,
+                "affectedUsers": problem.affected_users,
+                "situation": problem.situation,
+                "evidenceIds": problem.evidence_ids,
+                "relatedCandidateIds": [
+                    id_map[related_id]
+                    for related_id in problem.related_problem_ids
+                    if related_id in id_map
+                ],
+            })
+    return rows
+
+
+def build_problem_model_output(
+    output: SignalProblemAnalysisOutput,
+    items: list[ClusterItem],
+) -> SignalAnalysisModelOutput:
+    """Map the focused model response into the stable Signal case contract."""
+
+    source_diversity = {
+        str(item.id): item.platform
+        for item in items
+    }
+    id_map = {
+        problem.id: f"problem-{index}"
+        for index, problem in enumerate(output.problems, start=1)
+    }
+    problem_units = []
+    for problem in output.problems:
+        evidence_ids = list(dict.fromkeys(problem.evidence_ids))
+        platforms = {
+            source_diversity[evidence_id]
+            for evidence_id in evidence_ids
+            if source_diversity.get(evidence_id)
+        }
+        problem_units.append({
+            "id": id_map[problem.id],
+            "parentId": None,
+            "title": problem.title,
+            "description": problem.description,
+            "kind": "core_problem",
+            "audienceIds": [],
+            "claimIds": [],
+            "evidenceIds": evidence_ids,
+            "evidenceCount": len(evidence_ids),
+            "sourceDiversity": len(platforms) or None,
+            "frequency": None,
+            "intensity": None,
+            "momentum30d": None,
+            "confidence": "medium",
+            "affectedUsers": list(dict.fromkeys(problem.affected_users)),
+            "situation": problem.situation,
+            "relatedProblemIds": [
+                id_map[related_id]
+                for related_id in problem.related_problem_ids
+                if related_id in id_map
+            ],
+            "pinned": False,
+            "rejected": False,
+        })
+    return SignalAnalysisModelOutput.model_validate({
+        "thesis": None,
+        "claims": [],
+        "problemUnits": problem_units,
+        "audiences": [],
+        "alternatives": [],
+        "assumptions": [],
+        "recommendedFocus": None,
+    })
 
 
 def select_representative_evidence(
@@ -282,6 +457,8 @@ def select_representative_evidence(
 def build_analysis_payload(
     card: Pipeline,
     items: list[ClusterItem],
+    *,
+    total_items: int | None = None,
 ) -> dict:
     authors = {item.author for item in items if item.author}
     platforms = {item.platform for item in items if item.platform}
@@ -292,7 +469,8 @@ def build_analysis_payload(
             "stage": card.stage,
         },
         "metrics": {
-            "totalPosts": len(items),
+            "totalPosts": total_items if total_items is not None else len(items),
+            "batchPosts": len(items),
             "authorCount": len(authors),
             "sourceDiversity": len(platforms),
         },
@@ -338,7 +516,7 @@ def build_case_document(
             "id": item_id,
             "title": item.title or "Untitled evidence",
             "excerpt": _excerpt(item),
-            "body": None,
+            "body": item.body,
             "platform": item.platform,
             "community": item.community,
             "author": item.author,

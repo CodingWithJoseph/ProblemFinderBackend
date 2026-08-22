@@ -14,6 +14,7 @@ from pydantic.alias_generators import to_camel
 
 
 SIGNAL_ANALYSIS_SCHEMA_VERSION = "signal-case.v1"
+SIGNAL_PROBLEM_LIMIT = 20
 
 SignalAnalysisStatus = Literal[
     "queued",
@@ -101,8 +102,43 @@ class SignalProblemUnit(SignalContractModel):
     intensity: SignalConfidence | None = None
     momentum_30d: float | None = Field(default=None, alias="momentum30d")
     confidence: SignalConfidence
+    affected_users: list[str] = Field(default_factory=list)
+    situation: str | None = None
+    related_problem_ids: list[str] = Field(default_factory=list)
     pinned: bool = False
     rejected: bool = False
+
+
+class SignalProblemCandidate(SignalContractModel):
+    """Focused model output used to discover a buildable problem set."""
+
+    id: str = Field(min_length=1)
+    title: str = Field(min_length=1, max_length=160)
+    description: str = Field(min_length=1)
+    affected_users: list[str] = Field(min_length=1)
+    situation: str = Field(min_length=1)
+    evidence_ids: list[str] = Field(min_length=1)
+    related_problem_ids: list[str] = Field(default_factory=list)
+
+
+class SignalProblemAnalysisOutput(SignalContractModel):
+    problems: list[SignalProblemCandidate] = Field(
+        default_factory=list,
+        max_length=SIGNAL_PROBLEM_LIMIT,
+    )
+
+    @model_validator(mode="after")
+    def validate_problem_references(self) -> "SignalProblemAnalysisOutput":
+        problem_ids = _unique_ids(self.problems, "problem candidate")
+        for problem in self.problems:
+            if problem.id in problem.related_problem_ids:
+                raise ValueError(f"problem candidate {problem.id} cannot relate to itself")
+            _require_known(
+                problem.related_problem_ids,
+                problem_ids,
+                f"problem candidate {problem.id} relationships",
+            )
+        return self
 
 
 class SignalAudience(SignalContractModel):
@@ -176,7 +212,7 @@ class SignalAnalysisModelOutput(SignalContractModel):
 
     thesis: SignalThesis | None
     claims: list[SignalClaim]
-    problem_units: list[SignalProblemUnit]
+    problem_units: list[SignalProblemUnit] = Field(max_length=SIGNAL_PROBLEM_LIMIT)
     audiences: list[SignalAudience]
     alternatives: list[SignalAlternative]
     assumptions: list[SignalAssumption]
@@ -250,7 +286,10 @@ class SignalCaseDocument(SignalContractModel):
     metrics: SignalMetricSnapshot
     thesis: SignalThesis | None = None
     claims: list[SignalClaim] = Field(default_factory=list)
-    problem_units: list[SignalProblemUnit] = Field(default_factory=list)
+    problem_units: list[SignalProblemUnit] = Field(
+        default_factory=list,
+        max_length=SIGNAL_PROBLEM_LIMIT,
+    )
     audiences: list[SignalAudience] = Field(default_factory=list)
     alternatives: list[SignalAlternative] = Field(default_factory=list)
     assumptions: list[SignalAssumption] = Field(default_factory=list)
@@ -282,6 +321,13 @@ class SignalCaseDocument(SignalContractModel):
             _require_known(unit.evidence_ids, evidence_ids, f"problem unit {unit.id} evidence")
             if unit.evidence_count != len(set(unit.evidence_ids)):
                 raise ValueError(f"problem unit {unit.id} evidenceCount must match its cited evidence")
+            if unit.id in unit.related_problem_ids:
+                raise ValueError(f"problem unit {unit.id} cannot relate to itself")
+            _require_known(
+                unit.related_problem_ids,
+                unit_ids,
+                f"problem unit {unit.id} relationships",
+            )
 
         for audience in self.audiences:
             _require_known(audience.evidence_ids, evidence_ids, f"audience {audience.id} evidence")
@@ -307,8 +353,12 @@ class SignalCaseDocument(SignalContractModel):
                     f"{self.recommended_focus.problem_unit_id}"
                 )
 
-        if self.status == "ready" and (not self.claims or not self.evidence):
-            raise ValueError("ready Signal cases require claims and evidence")
+        # Older stored v1 cases may contain claims without problem units. Keep
+        # them readable while all newly generated cases use problem units.
+        if self.status == "ready" and (
+            not self.evidence or (not self.problem_units and not self.claims)
+        ):
+            raise ValueError("ready Signal cases require analysis and evidence")
         return self
 
 

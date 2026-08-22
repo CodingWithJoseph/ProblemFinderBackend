@@ -35,12 +35,15 @@ SIGNAL_OVERRIDE_FIELDS = {
         "workaround", "confirmed",
     },
     "claim": {"text", "confirmed", "rejected"},
-    "problem_unit": {"title", "description", "pinned", "rejected"},
+    "problem_unit": {
+        "title", "description", "affectedUsers", "situation",
+        "relatedProblemIds", "pinned", "rejected",
+    },
     "audience": {
         "name", "description", "language", "communities", "reachChannels", "unknowns",
     },
     "assumption": {"question", "whyItMatters", "resolutionEvidence", "resolved"},
-    "evidence": {"pinned", "userNote"},
+    "evidence": {"stance", "pinned", "userNote"},
     "recommended_focus": {"title", "rationale", "suggestedValidationStep"},
 }
 
