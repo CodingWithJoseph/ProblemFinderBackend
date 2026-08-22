@@ -153,7 +153,8 @@ async def execute_solution_job(
     problem_document = build_current_case_document(card, signal_case, signal_version)
     overrides = await load_signal_overrides(db, signal_case.id, case.user_id)
     problem_document = apply_signal_overrides(problem_document, overrides)
-    if problem_document.version == 0 or not problem_document.problem_units:
+    curated_problem_case = build_curated_problem_payload(problem_document)
+    if problem_document.version == 0 or not curated_problem_case["problemUnits"]:
         await fail_solution_job(db, job_id, "problem_case_not_ready", job=job, case=case)
         return
 
@@ -169,13 +170,13 @@ async def execute_solution_job(
             instructions=SOLUTION_GENERATION_INSTRUCTIONS,
             payload={
                 "request": request.model_dump(mode="json", by_alias=True),
-                "problemCase": problem_document.model_dump(mode="json", by_alias=True),
+                "problemCase": curated_problem_case,
             },
         )
         case.progress_step = "validating_traceability"
         case.progress_label = "Validating problem-to-feature traceability"
         await db.commit()
-        validate_problem_traceability(output, problem_document)
+        validate_problem_traceability(output, curated_problem_case)
         next_version = int(await db.scalar(
             select(func.coalesce(func.max(SolutionVersion.version), 0)).where(
                 SolutionVersion.case_id == case.id
@@ -209,11 +210,72 @@ async def execute_solution_job(
         await fail_solution_job(db, job_id, "provider_error", job=job, case=case)
 
 
-def validate_problem_traceability(output: SolutionModelOutput, problem_document) -> None:
-    known_units = {
-        unit.id for unit in problem_document.problem_units if not unit.rejected
+def build_curated_problem_payload(problem_document) -> dict:
+    """Return only the user-included problem set that Build may consume."""
+
+    payload = problem_document.model_dump(mode="json", by_alias=True)
+    available_evidence = [
+        record
+        for record in payload["evidence"]
+        if record.get("stance") != "excluded"
+    ]
+    evidence_ids = {record["id"] for record in available_evidence}
+    included_units = []
+    for unit in payload["problemUnits"]:
+        cited_ids = [
+            evidence_id
+            for evidence_id in unit.get("evidenceIds", [])
+            if evidence_id in evidence_ids
+        ]
+        if unit.get("rejected") or not cited_ids:
+            continue
+        included_units.append({
+            **unit,
+            "evidenceIds": cited_ids,
+            "evidenceCount": len(cited_ids),
+        })
+
+    unit_ids = {unit["id"] for unit in included_units}
+    referenced_evidence_ids = {
+        evidence_id
+        for unit in included_units
+        for evidence_id in unit["evidenceIds"]
     }
-    known_evidence = {record.id for record in problem_document.evidence}
+    included_evidence = [
+        record
+        for record in available_evidence
+        if record["id"] in referenced_evidence_ids
+    ]
+    for unit in included_units:
+        unit["relatedProblemIds"] = [
+            related_id
+            for related_id in unit.get("relatedProblemIds", [])
+            if related_id in unit_ids
+        ]
+    for record in included_evidence:
+        record["claimIds"] = []
+        record["problemUnitIds"] = [
+            unit_id
+            for unit_id in record.get("problemUnitIds", [])
+            if unit_id in unit_ids
+        ]
+
+    payload.update({
+        "thesis": None,
+        "claims": [],
+        "problemUnits": included_units,
+        "audiences": [],
+        "alternatives": [],
+        "assumptions": [],
+        "evidence": included_evidence,
+        "recommendedFocus": None,
+    })
+    return payload
+
+
+def validate_problem_traceability(output: SolutionModelOutput, problem_case: dict) -> None:
+    known_units = {unit["id"] for unit in problem_case["problemUnits"]}
+    known_evidence = {record["id"] for record in problem_case["evidence"]}
     for feature in output.features:
         unknown_units = sorted(set(feature.problem_unit_ids) - known_units)
         unknown_evidence = sorted(set(feature.evidence_ids) - known_evidence)
