@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from conftest import FakeResult, make_pipeline
 
@@ -9,7 +10,9 @@ async def test_pipeline_list_exposes_release_card_contract(
     auth_headers,
 ):
     card = make_pipeline()
-    fake_db.stub(execute=[FakeResult(rows=[card])])
+    fake_db.stub(
+        execute=[FakeResult(rows=[card]), FakeResult(rows=[]), FakeResult(rows=[])]
+    )
 
     response = await client.get("/pipeline", headers=auth_headers)
 
@@ -24,6 +27,9 @@ async def test_pipeline_list_exposes_release_card_contract(
         "postIds",
         "sourceClusterId",
         "stage",
+        "analysisStatus",
+        "buildStatus",
+        "approvalStatus",
         "launchedAt",
         "removedAt",
         "createdAt",
@@ -33,7 +39,9 @@ async def test_pipeline_list_exposes_release_card_contract(
 
 async def test_pipeline_list_includes_launched_cards(client, fake_db, auth_headers):
     card = make_pipeline(launched_at=datetime(2026, 6, 1, tzinfo=timezone.utc))
-    fake_db.stub(execute=[FakeResult(rows=[card])])
+    fake_db.stub(
+        execute=[FakeResult(rows=[card]), FakeResult(rows=[]), FakeResult(rows=[])]
+    )
 
     response = await client.get("/pipeline", headers=auth_headers)
 
@@ -43,12 +51,43 @@ async def test_pipeline_list_includes_launched_cards(client, fake_db, auth_heade
 
 async def test_display_name_falls_back_to_cluster_name(client, fake_db, auth_headers):
     card = make_pipeline(name="Cluster 42", project_name=None)
-    fake_db.stub(execute=[FakeResult(rows=[card])])
+    fake_db.stub(
+        execute=[FakeResult(rows=[card]), FakeResult(rows=[]), FakeResult(rows=[])]
+    )
 
     response = await client.get(f"/pipeline/{card.id}", headers=auth_headers)
 
     assert response.status_code == 200
     assert response.json()["data"]["displayName"] == "Cluster 42"
+
+
+async def test_pipeline_list_exposes_analyze_build_and_approval_state(
+    client,
+    fake_db,
+    auth_headers,
+):
+    card = make_pipeline()
+    signal_case = SimpleNamespace(pipeline_id=card.id, status="ready")
+    solution_case = SimpleNamespace(
+        pipeline_id=card.id,
+        status="ready",
+        approval_status="approved",
+    )
+    fake_db.stub(
+        execute=[
+            FakeResult(rows=[card]),
+            FakeResult(rows=[signal_case]),
+            FakeResult(rows=[solution_case]),
+        ]
+    )
+
+    response = await client.get("/pipeline", headers=auth_headers)
+
+    assert response.status_code == 200
+    row = response.json()["data"][0]
+    assert row["analysisStatus"] == "ready"
+    assert row["buildStatus"] == "ready"
+    assert row["approvalStatus"] == "approved"
 
 
 async def test_patch_sets_project_name(client, fake_db, auth_headers):
