@@ -193,47 +193,25 @@ async def test_similar_posts_uses_cluster_items(client, fake_db, auth_headers):
     assert data[0]["problemStatement"]
 
 
-# â”€â”€ Watch-cluster Breakdown seeding â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Project creation lifecycle
 
-async def test_watch_cluster_seeds_problems(client, fake_db, auth_headers):
+async def test_watch_cluster_creates_analyze_case_without_legacy_problems(
+    client,
+    fake_db,
+    auth_headers,
+):
     cluster = make_cluster()
-    item_a = make_cluster_item(problem_statement="P1", source_item_id="src-1", score=100)
-    item_b = make_cluster_item(problem_statement="P2", source_item_id="src-2", score=80)
-    item_skip = make_cluster_item(problem_statement=None, source_item_id="src-3", score=70)
-    item_dup = make_cluster_item(problem_statement="P1", source_item_id="src-1b", score=50)
+    item_a = make_cluster_item(problem_statement="P1", source_item_id="src-1")
     fake_db.stub(
         execute=[
-            FakeResult(rows=[]),                              # _find_watch_card (none)
-            FakeResult(rows=[cluster]),                       # cluster lookup
-            FakeResult(rows=[(item_a.id,)]),                  # post_id_rows
-            FakeResult(rows=[item_a, item_b, item_skip, item_dup]),  # load_cluster_items (seed)
-        ],
-        scalar=[0],  # existing problems count == 0 -> seed
+            FakeResult(rows=[]),
+            FakeResult(rows=[cluster]),
+            FakeResult(rows=[(item_a.id,)]),
+        ]
     )
+
     resp = await client.post("/pipeline/watch", json={"cluster_id": "42"}, headers=auth_headers)
-    assert resp.status_code == 200
 
-    problems = [o for o in fake_db.added if isinstance(o, Problem)]
-    card = next(o for o in fake_db.added if isinstance(o, Pipeline))
-
-    # Deduped by problem_statement (P1 once), null problem_statement skipped, capped.
-    assert [p.title for p in problems] == ["P1", "P2"]
-    assert [p.position for p in problems] == [0, 1]
-    assert [p.source_post_id for p in problems] == ["src-1", "src-2"]
-    assert all(p.pipeline_id == card.id and p.user_id == "test-uid" for p in problems)
-
-
-async def test_watch_cluster_does_not_seed_when_problems_exist(client, fake_db, auth_headers):
-    cluster = make_cluster()
-    item_a = make_cluster_item(problem_statement="P1")
-    fake_db.stub(
-        execute=[
-            FakeResult(rows=[]),                  # _find_watch_card
-            FakeResult(rows=[cluster]),           # cluster lookup
-            FakeResult(rows=[(item_a.id,)]),      # post_id_rows
-        ],
-        scalar=[3],  # pipeline already has problems -> no seeding (no items load)
-    )
-    resp = await client.post("/pipeline/watch", json={"cluster_id": "42"}, headers=auth_headers)
     assert resp.status_code == 200
     assert not any(isinstance(o, Problem) for o in fake_db.added)
+    assert any(isinstance(o, Pipeline) for o in fake_db.added)

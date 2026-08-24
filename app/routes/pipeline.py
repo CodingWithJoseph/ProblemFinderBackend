@@ -4,25 +4,32 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_uid
 from app.config import PIPELINE_VERSION
 from app.db import get_db
-from app.models import Cluster, ClusterItem, Pipeline, Problem
-from app.routes.clusters import load_cluster_items
+from app.models import (
+    Cluster,
+    ClusterItem,
+    Pipeline,
+    SignalAnalysisCase,
+    SolutionCase,
+)
 from app.services.signal_cases import persist_new_signal_case
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
 PIPELINE_STAGES = ("watching", "discovery", "exploring", "validating", "building")
 VALID_STAGES = frozenset(PIPELINE_STAGES)
-SEED_BREAKDOWN_LIMIT = 10
-SIGNAL_BRIEF_SCAN = 500
 
 
-def _serialize(card: Pipeline) -> dict:
+def _serialize(
+    card: Pipeline,
+    signal_case: SignalAnalysisCase | None = None,
+    solution_case: SolutionCase | None = None,
+) -> dict:
     return {
         "id": card.id,
         "userId": card.user_id,
@@ -32,11 +39,47 @@ def _serialize(card: Pipeline) -> dict:
         "postIds": card.post_ids or [],
         "sourceClusterId": card.source_cluster_id,
         "stage": card.stage,
+        "analysisStatus": signal_case.status if signal_case else "not_started",
+        "buildStatus": solution_case.status if solution_case else "not_started",
+        "approvalStatus": (
+            solution_case.approval_status if solution_case else "not_started"
+        ),
         "launchedAt": card.launched_at.isoformat() if card.launched_at else None,
         "removedAt": card.removed_at.isoformat() if card.removed_at else None,
         "createdAt": card.created_at.isoformat() if card.created_at else None,
         "updatedAt": card.updated_at.isoformat() if card.updated_at else None,
     }
+
+
+async def _load_workflow_cases(
+    cards: list[Pipeline],
+    db: AsyncSession,
+    uid: str,
+) -> tuple[dict[str, SignalAnalysisCase], dict[str, SolutionCase]]:
+    pipeline_ids = [str(card.id) for card in cards]
+    if not pipeline_ids:
+        return {}, {}
+
+    signal_cases = (
+        await db.execute(
+            select(SignalAnalysisCase).where(
+                SignalAnalysisCase.pipeline_id.in_(pipeline_ids),
+                SignalAnalysisCase.user_id == uid,
+            )
+        )
+    ).scalars().all()
+    solution_cases = (
+        await db.execute(
+            select(SolutionCase).where(
+                SolutionCase.pipeline_id.in_(pipeline_ids),
+                SolutionCase.user_id == uid,
+            )
+        )
+    ).scalars().all()
+    return (
+        {str(case.pipeline_id): case for case in signal_cases},
+        {str(case.pipeline_id): case for case in solution_cases},
+    )
 
 
 class PatchPipelineBody(BaseModel):
@@ -62,7 +105,18 @@ async def get_pipeline(
         .where(Pipeline.user_id == uid, Pipeline.removed_at == None)
         .order_by(Pipeline.created_at.desc())
     )
-    return {"data": [_serialize(card) for card in result.scalars().all()]}
+    cards = list(result.scalars().all())
+    signal_cases, solution_cases = await _load_workflow_cases(cards, db, uid)
+    return {
+        "data": [
+            _serialize(
+                card,
+                signal_cases.get(str(card.id)),
+                solution_cases.get(str(card.id)),
+            )
+            for card in cards
+        ]
+    }
 
 
 @router.get("/{pipeline_id}")
@@ -82,7 +136,14 @@ async def get_pipeline_card(
     ).scalar_one_or_none()
     if not card:
         raise HTTPException(status_code=404, detail="Pipeline card not found")
-    return {"data": _serialize(card)}
+    signal_cases, solution_cases = await _load_workflow_cases([card], db, uid)
+    return {
+        "data": _serialize(
+            card,
+            signal_cases.get(str(card.id)),
+            solution_cases.get(str(card.id)),
+        )
+    }
 
 
 async def _get_pipeline_card(
@@ -121,57 +182,13 @@ async def _find_watch_card(
     ).scalar_one_or_none()
 
 
-def _dedupe_problem_items(items: list[ClusterItem]) -> list[ClusterItem]:
-    """Return the top-scored item for each distinct problem statement."""
-    seen: dict[str, ClusterItem] = {}
-    for item in items:
-        statement = (item.problem_statement or "").strip()
-        if not statement:
-            continue
-        key = statement.lower()
-        if key not in seen:
-            seen[key] = item
-    return list(seen.values())
-
-
-async def _seed_breakdown_from_cluster(
-    card: Pipeline,
-    cluster_id: int,
-    uid: str,
-    db: AsyncSession,
-) -> None:
-    """Seed the released Breakdown surface when a cluster is first watched."""
-    existing = await db.scalar(
-        select(func.count()).select_from(Problem).where(Problem.pipeline_id == card.id)
-    )
-    if existing:
-        return
-
-    items = await load_cluster_items(db, cluster_id, limit=SIGNAL_BRIEF_SCAN)
-    deduped = _dedupe_problem_items(items)[:SEED_BREAKDOWN_LIMIT]
-    if not deduped:
-        return
-
-    for index, item in enumerate(deduped):
-        db.add(
-            Problem(
-                pipeline_id=card.id,
-                user_id=uid,
-                title=(item.problem_statement or "").strip(),
-                source_post_id=item.source_item_id,
-                position=index,
-            )
-        )
-    await db.commit()
-
-
 @router.post("/watch")
 async def watch_cluster(
     body: WatchBody,
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
-    """Add a cluster to Pipeline and seed its initial Breakdown."""
+    """Create a project and queue its Analyze workspace."""
     existing = await _find_watch_card(uid, body.cluster_id, db)
     if existing:
         return {"is_watched": True, "pipeline_id": str(existing.id)}
@@ -211,7 +228,6 @@ async def watch_cluster(
     await db.commit()
     await db.refresh(card)
     await persist_new_signal_case(db, card, uid)
-    await _seed_breakdown_from_cluster(card, cluster_id, uid, db)
     return {"is_watched": True, "pipeline_id": str(card.id)}
 
 
