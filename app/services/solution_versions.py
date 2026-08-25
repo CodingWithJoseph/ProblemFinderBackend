@@ -20,6 +20,7 @@ from app.services.solution_cases import build_current_solution_document, utc_now
 from app.solution_contract import (
     SOLUTION_SCHEMA_VERSION,
     SolutionCaseDocument,
+    SolutionFeature,
     SolutionSectionKey,
 )
 
@@ -73,6 +74,63 @@ def replace_solution_section(
             "successfulOutcome",
             value.get("successful_outcome", value.get("mvpOutcome", value.get("mvp_outcome"))),
         )
+    elif key == "features":
+        try:
+            features = [
+                SolutionFeature.model_validate(item).model_dump(mode="json", by_alias=False)
+                for item in value
+            ]
+        except (TypeError, ValidationError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail="The Build section is not valid: features must be a valid list",
+            ) from exc
+        if not features:
+            raise HTTPException(
+                status_code=422,
+                detail="Keep at least one feature in the Build.",
+            )
+
+        feature_ids = {feature["id"] for feature in features}
+        architecture = payload.get("architecture")
+        if isinstance(architecture, dict):
+            for component in architecture.get("components", []):
+                component["feature_ids"] = [
+                    feature_id
+                    for feature_id in component.get("feature_ids", [])
+                    if feature_id in feature_ids
+                ]
+            for contract in architecture.get("api_contracts", []):
+                contract["feature_ids"] = [
+                    feature_id
+                    for feature_id in contract.get("feature_ids", [])
+                    if feature_id in feature_ids
+                ]
+
+        tasks = []
+        for task in payload.get("tasks", []):
+            task["feature_ids"] = [
+                feature_id
+                for feature_id in task.get("feature_ids", [])
+                if feature_id in feature_ids
+            ]
+            if task["feature_ids"]:
+                tasks.append(task)
+        if payload.get("tasks") and not tasks:
+            raise HTTPException(
+                status_code=422,
+                detail="Keep a feature used by at least one task, or update the tasks first.",
+            )
+        task_ids = {task["id"] for task in tasks}
+        for task in tasks:
+            task["depends_on"] = [
+                task_id
+                for task_id in task.get("depends_on", [])
+                if task_id in task_ids
+            ]
+
+        payload["features"] = features
+        payload["tasks"] = tasks
     else:
         payload[key] = value
 
