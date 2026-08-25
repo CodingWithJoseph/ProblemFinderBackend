@@ -159,24 +159,25 @@ async def execute_signal_job(
         await fail_signal_job(db, job_id, "missing_case", job=job, case=case)
         return
 
-    all_items = await load_signal_source_items(db, card)
-    usable_items = usable_signal_items(all_items)
-    fingerprint = signal_source_fingerprint(all_items)
-    updated_at = signal_source_updated_at(all_items)
-    job.source_fingerprint = fingerprint
-    case.source_fingerprint = fingerprint
-    case.source_updated_at = updated_at
-
-    if len(usable_items) < max(1, int(settings.signal_analysis_min_evidence)):
-        await complete_insufficient_evidence(db, job, case)
-        return
-
-    case.progress_step = "analyzing_problem"
-    case.progress_label = "Analyzing the full source cluster"
-    case.updated_at = utc_now()
-    await db.commit()
-
+    case_id = str(case.id)
     try:
+        all_items = await load_signal_source_items(db, card)
+        usable_items = usable_signal_items(all_items)
+        fingerprint = signal_source_fingerprint(all_items)
+        updated_at = signal_source_updated_at(all_items)
+        job.source_fingerprint = fingerprint
+        case.source_fingerprint = fingerprint
+        case.source_updated_at = updated_at
+
+        if len(usable_items) < max(1, int(settings.signal_analysis_min_evidence)):
+            await complete_insufficient_evidence(db, job, case)
+            return
+
+        case.progress_step = "analyzing_problem"
+        case.progress_label = "Analyzing the full source cluster"
+        case.updated_at = utc_now()
+        await db.commit()
+
         problem_output = await analyze_full_cluster(
             db,
             case,
@@ -216,13 +217,13 @@ async def execute_signal_job(
             fingerprint,
         )
     except SignalAnalysisProviderFailure as exc:
-        await fail_signal_job(db, job_id, exc.category, job=job, case=case)
+        await rollback_and_fail_signal_job(db, job_id, exc.category)
     except ValidationError:
-        logger.warning("Signal analysis citation validation failed case=%s", case.id)
-        await fail_signal_job(db, job_id, "validation", job=job, case=case)
+        logger.warning("Signal analysis citation validation failed case=%s", case_id)
+        await rollback_and_fail_signal_job(db, job_id, "validation")
     except Exception:
-        logger.exception("Signal analysis failed case=%s", case.id)
-        await fail_signal_job(db, job_id, "provider_error", job=job, case=case)
+        logger.exception("Signal analysis failed case=%s", case_id)
+        await rollback_and_fail_signal_job(db, job_id, "provider_error")
 
 
 async def load_signal_source_items(db: AsyncSession, card: Pipeline) -> list[ClusterItem]:
@@ -599,6 +600,10 @@ async def save_signal_version(
         generated_at=now,
     )
     db.add(version)
+    # PostgreSQL must see the version row before the case points at it.
+    # Without this flush SQLAlchemy may issue the case UPDATE first and violate
+    # the current_version_id foreign key.
+    await db.flush()
     case.current_version_id = version.id
     case.status = "ready"
     case.progress_step = None
@@ -615,6 +620,21 @@ async def save_signal_version(
     job.updated_at = now
     await db.commit()
     return version
+
+
+async def rollback_and_fail_signal_job(
+    db: AsyncSession,
+    job_id: str,
+    category: str,
+) -> None:
+    """Recover the transaction, then persist a terminal failure state.
+
+    Generated ORM instances can be expired after a failed flush. Re-querying
+    after rollback avoids both PendingRollbackError and stale in-memory state.
+    """
+
+    await db.rollback()
+    await fail_signal_job(db, job_id, category)
 
 
 async def complete_insufficient_evidence(

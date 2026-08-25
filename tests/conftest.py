@@ -148,6 +148,7 @@ class FakeSession:
         self.deleted = []
         self.commit_count = 0
         self.flush_count = 0
+        self.rollback_count = 0
 
     def stub(self, execute=None, scalar=None):
         if execute is not None:
@@ -184,7 +185,7 @@ class FakeSession:
         self.commit_count += 1
 
     async def rollback(self):
-        pass
+        self.rollback_count += 1
 
     async def flush(self):
         self.flush_count += 1

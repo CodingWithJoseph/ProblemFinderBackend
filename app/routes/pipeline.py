@@ -17,7 +17,6 @@ from app.models import (
     SignalAnalysisCase,
     SolutionCase,
 )
-from app.services.signal_cases import persist_new_signal_case
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
@@ -188,7 +187,7 @@ async def watch_cluster(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
-    """Create a project and queue its Analyze workspace."""
+    """Create a project without spending analysis capacity."""
     existing = await _find_watch_card(uid, body.cluster_id, db)
     if existing:
         return {"is_watched": True, "pipeline_id": str(existing.id)}
@@ -227,7 +226,6 @@ async def watch_cluster(
     db.add(card)
     await db.commit()
     await db.refresh(card)
-    await persist_new_signal_case(db, card, uid)
     return {"is_watched": True, "pipeline_id": str(card.id)}
 
 

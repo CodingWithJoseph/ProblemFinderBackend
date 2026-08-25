@@ -4,7 +4,7 @@
 Every route reads the flat ``cluster_items`` table; these tests drive the
 FakeSession result queues that each endpoint pops in order.
 """
-from app.models import Pipeline, Problem
+from app.models import Pipeline, Problem, SignalAnalysisCase, SignalAnalysisJob
 
 from conftest import (
     FakeResult,
@@ -195,7 +195,7 @@ async def test_similar_posts_uses_cluster_items(client, fake_db, auth_headers):
 
 # Project creation lifecycle
 
-async def test_watch_cluster_creates_analyze_case_without_legacy_problems(
+async def test_watch_cluster_creates_project_without_starting_analysis(
     client,
     fake_db,
     auth_headers,
@@ -214,4 +214,6 @@ async def test_watch_cluster_creates_analyze_case_without_legacy_problems(
 
     assert resp.status_code == 200
     assert not any(isinstance(o, Problem) for o in fake_db.added)
+    assert not any(isinstance(o, SignalAnalysisCase) for o in fake_db.added)
+    assert not any(isinstance(o, SignalAnalysisJob) for o in fake_db.added)
     assert any(isinstance(o, Pipeline) for o in fake_db.added)
