@@ -146,11 +146,20 @@ async def require_ide_access(
 ) -> IdeAccess:
     if credentials is None:
         raise HTTPException(status_code=401, detail="Missing IDE access token")
+    access = await resolve_ide_access_token(credentials.credentials, db)
+    if access.pipeline_id != pipeline_id:
+        raise HTTPException(status_code=401, detail="Invalid or expired IDE access token")
+    request.state.uid = access.user_id
+    request.state.ide_token_id = access.id
+    return access
+
+
+async def resolve_ide_access_token(token: str, db: AsyncSession) -> IdeAccess:
+    """Resolve a project token without requiring a project id from the caller."""
     now = utc_now()
     row = (await db.execute(
         select(IdeAccessToken).where(
-            IdeAccessToken.pipeline_id == pipeline_id,
-            IdeAccessToken.token_hash == hash_access_token(credentials.credentials),
+            IdeAccessToken.token_hash == hash_access_token(token),
             IdeAccessToken.revoked_at == None,
             IdeAccessToken.expires_at > now,
         )
@@ -158,8 +167,6 @@ async def require_ide_access(
     if row is None:
         raise HTTPException(status_code=401, detail="Invalid or expired IDE access token")
     row.last_used_at = now
-    request.state.uid = row.user_id
-    request.state.ide_token_id = str(row.id)
     await db.commit()
     return IdeAccess(row)
 
