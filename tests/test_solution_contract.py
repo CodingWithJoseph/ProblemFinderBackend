@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from app.solution_contract import SOLUTION_SCHEMA_VERSION, SolutionCaseDocument
 from app.build_documents import build_export_zip, ensure_build_documents, replace_build_document
+from app.services.solution_versions import replace_solution_section
 
 
 def _document() -> dict:
@@ -96,6 +97,47 @@ def test_solution_contract_accepts_traceable_five_feature_maximum():
     assert payload["tasks"][0]["status"] == "todo"
     assert payload["primaryUsers"] == ["Freelancer"]
     assert payload["project"]["deliveryTargets"] == ["web"]
+
+
+def test_removing_a_feature_cleans_dependencies_and_regenerates_documents():
+    payload = _document()
+    payload["features"].append({
+        "id": "feature-2",
+        "title": "Schedule reminder",
+        "summary": "Schedule a reminder for later delivery.",
+        "problemUnitIds": ["unit-2"],
+        "evidenceIds": ["evidence-2"],
+        "acceptanceCriteria": ["A reminder can be scheduled"],
+    })
+    payload["architecture"]["components"][0]["featureIds"].append("feature-2")
+    payload["architecture"]["apiContracts"][0]["featureIds"].append("feature-2")
+    payload["tasks"].append({
+        "id": "task-2",
+        "title": "Schedule reminder delivery",
+        "description": "Add delayed delivery to the reminder API.",
+        "featureIds": ["feature-2"],
+        "dependsOn": ["task-1"],
+        "acceptanceChecks": ["Scheduled reminder test passes"],
+        "status": "todo",
+    })
+    source = ensure_build_documents(SolutionCaseDocument.model_validate(payload))
+
+    edited = replace_solution_section(
+        source,
+        "features",
+        [payload["features"][0]],
+        next_version=2,
+    )
+
+    assert [feature.id for feature in edited.features] == ["feature-1"]
+    assert edited.architecture is not None
+    assert edited.architecture.components[0].feature_ids == ["feature-1"]
+    assert edited.architecture.api_contracts[0].feature_ids == ["feature-1"]
+    assert [task.id for task in edited.tasks] == ["task-1"]
+    features_document = next(item.content for item in edited.documents if item.key == "features")
+    tasks_document = next(item.content for item in edited.documents if item.key == "tasks")
+    assert "Schedule reminder" not in features_document
+    assert "Schedule reminder delivery" not in tasks_document
 
 
 def test_solution_contract_accepts_legacy_single_delivery_target():
