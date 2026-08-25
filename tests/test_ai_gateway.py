@@ -6,8 +6,8 @@ import pytest
 from pydantic import BaseModel
 
 from app.services.ai_gateway import (
-    OLLAMA_BASE_URL,
-    OLLAMA_DEFAULT_MODEL,
+    LOCAL_BASE_URL,
+    LOCAL_DEFAULT_MODEL,
     OPENAI_BASE_URL,
     OPENAI_DEFAULT_MODEL,
     AIGatewayFailure,
@@ -65,7 +65,7 @@ class FakeClientFactory:
 
 def settings(**overrides):
     values = {
-        "ai_provider": "ollama",
+        "ai_provider": "local",
         "ai_base_url": "",
         "ai_model": "",
         "ai_api_key": "",
@@ -91,13 +91,13 @@ def assert_strict_objects(node):
             assert_strict_objects(value)
 
 
-def test_gateway_configuration_uses_ollama_for_development():
+def test_gateway_configuration_uses_local_server_for_development():
     config = resolve_ai_gateway_config(settings())
 
-    assert config.name == "ollama"
-    assert config.base_url == OLLAMA_BASE_URL
-    assert config.model == OLLAMA_DEFAULT_MODEL
-    assert config.api_key == "ollama-not-a-secret"
+    assert config.name == "local"
+    assert config.base_url == LOCAL_BASE_URL
+    assert config.model == LOCAL_DEFAULT_MODEL
+    assert config.api_key == "local-not-a-secret"
 
 
 def test_gateway_configuration_uses_only_openai_in_production():
@@ -129,10 +129,10 @@ def test_openai_configuration_requires_credentials_and_official_host():
     assert unsafe_host.value.category == "invalid_configuration"
 
 
-async def test_ollama_structured_output_uses_strict_schema_and_repairs_once():
+async def test_local_structured_output_uses_strict_schema_and_repairs_once():
     factory = FakeClientFactory(contents=["{}", '{"title":"Ready","tags":[]}'])
     config = resolve_ai_gateway_config(settings(
-        ai_base_url="http://host.docker.internal:11434/v1",
+        ai_base_url="http://host.docker.internal:8080/v1",
         ai_model="local-model",
     ))
     gateway = build_ai_gateway(config, client_factory=factory)
@@ -147,8 +147,8 @@ async def test_ollama_structured_output_uses_strict_schema_and_repairs_once():
 
     assert result == ExampleOutput(title="Ready", tags=[])
     assert factory.options == {
-        "api_key": "ollama-not-a-secret",
-        "base_url": "http://host.docker.internal:11434/v1",
+        "api_key": "local-not-a-secret",
+        "base_url": "http://host.docker.internal:8080/v1",
         "timeout": 120.0,
         "max_retries": 0,
     }
@@ -197,7 +197,7 @@ async def test_openai_structured_output_uses_responses_api_and_cost_controls():
 
 @pytest.mark.parametrize(
     ("provider", "limit_field"),
-    [("ollama", "max_tokens"), ("openai", "max_completion_tokens")],
+    [("local", "max_tokens"), ("openai", "max_completion_tokens")],
 )
 async def test_gateway_normalizes_one_required_tool_call(provider, limit_field):
     raw_tool_call = SimpleNamespace(

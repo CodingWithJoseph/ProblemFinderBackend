@@ -8,7 +8,7 @@ from app.solution_contract import SolutionModelOutput
 
 
 class RecordingGateway:
-    name = "ollama"
+    name = "local"
     model = "local-model"
 
     def __init__(self, output):

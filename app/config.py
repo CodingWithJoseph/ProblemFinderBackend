@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     firebase_project_id: str
     firebase_credentials_path: str = "firebase-service-account-prod.json"
 
-    ai_provider: str = "ollama"
+    ai_provider: str = "local"
     ai_base_url: str = ""
     ai_model: str = ""
     ai_api_key: str = ""

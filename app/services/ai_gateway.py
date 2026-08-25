@@ -16,9 +16,9 @@ from pydantic import BaseModel, ValidationError
 from app.config import Settings
 
 
-AIProviderName = Literal["ollama", "openai"]
-OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
-OLLAMA_DEFAULT_MODEL = "gpt-oss:20b"
+AIProviderName = Literal["local", "openai"]
+LOCAL_BASE_URL = "http://127.0.0.1:8080/v1"
+LOCAL_DEFAULT_MODEL = "gpt-oss-20b"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 OPENAI_DEFAULT_MODEL = "gpt-5.6-terra"
 STRUCTURED_OUTPUT_ATTEMPTS = 2
@@ -123,7 +123,7 @@ def inline_local_schema_refs(schema: dict[str, Any]) -> dict[str, Any]:
 
 def resolve_ai_gateway_config(settings: Settings) -> AIGatewayConfig:
     provider = settings.ai_provider.strip().lower()
-    if provider not in {"ollama", "openai"}:
+    if provider not in {"local", "openai"}:
         raise AIGatewayFailure("invalid_provider")
     if settings.environment.strip().lower() in {"prod", "production"} and provider != "openai":
         raise AIGatewayFailure("invalid_configuration")
@@ -133,14 +133,14 @@ def resolve_ai_gateway_config(settings: Settings) -> AIGatewayConfig:
     if reasoning_effort not in VALID_REASONING_EFFORTS:
         raise AIGatewayFailure("invalid_configuration")
 
-    if provider == "ollama":
+    if provider == "local":
         return AIGatewayConfig(
-            name="ollama",
-            base_url=_valid_base_url(settings.ai_base_url or OLLAMA_BASE_URL),
-            model=settings.ai_model.strip() or OLLAMA_DEFAULT_MODEL,
+            name="local",
+            base_url=_valid_base_url(settings.ai_base_url or LOCAL_BASE_URL),
+            model=settings.ai_model.strip() or LOCAL_DEFAULT_MODEL,
             timeout_seconds=timeout,
             reasoning_effort=reasoning_effort,
-            api_key="ollama-not-a-secret",
+            api_key="local-not-a-secret",
         )
 
     api_key = settings.ai_api_key.strip()

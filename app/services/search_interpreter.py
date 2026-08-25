@@ -277,7 +277,7 @@ async def interpret_search(
         "latest_user_message": request.message,
     }
     provider_name = settings.ai_provider.strip().lower()
-    if provider_name not in {"ollama", "openai"}:
+    if provider_name not in {"local", "openai"}:
         provider_name = "invalid"
 
     try:
