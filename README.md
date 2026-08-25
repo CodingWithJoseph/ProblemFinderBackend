@@ -90,7 +90,14 @@ service healthy after `/ready` confirms the database and release schema are read
 pytest -q
 ```
 
-## MCP package
+## MCP
+
+The hosted Streamable HTTP endpoint is available at `/mcp` on the existing API
+domain. It accepts the same project-scoped bearer token created in Handoff and
+derives the project from that token, so remote clients only need the endpoint
+and token. Set `MCP_ALLOWED_HOSTS` to the API hostname in production.
+
+The npm stdio package remains available as a local-development fallback:
 
 ```bash
 cd mcp
@@ -100,7 +107,7 @@ npm run build
 npm pack --dry-run
 ```
 
-Publish the package as `immensity-mcp-server@0.2.0` before exposing the coding-agent action to production users. See [docs/build-workspace.md](docs/build-workspace.md) for the lifecycle and release contract.
+See [docs/build-workspace.md](docs/build-workspace.md) for the lifecycle and release contract.
 
 ## Release smoke test
 

@@ -38,10 +38,15 @@ class Settings(BaseSettings):
     solution_worker_enabled: bool = True
 
     allowed_origins: str = "http://localhost:3000"
+    mcp_allowed_hosts: str = "127.0.0.1:*,localhost:*,testserver"
 
     @property
     def origins_list(self) -> list[str]:
         return [origin.strip() for origin in self.allowed_origins.split(",")]
+
+    @property
+    def mcp_allowed_hosts_list(self) -> list[str]:
+        return [host.strip() for host in self.mcp_allowed_hosts.split(",") if host.strip()]
 
 @lru_cache
 def get_settings() -> Settings:

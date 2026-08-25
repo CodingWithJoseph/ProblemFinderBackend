@@ -67,11 +67,12 @@ Once approved, the same project tokens authorize implementation through:
 - blocker reporting with a required note;
 - completion only with a verification summary and checks that passed.
 
-The stdio MCP package maps these routes to fourteen focused tools. Its server instructions are intentionally short so clients that truncate MCP instructions still receive the core rules.
+The hosted `/mcp` Streamable HTTP endpoint maps these routes to fifteen focused tools and authenticates with the project token created in Handoff. The stdio npm package maps the same tools for local development. Server instructions are intentionally short so clients that truncate MCP instructions still receive the core rules.
 
 ## Release requirements
 
 1. Apply migration `0052_build_contract_foundation`.
 2. Deploy the backend and frontend together because the response contract adds documents and approval state.
-3. Publish `mcp/` as `immensity-mcp-server@0.3.0` before exposing `npx` setup in production.
-4. Verify `/ready`, then run backend tests, frontend tests/build, MCP typecheck/build, and a stdio `initialize` + `tools/list` smoke test.
+3. Set `MCP_ALLOWED_HOSTS` to the existing API hostname and verify authenticated `/mcp` initialization plus `tools/list`.
+4. Publish `mcp/` as `immensity-mcp-server@0.3.0` only when the optional local `npx` setup is promoted.
+5. Verify `/ready`, then run backend tests, frontend tests/build, MCP typecheck/build, and the remote MCP smoke test.

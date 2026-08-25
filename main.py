@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import get_settings
 from app.db import engine
+from app.mcp_server import hosted_mcp_app, hosted_mcp_server
 from app.readiness import check_database_readiness
 from app.routes.clusters import router as clusters_router
 from app.routes.pipeline import router as pipeline_router
@@ -42,23 +43,24 @@ async def lifespan(app: "FastAPI"):
             run_solution_worker(solution_stop, settings=settings),
             name="solution-generation-worker",
         )
-    try:
-        yield
-    finally:
-        signal_stop.set()
-        solution_stop.set()
-        if signal_worker:
-            signal_worker.cancel()
-            try:
-                await signal_worker
-            except asyncio.CancelledError:
-                pass
-        if solution_worker:
-            solution_worker.cancel()
-            try:
-                await solution_worker
-            except asyncio.CancelledError:
-                pass
+    async with hosted_mcp_server.session_manager.run():
+        try:
+            yield
+        finally:
+            signal_stop.set()
+            solution_stop.set()
+            if signal_worker:
+                signal_worker.cancel()
+                try:
+                    await signal_worker
+                except asyncio.CancelledError:
+                    pass
+            if solution_worker:
+                solution_worker.cancel()
+                try:
+                    await solution_worker
+                except asyncio.CancelledError:
+                    pass
 
 
 app = FastAPI(
@@ -75,6 +77,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Mcp-Session-Id"],
 )
 
 app.include_router(clusters_router)
@@ -105,3 +108,7 @@ async def ready():
     if not readiness.ready:
         return JSONResponse(status_code=503, content=payload)
     return payload
+
+
+# Keep this mount last so the regular API routes take precedence.
+app.mount("/", app=hosted_mcp_app)
