@@ -276,8 +276,8 @@ async def interpret_search(
         "available_options": options.model_dump(mode="json"),
         "latest_user_message": request.message,
     }
-    provider_name = settings.search_interpreter_provider.strip().lower()
-    if provider_name not in {"local", "groq"}:
+    provider_name = settings.ai_provider.strip().lower()
+    if provider_name not in {"ollama", "openai"}:
         provider_name = "invalid"
 
     try:

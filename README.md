@@ -18,8 +18,8 @@ FastAPI backend for the Discovery, Analysis, and Build workflow.
 
 ## Run locally
 
-The backend requires Python 3.12, PostgreSQL, and a local OpenAI-compatible
-model server. Run the commands below from the repository root in PowerShell.
+The backend requires Python 3.12, PostgreSQL, and Ollama. Run the commands
+below from the repository root in PowerShell.
 
 ### 1. Install and configure the backend
 
@@ -30,9 +30,9 @@ python -m pip install -r requirements.txt -r requirements-test.txt
 Copy-Item .env.example .env
 ```
 
-Update `.env` with a working `DATABASE_URL`, Firebase credentials, and any
-other required secrets. The checked-in local model defaults already point to
-`http://127.0.0.1:8080/v1` and use the model alias `gpt-oss-20b`.
+Update `.env` with a working `DATABASE_URL` and Firebase credentials. The
+checked-in development defaults use Ollama at `http://127.0.0.1:11434/v1` and
+the model name `gpt-oss:20b`.
 
 Apply the pending database migrations:
 
@@ -52,19 +52,19 @@ cluster-backed projects with completed Analysis, and moves them to Build. If
 only one eligible project exists, it is reused for both test lanes. It creates
 no fake evidence or public demo route and refuses to run in production.
 
-### 2. Start the Llama agent
+### 2. Start Ollama
 
-In the first terminal, start the local `gpt-oss-20b` model server. If
-`llama-server.exe` is not on `PATH`, replace it with the full path to the
-executable in your llama.cpp installation.
+Install Ollama, pull the configured model once, and keep Ollama running:
 
 ```powershell
-llama-server.exe -hf ggml-org/gpt-oss-20b-GGUF --alias gpt-oss-20b --jinja --ctx-size 0 --host 127.0.0.1 --port 8080
+ollama pull gpt-oss:20b
+ollama serve
 ```
 
-Keep this terminal running. The backend uses its OpenAI-compatible API at
-`http://127.0.0.1:8080/v1` for search interpretation, Signal analysis, and
-Solution generation.
+The backend uses one gateway and this model for Search, Analyze, Analyze
+conversations, and Build. If `ollama list` shows a different model name, set
+`AI_MODEL` to that exact value. See [docs/ai-gateway.md](docs/ai-gateway.md) for
+the shared development and production configuration.
 
 ### 3. Start the backend
 

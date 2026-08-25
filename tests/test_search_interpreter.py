@@ -273,7 +273,7 @@ async def test_interpret_search_falls_back_when_filter_options_fail(
     assert body["available_options"]["sources"] == []
 
 
-async def test_interpret_search_falls_back_when_groq_key_is_missing(
+async def test_interpret_search_falls_back_when_openai_key_is_missing(
     client,
     fake_db,
     auth_headers,
@@ -284,11 +284,13 @@ async def test_interpret_search_falls_back_when_groq_key_is_missing(
         search_interpreter,
         "get_settings",
         lambda: SimpleNamespace(
-            search_interpreter_provider="groq",
-            search_interpreter_base_url="https://api.groq.com/openai/v1",
-            search_interpreter_model="openai/gpt-oss-20b",
-            search_interpreter_timeout_seconds=8.0,
-            groq_api_key="",
+            ai_provider="openai",
+            ai_base_url="https://api.openai.com/v1",
+            ai_model="gpt-5.6-terra",
+            ai_timeout_seconds=8.0,
+            ai_reasoning_effort="medium",
+            ai_api_key="",
+            environment="development",
         ),
     )
 
