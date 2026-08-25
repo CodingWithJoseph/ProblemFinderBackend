@@ -108,8 +108,8 @@ def _with_trace(
 
 
 def _provider_name() -> str:
-    provider = get_settings().search_interpreter_provider.strip().lower()
-    return provider if provider in {"local", "groq"} else "invalid"
+    provider = get_settings().ai_provider.strip().lower()
+    return provider if provider in {"ollama", "openai"} else "invalid"
 
 
 async def run_search_agent(
