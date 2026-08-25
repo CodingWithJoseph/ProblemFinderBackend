@@ -68,7 +68,7 @@ def test_empty_case_document_is_frontend_ready():
     assert payload["progress"]["step"] == "queued"
 
 
-async def test_get_case_lazily_initializes_existing_project(client, fake_db, auth_headers):
+async def test_get_case_does_not_start_analysis(client, fake_db, auth_headers):
     card = make_pipeline(name="Late invoices")
     fake_db.stub(execute=[
         FakeResult(rows=[card]),
@@ -77,10 +77,10 @@ async def test_get_case_lazily_initializes_existing_project(client, fake_db, aut
 
     response = await client.get(f"/pipeline/{card.id}/signal/case", headers=auth_headers)
 
-    assert response.status_code == 200
-    assert response.json()["status"] == "queued"
-    assert any(isinstance(row, SignalAnalysisCase) for row in fake_db.added)
-    assert any(isinstance(row, SignalAnalysisJob) for row in fake_db.added)
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Signal analysis has not started"
+    assert not any(isinstance(row, SignalAnalysisCase) for row in fake_db.added)
+    assert not any(isinstance(row, SignalAnalysisJob) for row in fake_db.added)
 
 
 async def test_get_case_rejects_other_users_project(client, fake_db, auth_headers):

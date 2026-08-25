@@ -3,11 +3,13 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from pydantic import ValidationError
 
-from conftest import FakeSession, TEST_UID, make_pipeline
+from conftest import FakeResult, FakeSession, TEST_UID, make_pipeline
 from app.models import ClusterItem
 from app.services.signal_analysis_worker import (
     build_case_document,
     fail_signal_job,
+    rollback_and_fail_signal_job,
+    save_signal_version,
     select_representative_evidence,
 )
 from app.services.signal_cases import new_signal_case_and_job
@@ -151,3 +153,48 @@ async def test_failed_refresh_preserves_current_version_pointer():
     assert "previous version" in case.safe_error
     assert job.status == "failed"
     assert job.error_category == "timeout"
+
+
+async def test_saved_version_is_flushed_before_case_points_to_it():
+    db = FakeSession()
+    card = make_pipeline()
+    case, job = new_signal_case_and_job(card, TEST_UID)
+    job.status = "running"
+    item = _item("evidence-1", score=10, observed_at=datetime.now(timezone.utc))
+    document = build_case_document(
+        card,
+        case,
+        [item],
+        [item],
+        _output("evidence-1"),
+    )
+
+    version = await save_signal_version(
+        db,
+        job,
+        case,
+        document,
+        1,
+        "local",
+        "test-model",
+        "sha256:test",
+    )
+
+    assert db.flush_count == 1
+    assert case.current_version_id == version.id
+    assert case.status == "ready"
+    assert job.status == "succeeded"
+
+
+async def test_failure_recovery_rolls_back_before_requerying_job():
+    db = FakeSession()
+    card = make_pipeline()
+    case, job = new_signal_case_and_job(card, TEST_UID)
+    job.status = "running"
+    db.stub(execute=[FakeResult(rows=[job]), FakeResult(rows=[case])])
+
+    await rollback_and_fail_signal_job(db, job.id, "provider_error")
+
+    assert db.rollback_count == 1
+    assert job.status == "failed"
+    assert case.status == "failed"

@@ -80,9 +80,10 @@ async def get_signal_case(
     card = await _get_pipeline_card(pipeline_id, db, uid)
     case = await find_signal_case(db, pipeline_id, uid)
     if case is None:
-        # Existing Pipeline projects predate Signal cases. Their first read
-        # performs a one-time initialization; later reads are side-effect free.
-        case = await persist_new_signal_case(db, card, uid)
+        raise HTTPException(
+            status_code=404,
+            detail="Signal analysis has not started",
+        )
 
     current = await find_current_version(db, case)
     if current is None:
