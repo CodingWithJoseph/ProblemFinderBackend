@@ -1,6 +1,6 @@
 from openai import AsyncOpenAI
 from app.config import get_settings
-from app.services.ai_gateway import OLLAMA_BASE_URL, OPENAI_BASE_URL
+from app.services.ai_gateway import LOCAL_BASE_URL, OPENAI_BASE_URL
 
 # Shared async OpenAI client. Used for opportunity search embeddings, problem
 # embeddings, and any future embedding/completion needs. Centralised here so the
@@ -8,10 +8,10 @@ from app.services.ai_gateway import OLLAMA_BASE_URL, OPENAI_BASE_URL
 _settings = get_settings()
 _provider = _settings.ai_provider.strip().lower()
 openai_client = AsyncOpenAI(
-    api_key=_settings.ai_api_key.strip() or "ollama-not-a-secret",
+    api_key=_settings.ai_api_key.strip() or "local-not-a-secret",
     base_url=(
         _settings.ai_base_url.strip()
-        or (OPENAI_BASE_URL if _provider == "openai" else OLLAMA_BASE_URL)
+        or (OPENAI_BASE_URL if _provider == "openai" else LOCAL_BASE_URL)
     ),
 )
 

@@ -2,28 +2,27 @@
 
 Immensity uses one configured AI provider and model for Search, Analyze, Analyze conversations, and Build. Each operation keeps its own prompt and strict JSON contract, but provider selection, credentials, timeouts, structured-output validation, and error handling are centralized.
 
-## Local development with Ollama
+## Local development with llama.cpp
 
-Install Ollama, then run:
+Start the existing OpenAI-compatible llama.cpp server:
 
 ```powershell
-ollama pull gpt-oss:20b
-ollama serve
+& "C:\path\to\llama-server.exe" -hf ggml-org/gpt-oss-20b-GGUF --alias gpt-oss-20b --host 127.0.0.1 --port 8080 --ctx-size 32768 --jinja -ngl 99 -fa on
 ```
 
 Configure the backend `.env`:
 
 ```env
 ENVIRONMENT=development
-AI_PROVIDER=ollama
-AI_BASE_URL=http://127.0.0.1:11434/v1
-AI_MODEL=gpt-oss:20b
+AI_PROVIDER=local
+AI_BASE_URL=http://127.0.0.1:8080/v1
+AI_MODEL=gpt-oss-20b
 AI_API_KEY=
 AI_TIMEOUT_SECONDS=120
 AI_REASONING_EFFORT=medium
 ```
 
-If your installed model has a different Ollama name, set `AI_MODEL` to the exact value shown by `ollama list`.
+`AI_MODEL` must match the server's `--alias` value.
 
 ## Production with OpenAI
 
@@ -39,7 +38,7 @@ AI_TIMEOUT_SECONDS=120
 AI_REASONING_EFFORT=medium
 ```
 
-Production rejects Ollama and custom OpenAI hosts. The removed Search, Analyze, Build, Groq, and legacy OpenAI variables are no longer read.
+Production rejects the local provider and custom OpenAI hosts. The removed Search, Analyze, Build, Groq, and legacy OpenAI variables are no longer read.
 
 ## Reliability behavior
 
