@@ -489,19 +489,29 @@ async def list_projects() -> dict[str, Any]:
         )
         ids = [str(card.id) for card in cards]
         signal_rows = (
-            await db.execute(
-                select(SignalAnalysisCase).where(
-                    SignalAnalysisCase.user_id == token.subject,
-                    SignalAnalysisCase.pipeline_id.in_(ids),
+            (
+                await db.execute(
+                    select(SignalAnalysisCase).where(
+                        SignalAnalysisCase.user_id == token.subject,
+                        SignalAnalysisCase.pipeline_id.in_(ids),
+                    )
                 )
-            ).scalars().all() if ids else []
+            ).scalars().all()
+            if ids
+            else []
+        )
         solution_rows = (
-            await db.execute(
-                select(SolutionCase).where(
-                    SolutionCase.user_id == token.subject,
-                    SolutionCase.pipeline_id.in_(ids),
+            (
+                await db.execute(
+                    select(SolutionCase).where(
+                        SolutionCase.user_id == token.subject,
+                        SolutionCase.pipeline_id.in_(ids),
+                    )
                 )
-            ).scalars().all() if ids else []
+            ).scalars().all()
+            if ids
+            else []
+        )
         analysis = {str(row.pipeline_id): row.status for row in signal_rows}
         builds = {str(row.pipeline_id): row.status for row in solution_rows}
         selected = claims.get("selected_pipeline_id")
