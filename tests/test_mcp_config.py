@@ -10,9 +10,9 @@ def production_settings(**overrides):
         "firebase_project_id": "immensity-prod",
         "environment": "production",
         "allowed_origins": "https://console.useimmensity.com",
-        "mcp_allowed_hosts": "mcp.immensity.ai",
-        "mcp_public_url": "https://mcp.immensity.ai/mcp",
-        "mcp_issuer_url": "https://mcp.immensity.ai",
+        "mcp_allowed_hosts": "mcp.useimmensity.com",
+        "mcp_public_url": "https://mcp.useimmensity.com/mcp",
+        "mcp_issuer_url": "https://mcp.useimmensity.com",
         "web_app_url": "https://console.useimmensity.com",
     }
     values.update(overrides)
@@ -22,19 +22,19 @@ def production_settings(**overrides):
 def test_public_mcp_target_is_valid_for_production():
     settings = production_settings()
 
-    assert settings.mcp_public_url == "https://mcp.immensity.ai/mcp"
-    assert settings.mcp_issuer_url == "https://mcp.immensity.ai"
-    assert settings.mcp_allowed_hosts_list == ["mcp.immensity.ai"]
+    assert settings.mcp_public_url == "https://mcp.useimmensity.com/mcp"
+    assert settings.mcp_issuer_url == "https://mcp.useimmensity.com"
+    assert settings.mcp_allowed_hosts_list == ["mcp.useimmensity.com"]
 
 
 def test_production_rejects_non_https_mcp_resource():
     with pytest.raises(ValidationError, match="MCP_PUBLIC_URL must be an HTTPS URL"):
-        production_settings(mcp_public_url="http://mcp.immensity.ai/mcp")
+        production_settings(mcp_public_url="http://mcp.useimmensity.com/mcp")
 
 
 def test_production_rejects_mcp_resource_without_mcp_path():
     with pytest.raises(ValidationError, match="public /mcp resource"):
-        production_settings(mcp_public_url="https://mcp.immensity.ai/")
+        production_settings(mcp_public_url="https://mcp.useimmensity.com/")
 
 
 def test_production_requires_public_mcp_host_in_transport_allowlist():
