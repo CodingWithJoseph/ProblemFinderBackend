@@ -9,11 +9,11 @@ FastAPI backend for the Discovery, Analysis, and Build workflow.
 - Durable solution-generation worker
 - Immutable Solution Case versions
 - Problem-unit and evidence traceability validation
-- Project-scoped, revocable IDE access tokens
+- OAuth-backed coding-agent access
 - Focused Markdown package, immutable editing, approval, and ZIP export
 - Mutable task progress, blocker, and verification overlays
 - Focused document, project-status, context, and next-task APIs
-- Bidirectional website and IDE/MCP Build editing over one canonical version
+- Bidirectional website and MCP Build editing over one canonical version
 - Publish-ready stdio MCP package in `mcp/`
 
 ## Run locally
@@ -92,17 +92,41 @@ pytest -q
 
 ## MCP
 
-The hosted Streamable HTTP endpoint is available at `/mcp` on the existing API
-domain. OAuth-capable clients open Immensity in the browser so the user can sign
-in once, approve the connection, and select any project they own through the
-`list_projects` and `select_project` tools. Project-scoped bearer tokens created
-in Handoff remain available as a manual fallback.
+The hosted Streamable HTTP endpoint is mounted at `/mcp` and uses account OAuth.
+OAuth-capable clients open Immensity in the browser so the user can sign in,
+approve the connection, call `list_projects`, and select the project they want
+with `select_project`. Manual project tokens are not supported.
 
-In production, set `MCP_ALLOWED_HOSTS` to the API hostname, `MCP_PUBLIC_URL` to
-the complete `/mcp` URL, `MCP_ISSUER_URL` to the API origin, and `WEB_APP_URL` to
-the web app origin. Apply migration `0053_mcp_oauth.sql` before enabling OAuth.
+The production MCP resource is intended to be:
 
-The npm stdio package remains available as a local-development fallback:
+```text
+https://mcp.immensity.ai/mcp
+```
+
+Configure the production Railway service and DNS/TLS endpoint with:
+
+```text
+ENVIRONMENT=production
+MCP_ALLOWED_HOSTS=mcp.immensity.ai
+MCP_PUBLIC_URL=https://mcp.immensity.ai/mcp
+MCP_ISSUER_URL=https://mcp.immensity.ai
+WEB_APP_URL=https://console.useimmensity.com
+ALLOWED_ORIGINS=https://console.useimmensity.com
+```
+
+Production startup rejects non-HTTPS MCP, issuer, or web-app URLs and rejects a
+public MCP hostname that is missing from `MCP_ALLOWED_HOSTS`. The application
+still uses the existing PostgreSQL database for OAuth client registrations,
+authorization codes, access/refresh tokens, and project selection.
+
+Apply all migrations through `0054_drop_legacy_ide_access_tokens.sql` before
+making the public MCP hostname available.
+
+See [docs/public-mcp-architecture.md](docs/public-mcp-architecture.md) for the
+shared client architecture and [docs/public-mcp-deployment.md](docs/public-mcp-deployment.md)
+for the production rollout checklist.
+
+The npm stdio package remains available for local development:
 
 ```bash
 cd mcp
