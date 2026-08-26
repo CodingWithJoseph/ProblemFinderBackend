@@ -1,19 +1,22 @@
-"""Hosted MCP transport for the existing project-scoped Build operations."""
+"""Hosted MCP transport for account OAuth and legacy project-token Build operations."""
 
 from __future__ import annotations
 
-from contextvars import ContextVar
 from typing import Any, Literal
 
 from fastapi import HTTPException
 from fastapi.encoders import jsonable_encoder
 from mcp.server import MCPServer
+from mcp.server.auth.middleware.auth_context import get_access_token
+from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
 from mcp.server.transport_security import TransportSecuritySettings
-from starlette.responses import JSONResponse
-from starlette.types import ASGIApp, Receive, Scope, Send
+from sqlalchemy import select
+from starlette.types import ASGIApp
 
 from app.config import get_settings
 from app.db import AsyncSessionLocal
+from app.mcp_oauth import MCP_SCOPE, oauth_provider
+from app.models import Pipeline, SignalAnalysisCase, SolutionCase
 from app.routes.ide_workspace import (
     IdeAccess,
     TaskProgressRequest,
@@ -27,7 +30,6 @@ from app.routes.ide_workspace import (
     get_ide_project_status,
     get_next_ide_task,
     list_ide_build_documents,
-    resolve_ide_access_token,
     update_ide_build_document,
     update_ide_build_section,
     update_ide_task,
@@ -40,13 +42,29 @@ from app.solution_contract import (
 )
 
 settings = get_settings()
-current_access: ContextVar[IdeAccess | None] = ContextVar("mcp_ide_access", default=None)
+
+_auth_settings = AuthSettings(
+    issuer_url=settings.mcp_issuer_url,
+    resource_server_url=settings.mcp_public_url,
+    service_documentation_url=f"{settings.web_app_url.rstrip('/')}/mcp",
+    client_registration_options=ClientRegistrationOptions(
+        enabled=True,
+        valid_scopes=[MCP_SCOPE],
+        default_scopes=[MCP_SCOPE],
+    ),
+    revocation_options=RevocationOptions(enabled=True),
+    required_scopes=[MCP_SCOPE],
+)
 
 hosted_mcp_server = MCPServer(
     name="immensity-build",
-    version="0.4.0",
+    version="0.5.0",
+    website_url=settings.web_app_url,
+    auth_server_provider=oauth_provider,
+    auth=_auth_settings,
     instructions=(
-        "For Build design, start with get_problem_case and get_build_workspace. "
+        "Start with list_projects, then select_project when more than one project is available. "
+        "For Build design, use get_problem_case and get_build_workspace. "
         "Use expected_version on every Build edit so concurrent website or IDE edits cannot be overwritten. "
         "Approve the finished Build workspace before implementation. For implementation, start with "
         "get_build_contract, then fetch only the documents needed for the current task. Use get_next_task "
@@ -56,12 +74,53 @@ hosted_mcp_server = MCPServer(
 )
 
 
+async def _access_for_call(db) -> IdeAccess:
+    token = get_access_token()
+    if token is None or not token.subject:
+        raise ValueError("Sign in to Immensity before using this tool")
+    claims = token.claims or {}
+    pipeline_id = claims.get("selected_pipeline_id")
+    if pipeline_id:
+        card = (
+            await db.execute(
+                select(Pipeline).where(
+                    Pipeline.id == pipeline_id,
+                    Pipeline.user_id == token.subject,
+                    Pipeline.removed_at == None,
+                )
+            )
+        ).scalar_one_or_none()
+        if card is None:
+            raise ValueError("The selected project is no longer available. Call list_projects and select_project.")
+    else:
+        cards = list(
+            (
+                await db.execute(
+                    select(Pipeline)
+                    .where(Pipeline.user_id == token.subject, Pipeline.removed_at == None)
+                    .order_by(Pipeline.updated_at.desc())
+                    .limit(2)
+                )
+            ).scalars().all()
+        )
+        if not cards:
+            raise ValueError("No Immensity projects are available for this account")
+        if len(cards) > 1:
+            raise ValueError("Select a project first with list_projects and select_project")
+        pipeline_id = str(cards[0].id)
+        if claims.get("auth_kind") == "oauth":
+            await oauth_provider.select_project_for_token(token.token, token.subject, pipeline_id)
+    return IdeAccess.from_values(
+        access_id=str(claims.get("token_id") or "oauth"),
+        pipeline_id=str(pipeline_id),
+        user_id=token.subject,
+    )
+
+
 async def _call(handler, *args):
-    access = current_access.get()
-    if access is None:
-        raise ValueError("Missing project access token")
     async with AsyncSessionLocal() as db:
         try:
+            access = await _access_for_call(db)
             result = await handler(access.pipeline_id, *args, db, access)
             return jsonable_encoder(result)
         except HTTPException as exc:
@@ -71,6 +130,86 @@ async def _call(handler, *args):
         except Exception:
             await db.rollback()
             raise
+
+
+@hosted_mcp_server.tool(description="List the Immensity projects available to the signed-in account.")
+async def list_projects() -> dict[str, Any]:
+    token = get_access_token()
+    if token is None or not token.subject:
+        raise ValueError("Sign in to Immensity before using this tool")
+    async with AsyncSessionLocal() as db:
+        claims = token.claims or {}
+        project_filters = [Pipeline.user_id == token.subject, Pipeline.removed_at == None]
+        if claims.get("auth_kind") == "manual":
+            project_filters.append(Pipeline.id == claims.get("selected_pipeline_id"))
+        cards = list(
+            (
+                await db.execute(
+                    select(Pipeline)
+                    .where(*project_filters)
+                    .order_by(Pipeline.updated_at.desc())
+                )
+            ).scalars().all()
+        )
+        ids = [str(card.id) for card in cards]
+        signal_rows = (
+            await db.execute(
+                select(SignalAnalysisCase).where(
+                    SignalAnalysisCase.user_id == token.subject,
+                    SignalAnalysisCase.pipeline_id.in_(ids),
+                )
+            )
+        ).scalars().all() if ids else []
+        solution_rows = (
+            await db.execute(
+                select(SolutionCase).where(
+                    SolutionCase.user_id == token.subject,
+                    SolutionCase.pipeline_id.in_(ids),
+                )
+            )
+        ).scalars().all() if ids else []
+        analysis = {str(row.pipeline_id): row.status for row in signal_rows}
+        builds = {str(row.pipeline_id): row.status for row in solution_rows}
+        selected = claims.get("selected_pipeline_id")
+        return {
+            "projects": [
+                {
+                    "id": str(card.id),
+                    "name": card.project_name or card.name,
+                    "stage": card.stage,
+                    "analysisStatus": analysis.get(str(card.id), "not_started"),
+                    "buildStatus": builds.get(str(card.id), "not_started"),
+                    "selected": str(card.id) == selected,
+                }
+                for card in cards
+            ]
+        }
+
+
+@hosted_mcp_server.tool(description="Select which Immensity project subsequent tools should use.")
+async def select_project(project_id: str) -> dict[str, Any]:
+    token = get_access_token()
+    if token is None or not token.subject:
+        raise ValueError("Sign in to Immensity before using this tool")
+    async with AsyncSessionLocal() as db:
+        card = (
+            await db.execute(
+                select(Pipeline).where(
+                    Pipeline.id == project_id,
+                    Pipeline.user_id == token.subject,
+                    Pipeline.removed_at == None,
+                )
+            )
+        ).scalar_one_or_none()
+        if card is None:
+            raise ValueError("Project not found")
+    claims = token.claims or {}
+    if claims.get("auth_kind") == "manual":
+        if str(claims.get("selected_pipeline_id")) != project_id:
+            raise ValueError("Manual project tokens cannot switch projects")
+    else:
+        await oauth_provider.select_project_for_token(token.token, token.subject, project_id)
+    return {"projectId": project_id, "name": card.project_name or card.name, "selected": True}
 
 
 @hosted_mcp_server.tool(description="Return the analyzed Problem Case used as the source for Build design.")
@@ -225,52 +364,4 @@ _mcp_transport = hosted_mcp_server.streamable_http_app(
     json_response=True,
     transport_security=_transport_security,
 )
-
-
-class ProjectTokenAuth:
-    """Authenticate one project token before the MCP transport handles a request."""
-
-    def __init__(self, app: ASGIApp):
-        self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or scope.get("method") == "OPTIONS":
-            await self.app(scope, receive, send)
-            return
-
-        authorization = next(
-            (
-                value.decode("latin-1")
-                for key, value in scope.get("headers", [])
-                if key.lower() == b"authorization"
-            ),
-            "",
-        )
-        scheme, _, token = authorization.partition(" ")
-        if scheme.lower() != "bearer" or not token.strip():
-            await JSONResponse(
-                {"detail": "Missing project access token"},
-                status_code=401,
-                headers={"WWW-Authenticate": "Bearer"},
-            )(scope, receive, send)
-            return
-
-        async with AsyncSessionLocal() as db:
-            try:
-                access = await resolve_ide_access_token(token.strip(), db)
-            except HTTPException:
-                await JSONResponse(
-                    {"detail": "Invalid or expired project access token"},
-                    status_code=401,
-                    headers={"WWW-Authenticate": "Bearer"},
-                )(scope, receive, send)
-                return
-
-        access_context = current_access.set(access)
-        try:
-            await self.app(scope, receive, send)
-        finally:
-            current_access.reset(access_context)
-
-
-hosted_mcp_app: ASGIApp = ProjectTokenAuth(_mcp_transport)
+hosted_mcp_app: ASGIApp = _mcp_transport

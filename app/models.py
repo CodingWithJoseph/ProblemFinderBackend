@@ -419,6 +419,85 @@ class IdeAccessToken(Base):
     )
 
 
+class McpOAuthClient(Base):
+    __tablename__ = "mcp_oauth_clients"
+
+    client_id: Mapped[str] = mapped_column(String(512), primary_key=True)
+    metadata_json: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class McpOAuthPendingAuthorization(Base):
+    __tablename__ = "mcp_oauth_pending_authorizations"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    client_id: Mapped[str] = mapped_column(
+        String(512), ForeignKey("mcp_oauth_clients.client_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    redirect_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    redirect_uri_provided_explicitly: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    code_challenge: Mapped[str] = mapped_column(Text, nullable=False)
+    scopes: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    state: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resource: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class McpOAuthCode(Base):
+    __tablename__ = "mcp_oauth_codes"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    client_id: Mapped[str] = mapped_column(
+        String(512), ForeignKey("mcp_oauth_clients.client_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    redirect_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    redirect_uri_provided_explicitly: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    code_challenge: Mapped[str] = mapped_column(Text, nullable=False)
+    scopes: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    resource: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class McpOAuthToken(Base):
+    __tablename__ = "mcp_oauth_tokens"
+
+    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    token_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    token_prefix: Mapped[str] = mapped_column(String(24), nullable=False)
+    client_id: Mapped[str] = mapped_column(
+        String(512), ForeignKey("mcp_oauth_clients.client_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    scopes: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    resource: Mapped[str | None] = mapped_column(Text, nullable=True)
+    selected_pipeline_id: Mapped[str | None] = mapped_column(
+        PGUUID(as_uuid=False), ForeignKey("pipeline.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    family_id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+
 class SolutionTaskState(Base):
     __tablename__ = "solution_task_states"
 

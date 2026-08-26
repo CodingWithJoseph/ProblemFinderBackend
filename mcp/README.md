@@ -1,6 +1,8 @@
 # Immensity Build MCP server
 
-This local stdio server gives MCP-compatible agents project-scoped access to the same Problem Case and Build workspace used by the Immensity website.
+This local stdio server is the manual development fallback for MCP-compatible agents. The preferred hosted connection uses the API's `/mcp` endpoint and browser OAuth, so users do not create or paste project tokens.
+
+The fallback gives an agent project-scoped access to the same Problem Case and Build workspace used by the Immensity website.
 
 During design, an agent can read the analyzed Problem Case, generate a Build draft, edit structured sections or editable documents, and approve an exact version. Every edit creates a canonical version that is immediately visible in the website. After approval, implementation tools expose focused document reads, dependency-aware task selection, project status, blocker reporting, and verified completion.
 
