@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     mcp_public_url: str = "http://127.0.0.1:8000/mcp"
     mcp_issuer_url: str = "http://127.0.0.1:8000"
     web_app_url: str = "http://localhost:3000"
+    openai_apps_challenge_token: str = ""
 
     @property
     def origins_list(self) -> list[str]:

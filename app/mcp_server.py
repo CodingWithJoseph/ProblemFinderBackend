@@ -43,6 +43,9 @@ from app.solution_contract import (
 
 settings = get_settings()
 OFFLINE_ACCESS_SCOPE = "offline_access"
+OPENID_SCOPE = "openid"
+EMAIL_SCOPE = "email"
+SUPPORTED_OAUTH_SCOPES = [MCP_SCOPE, OFFLINE_ACCESS_SCOPE, OPENID_SCOPE, EMAIL_SCOPE]
 
 _auth_settings = AuthSettings(
     issuer_url=settings.mcp_issuer_url,
@@ -50,8 +53,8 @@ _auth_settings = AuthSettings(
     service_documentation_url=f"{settings.web_app_url.rstrip('/')}/mcp",
     client_registration_options=ClientRegistrationOptions(
         enabled=True,
-        valid_scopes=[MCP_SCOPE, OFFLINE_ACCESS_SCOPE],
-        default_scopes=[MCP_SCOPE, OFFLINE_ACCESS_SCOPE],
+        valid_scopes=SUPPORTED_OAUTH_SCOPES,
+        default_scopes=SUPPORTED_OAUTH_SCOPES,
     ),
     revocation_options=RevocationOptions(enabled=True),
     required_scopes=[MCP_SCOPE],
