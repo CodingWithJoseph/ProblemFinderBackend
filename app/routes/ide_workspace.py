@@ -1,11 +1,9 @@
-"""Project-scoped IDE access and MCP-facing build context endpoints."""
+"""OAuth-authenticated coding-agent access and MCP-facing build context handlers."""
 
 from __future__ import annotations
 
-import hashlib
-import secrets
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -15,10 +13,8 @@ from pydantic.alias_generators import to_camel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import get_uid
 from app.db import get_db
 from app.models import (
-    IdeAccessToken,
     Pipeline,
     SignalAnalysisCase,
     SignalAnalysisVersion,
@@ -49,43 +45,15 @@ from app.solution_contract import (
 
 
 router = APIRouter(tags=["ide"])
-ide_bearer = HTTPBearer(auto_error=False)
-TOKEN_LIFETIME = timedelta(days=30)
+oauth_bearer = HTTPBearer(auto_error=False)
 
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def hash_access_token(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-def mint_access_token() -> tuple[str, str, str]:
-    cleartext = f"imm_mcp_{secrets.token_urlsafe(32)}"
-    return cleartext, hash_access_token(cleartext), cleartext[:16]
-
-
 class ApiModel(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
-
-
-class CreateIdeTokenRequest(ApiModel):
-    name: str = Field(default="My IDE", min_length=1, max_length=120)
-
-
-class IdeTokenSummary(ApiModel):
-    id: str
-    name: str
-    token_prefix: str
-    created_at: datetime
-    expires_at: datetime
-    last_used_at: datetime | None = None
-    revoked_at: datetime | None = None
-
-
-class CreatedIdeToken(IdeTokenSummary):
-    token: str
 
 
 class VerificationCheck(ApiModel):
@@ -117,66 +85,41 @@ class TaskProgressRequest(ApiModel):
 
 
 class IdeAccess:
-    def __init__(self, row: IdeAccessToken):
-        self.id = str(row.id)
-        self.pipeline_id = str(row.pipeline_id)
-        self.user_id = row.user_id
+    def __init__(self, *, access_id: str, pipeline_id: str, user_id: str):
+        self.id = access_id
+        self.pipeline_id = pipeline_id
+        self.user_id = user_id
 
     @classmethod
     def from_values(cls, *, access_id: str, pipeline_id: str, user_id: str) -> "IdeAccess":
-        access = object.__new__(cls)
-        access.id = access_id
-        access.pipeline_id = pipeline_id
-        access.user_id = user_id
-        return access
-
-
-def serialize_token(row: IdeAccessToken, *, cleartext: str | None = None) -> dict:
-    payload = {
-        "id": str(row.id),
-        "name": row.name,
-        "tokenPrefix": row.token_prefix,
-        "createdAt": row.created_at,
-        "expiresAt": row.expires_at,
-        "lastUsedAt": row.last_used_at,
-        "revokedAt": row.revoked_at,
-    }
-    if cleartext is not None:
-        payload["token"] = cleartext
-    return payload
+        return cls(access_id=access_id, pipeline_id=pipeline_id, user_id=user_id)
 
 
 async def require_ide_access(
     pipeline_id: str,
     request: Request,
-    credentials: HTTPAuthorizationCredentials | None = Depends(ide_bearer),
-    db: AsyncSession = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials | None = Depends(oauth_bearer),
 ) -> IdeAccess:
     if credentials is None:
-        raise HTTPException(status_code=401, detail="Missing IDE access token")
-    access = await resolve_ide_access_token(credentials.credentials, db)
-    if access.pipeline_id != pipeline_id:
-        raise HTTPException(status_code=401, detail="Invalid or expired IDE access token")
+        raise HTTPException(status_code=401, detail="Missing MCP OAuth access token")
+
+    # Imported lazily to avoid a module cycle: mcp_oauth owns token validation,
+    # while mcp_server imports these shared Build handlers.
+    from app.mcp_oauth import oauth_provider
+
+    access_token = await oauth_provider.load_access_token(credentials.credentials)
+    if access_token is None or not access_token.subject:
+        raise HTTPException(status_code=401, detail="Invalid or expired MCP OAuth access token")
+
+    claims = access_token.claims or {}
+    access = IdeAccess.from_values(
+        access_id=str(claims.get("token_id") or "oauth"),
+        pipeline_id=pipeline_id,
+        user_id=access_token.subject,
+    )
     request.state.uid = access.user_id
-    request.state.ide_token_id = access.id
+    request.state.mcp_token_id = access.id
     return access
-
-
-async def resolve_ide_access_token(token: str, db: AsyncSession) -> IdeAccess:
-    """Resolve a project token without requiring a project id from the caller."""
-    now = utc_now()
-    row = (await db.execute(
-        select(IdeAccessToken).where(
-            IdeAccessToken.token_hash == hash_access_token(token),
-            IdeAccessToken.revoked_at == None,
-            IdeAccessToken.expires_at > now,
-        )
-    )).scalar_one_or_none()
-    if row is None:
-        raise HTTPException(status_code=401, detail="Invalid or expired IDE access token")
-    row.last_used_at = now
-    await db.commit()
-    return IdeAccess(row)
 
 
 async def _owned_card(db: AsyncSession, pipeline_id: str, uid: str) -> Pipeline:
@@ -285,70 +228,6 @@ def _solution_with_task_states(
             task["progressNote"] = state.note
             task["verification"] = state.verification or None
     return document
-
-
-@router.get("/pipeline/{pipeline_id}/ide/access-tokens")
-async def list_ide_tokens(
-    pipeline_id: str,
-    db: AsyncSession = Depends(get_db),
-    uid: str = Depends(get_uid),
-):
-    await _owned_card(db, pipeline_id, uid)
-    rows = (await db.execute(
-        select(IdeAccessToken)
-        .where(IdeAccessToken.pipeline_id == pipeline_id, IdeAccessToken.user_id == uid)
-        .order_by(IdeAccessToken.created_at.desc())
-    )).scalars().all()
-    return {"data": [serialize_token(row) for row in rows]}
-
-
-@router.post(
-    "/pipeline/{pipeline_id}/ide/access-tokens",
-    response_model=CreatedIdeToken,
-    status_code=status.HTTP_201_CREATED,
-)
-async def create_ide_token(
-    pipeline_id: str,
-    body: CreateIdeTokenRequest,
-    db: AsyncSession = Depends(get_db),
-    uid: str = Depends(get_uid),
-):
-    await _owned_card(db, pipeline_id, uid)
-    cleartext, token_hash, prefix = mint_access_token()
-    now = utc_now()
-    row = IdeAccessToken(
-        id=str(uuid.uuid4()),
-        pipeline_id=pipeline_id,
-        user_id=uid,
-        name=body.name.strip(),
-        token_hash=token_hash,
-        token_prefix=prefix,
-        created_at=now,
-        expires_at=now + TOKEN_LIFETIME,
-    )
-    db.add(row)
-    await db.commit()
-    return serialize_token(row, cleartext=cleartext)
-
-
-@router.delete("/pipeline/{pipeline_id}/ide/access-tokens/{token_id}", status_code=204)
-async def revoke_ide_token(
-    pipeline_id: str,
-    token_id: str,
-    db: AsyncSession = Depends(get_db),
-    uid: str = Depends(get_uid),
-):
-    row = (await db.execute(
-        select(IdeAccessToken).where(
-            IdeAccessToken.id == token_id,
-            IdeAccessToken.pipeline_id == pipeline_id,
-            IdeAccessToken.user_id == uid,
-        )
-    )).scalar_one_or_none()
-    if row is None:
-        raise HTTPException(status_code=404, detail="IDE access token not found")
-    row.revoked_at = utc_now()
-    await db.commit()
 
 
 @router.get("/ide/projects/{pipeline_id}/problem-case")

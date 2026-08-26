@@ -96,7 +96,7 @@ async def test_hosted_mcp_dynamically_registers_oauth_clients(monkeypatch):
     assert len(registered) == 1
 
 
-async def test_hosted_mcp_initializes_with_a_project_token(monkeypatch):
+async def test_hosted_mcp_initializes_with_oauth_access_token(monkeypatch):
     class SessionContext:
         async def __aenter__(self):
             return object()
@@ -105,15 +105,15 @@ async def test_hosted_mcp_initializes_with_a_project_token(monkeypatch):
             return None
 
     async def resolve_access(_db):
-        return SimpleNamespace(id="token-1", pipeline_id="project-1", user_id="user-1")
+        return SimpleNamespace(id="oauth-token-1", pipeline_id="project-1", user_id="user-1")
 
     async def verify_token(token):
         return AccessToken(
             token=token,
-            client_id="legacy-project-token",
+            client_id="client-1",
             scopes=["mcp:use"],
             subject="user-1",
-            claims={"auth_kind": "manual", "selected_pipeline_id": "project-1"},
+            claims={"token_id": "oauth-token-1", "selected_pipeline_id": "project-1"},
         )
 
     async def get_workspace(pipeline_id, _db, access):
@@ -129,7 +129,7 @@ async def test_hosted_mcp_initializes_with_a_project_token(monkeypatch):
         async with AsyncClient(
             transport=transport,
             base_url="http://testserver",
-            headers={"Authorization": "Bearer imm_mcp_test"},
+            headers={"Authorization": "Bearer imm_oauth_access_test"},
         ) as http_client:
             async with streamable_http_client(
                 "http://testserver/mcp",

@@ -18,7 +18,6 @@ RETAINED_TABLES = {
     "solution_cases",
     "solution_versions",
     "solution_jobs",
-    "ide_access_tokens",
     "solution_task_states",
     "mcp_oauth_clients",
     "mcp_oauth_pending_authorizations",
@@ -68,6 +67,14 @@ def test_mcp_oauth_migration_hashes_tokens_and_tracks_project_selection():
     assert "token_hash varchar(64) not null unique" in sql
     assert "selected_pipeline_id uuid null references pipeline(id)" in sql
     assert "revoked_at timestamptz null" in sql
+
+
+def test_oauth_only_migration_drops_only_the_legacy_ide_token_table():
+    sql = _sql("0054_drop_legacy_ide_access_tokens.sql")
+
+    assert "drop table if exists public.ide_access_tokens;" in sql
+    assert "solution_task_states" not in sql
+    assert "mcp_oauth_tokens" not in sql
 
 
 def _sql(name: str) -> str:

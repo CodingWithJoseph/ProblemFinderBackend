@@ -1,56 +1,47 @@
 from conftest import FakeResult, TEST_UID, make_pipeline
 from types import SimpleNamespace
 
-from app.models import IdeAccessToken, SignalAnalysisVersion
+from mcp.server.auth.provider import AccessToken
+from fastapi import HTTPException
+from fastapi.security import HTTPAuthorizationCredentials
+from pydantic import ValidationError
+from starlette.requests import Request
+import pytest
+
+import app.mcp_oauth as oauth_module
+from app.models import SignalAnalysisVersion, SolutionVersion
 from app.routes.ide_workspace import (
     _ready_workspace,
-    hash_access_token,
-    mint_access_token,
+    TaskProgressRequest,
+    require_ide_access,
     update_ide_build_section,
 )
-from app.routes.ide_workspace import TaskProgressRequest
 from app.services.signal_cases import new_signal_case_and_job
-from fastapi import HTTPException
-from pydantic import ValidationError
-import pytest
-from test_solution_workspace import _ready_solution
 from app.solution_contract import SolutionSectionUpdateRequest
-from app.models import SolutionVersion
+from test_solution_workspace import _ready_solution
 
 
-def test_minted_ide_token_is_prefixed_and_only_persisted_as_a_hash():
-    cleartext, digest, prefix = mint_access_token()
+async def test_ide_rest_access_accepts_oauth_access_token(monkeypatch):
+    async def load_access_token(token: str):
+        assert token == "oauth-token"
+        return AccessToken(
+            token=token,
+            client_id="client-1",
+            scopes=["mcp:use"],
+            subject=TEST_UID,
+            claims={"token_id": "oauth-token-id"},
+        )
 
-    assert cleartext.startswith("imm_mcp_")
-    assert prefix == cleartext[:16]
-    assert digest == hash_access_token(cleartext)
-    assert cleartext not in digest
-    assert len(digest) == 64
+    monkeypatch.setattr(oauth_module.oauth_provider, "load_access_token", load_access_token)
+    request = Request({"type": "http", "method": "GET", "path": "/", "headers": []})
+    credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials="oauth-token")
 
+    access = await require_ide_access("project-1", request, credentials)
 
-async def test_create_ide_token_is_project_scoped_and_returns_secret_once(
-    client,
-    fake_db,
-    auth_headers,
-):
-    card = make_pipeline()
-    fake_db.stub(execute=[FakeResult(rows=[card])])
-
-    response = await client.post(
-        f"/pipeline/{card.id}/ide/access-tokens",
-        headers=auth_headers,
-        json={"name": "Cursor"},
-    )
-
-    assert response.status_code == 201
-    payload = response.json()
-    assert payload["name"] == "Cursor"
-    assert payload["token"].startswith("imm_mcp_")
-    stored = next(row for row in fake_db.added if isinstance(row, IdeAccessToken))
-    assert stored.pipeline_id == card.id
-    assert stored.token_hash == hash_access_token(payload["token"])
-    assert payload["token"] != stored.token_hash
-    assert fake_db.commit_count == 1
+    assert access.id == "oauth-token-id"
+    assert access.pipeline_id == "project-1"
+    assert access.user_id == TEST_UID
+    assert request.state.uid == TEST_UID
 
 
 def test_done_task_requires_actual_verification_checks():

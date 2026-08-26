@@ -397,28 +397,6 @@ class SolutionJob(Base):
     )
 
 
-class IdeAccessToken(Base):
-    __tablename__ = "ide_access_tokens"
-
-    id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
-    pipeline_id: Mapped[str] = mapped_column(
-        PGUUID(as_uuid=False),
-        ForeignKey("pipeline.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
-    name: Mapped[str] = mapped_column(String(120), nullable=False)
-    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
-    token_prefix: Mapped[str] = mapped_column(String(24), nullable=False)
-    last_used_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
-    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
-    revoked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
-    )
-
-
 class McpOAuthClient(Base):
     __tablename__ = "mcp_oauth_clients"
 
