@@ -107,3 +107,17 @@ async def test_browser_approval_returns_a_one_time_hashed_authorization_code(mon
     assert code_row.code_hash == hash_token(clear_code)
     assert clear_code not in code_row.code_hash
     assert session.commits == 1
+
+
+async def test_legacy_manual_project_tokens_are_rejected(monkeypatch):
+    session = Session()
+    monkeypatch.setattr(oauth_module, "AsyncSessionLocal", lambda: SessionContext(session))
+    provider = ImmensityOAuthProvider()
+
+    async def no_oauth_token(_db, _token, _token_type, _client_id=None):
+        return None
+
+    monkeypatch.setattr(provider, "_valid_token_row", no_oauth_token)
+
+    assert await provider.load_access_token("imm_mcp_legacy_project_token") is None
+    assert session.commits == 0
