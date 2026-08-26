@@ -1,6 +1,6 @@
 """OpenAI plugin verification and OIDC UserInfo endpoints."""
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import PlainTextResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from firebase_admin import auth as firebase_auth
@@ -45,10 +45,9 @@ async def openid_configuration():
 
 
 @router.get("/userinfo", include_in_schema=False)
-async def userinfo(credentials: HTTPAuthorizationCredentials | None = None):
-    if credentials is None:
-        credentials = await bearer_scheme.__call__(None)  # pragma: no cover
-
+async def userinfo(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+):
     access = await oauth_provider.load_access_token(credentials.credentials) if credentials else None
     if access is None or not access.subject:
         raise HTTPException(
