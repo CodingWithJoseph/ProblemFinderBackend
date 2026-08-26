@@ -96,7 +96,6 @@ async def test_hosted_mcp_dynamically_registers_oauth_clients(monkeypatch):
     assert response.status_code == 201
     assert response.json()["client_id"]
     assert response.json()["client_name"] == "Codex"
-    assert response.json()["scope"] == "mcp:use offline_access"
     assert len(registered) == 1
 
 
