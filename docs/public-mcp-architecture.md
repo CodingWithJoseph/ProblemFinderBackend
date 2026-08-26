@@ -12,6 +12,8 @@ Immensity uses one account-scoped OAuth-backed MCP service for coding agents and
 6. The agent calls `select_project` when more than one project is available.
 7. All Build and implementation tools operate against the selected project.
 
+The authorization server advertises both `mcp:use` and `offline_access`. `mcp:use` is required for the MCP resource; `offline_access` allows clients that request it to maintain connectivity with refresh tokens after the short-lived access token expires.
+
 Manual project tokens are not part of the supported architecture. The server must not accept legacy `imm_mcp_*` credentials or expose create/list/revoke endpoints for them.
 
 ## Shared MCP tool surface
@@ -40,4 +42,4 @@ Client-specific plugins or integrations should be thin wrappers around this shar
 
 ## Production target
 
-The intended public resource URL is `https://mcp.immensity.ai/mcp`. Production deployment, DNS, TLS, and environment configuration are handled separately from the OAuth-only application architecture.
+The public resource URL is `https://mcp.useimmensity.com/mcp`. Production deployment, DNS, TLS, and environment configuration are handled separately from the OAuth-only application architecture.
