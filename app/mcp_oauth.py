@@ -1,4 +1,4 @@
-"""OAuth authorization for hosted MCP clients, with legacy project-token support."""
+"""OAuth authorization for hosted MCP clients."""
 
 from __future__ import annotations
 
@@ -29,7 +29,6 @@ from app.models import (
     McpOAuthPendingAuthorization,
     McpOAuthToken,
 )
-from app.routes.ide_workspace import resolve_ide_access_token
 
 AUTHORIZATION_LIFETIME = timedelta(minutes=10)
 ACCESS_TOKEN_LIFETIME = timedelta(hours=1)
@@ -56,7 +55,7 @@ def _epoch(value: datetime) -> int:
 class ImmensityOAuthProvider(
     OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToken, AccessToken]
 ):
-    """Persist OAuth grants and accept existing manual project tokens as a fallback."""
+    """Persist OAuth grants for hosted MCP clients."""
 
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -258,41 +257,22 @@ class ImmensityOAuthProvider(
     async def load_access_token(self, token: str) -> AccessToken | None:
         async with AsyncSessionLocal() as db:
             row = await self._valid_token_row(db, token, "access")
-            if row:
-                row.last_used_at = utc_now()
-                await db.commit()
-                return AccessToken(
-                    token=token,
-                    client_id=row.client_id,
-                    scopes=list(row.scopes),
-                    expires_at=_epoch(row.expires_at),
-                    resource=row.resource or self.settings.mcp_public_url,
-                    subject=row.user_id,
-                    claims={
-                        "auth_kind": "oauth",
-                        "token_id": str(row.id),
-                        "selected_pipeline_id": str(row.selected_pipeline_id) if row.selected_pipeline_id else None,
-                    },
-                )
-
-        # Existing manually-created project tokens remain valid as an advanced fallback.
-        async with AsyncSessionLocal() as db:
-            try:
-                access = await resolve_ide_access_token(token, db)
-            except HTTPException:
+            if row is None:
                 return None
-        return AccessToken(
-            token=token,
-            client_id="legacy-project-token",
-            scopes=[MCP_SCOPE],
-            resource=self.settings.mcp_public_url,
-            subject=access.user_id,
-            claims={
-                "auth_kind": "manual",
-                "token_id": access.id,
-                "selected_pipeline_id": access.pipeline_id,
-            },
-        )
+            row.last_used_at = utc_now()
+            await db.commit()
+            return AccessToken(
+                token=token,
+                client_id=row.client_id,
+                scopes=list(row.scopes),
+                expires_at=_epoch(row.expires_at),
+                resource=row.resource or self.settings.mcp_public_url,
+                subject=row.user_id,
+                claims={
+                    "token_id": str(row.id),
+                    "selected_pipeline_id": str(row.selected_pipeline_id) if row.selected_pipeline_id else None,
+                },
+            )
 
     async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
         now = utc_now()
