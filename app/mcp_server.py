@@ -18,6 +18,7 @@ from starlette.types import ASGIApp
 
 from app.config import get_settings
 from app.db import AsyncSessionLocal
+from app.mcp_host_build import prepare_host_build_context, save_host_build_workspace
 from app.mcp_oauth import MCP_SCOPE, oauth_provider
 from app.models import Pipeline, SignalAnalysisCase, SignalAnalysisVersion, SolutionCase
 from app.prompts.signal_analysis import SIGNAL_ANALYSIS_INSTRUCTIONS
@@ -27,7 +28,6 @@ from app.routes.ide_workspace import (
     TaskProgressRequest,
     TaskVerification,
     approve_ide_build_workspace,
-    generate_ide_build_workspace,
     get_ide_build_document,
     get_ide_build_workspace,
     get_ide_problem_case,
@@ -98,7 +98,7 @@ _auth_settings = AuthSettings(
 
 hosted_mcp_server = MCPServer(
     name="immensity-build",
-    version="0.6.0",
+    version="0.7.0",
     website_url=settings.web_app_url,
     auth_server_provider=oauth_provider,
     auth=_auth_settings,
@@ -107,9 +107,11 @@ hosted_mcp_server = MCPServer(
         "the chosen cluster ID. For analysis, call start_analysis with the returned project ID, "
         "retrieve every evidence page, analyze that evidence with the host model, and call "
         "save_problem_analysis with the exact sourceFingerprint and schema-conforming result. "
-        "Immensity does not call its own analysis model on the MCP path. For existing projects, "
-        "start with list_projects, then select_project when more than one is available. "
-        "For Build design, use get_problem_case and get_build_workspace. "
+        "For Build design, call generate_build_workspace to retrieve the grounded Problem Case, "
+        "Build instructions, and exact output schema. Design the Build with the host model, then "
+        "call save_build_workspace with the returned problemCaseVersion and schema-conforming result. "
+        "Immensity does not call its own analysis or Build-generation model on the MCP path. "
+        "For existing projects, start with list_projects, then select_project when more than one is available. "
         "Use expected_version on every Build edit so concurrent website or IDE edits cannot be overwritten. "
         "Approve the finished Build workspace before implementation. For implementation, start with "
         "get_build_contract, then fetch only the documents needed for the current task. Use get_next_task "
@@ -487,21 +489,29 @@ async def list_projects() -> dict[str, Any]:
         )
         ids = [str(card.id) for card in cards]
         signal_rows = (
-            await db.execute(
-                select(SignalAnalysisCase).where(
-                    SignalAnalysisCase.user_id == token.subject,
-                    SignalAnalysisCase.pipeline_id.in_(ids),
+            (
+                await db.execute(
+                    select(SignalAnalysisCase).where(
+                        SignalAnalysisCase.user_id == token.subject,
+                        SignalAnalysisCase.pipeline_id.in_(ids),
+                    )
                 )
-            )
-        ).scalars().all() if ids else []
+            ).scalars().all()
+            if ids
+            else []
+        )
         solution_rows = (
-            await db.execute(
-                select(SolutionCase).where(
-                    SolutionCase.user_id == token.subject,
-                    SolutionCase.pipeline_id.in_(ids),
+            (
+                await db.execute(
+                    select(SolutionCase).where(
+                        SolutionCase.user_id == token.subject,
+                        SolutionCase.pipeline_id.in_(ids),
+                    )
                 )
-            )
-        ).scalars().all() if ids else []
+            ).scalars().all()
+            if ids
+            else []
+        )
         analysis = {str(row.pipeline_id): row.status for row in signal_rows}
         builds = {str(row.pipeline_id): row.status for row in solution_rows}
         selected = claims.get("selected_pipeline_id")
@@ -561,8 +571,11 @@ async def get_build_workspace() -> dict[str, Any]:
 
 
 @hosted_mcp_server.tool(
-    description="Generate a Build draft from the current analyzed Problem Case.",
-    annotations=DESTRUCTIVE_WRITE_CLOSED,
+    description=(
+        "Return the current Problem Case, Build-generation instructions, and exact output schema "
+        "for the host model to design a Build. This tool never calls an Immensity LLM."
+    ),
+    annotations=READ_ONLY_CLOSED,
 )
 async def generate_build_workspace(
     delivery_targets: list[Literal["web", "ios", "android"]] | None = None,
@@ -574,7 +587,56 @@ async def generate_build_workspace(
         constraints=constraints or [],
         preferred_stack=preferred_stack or [],
     )
-    return await _call(generate_ide_build_workspace, body)
+    async with AsyncSessionLocal() as db:
+        try:
+            access = await _access_for_call(db)
+            card = await _owned_project(db, access.pipeline_id, access.user_id)
+            return await prepare_host_build_context(db, card, access.user_id, body)
+        except HTTPException as exc:
+            await db.rollback()
+            raise _tool_error(exc) from exc
+        except Exception:
+            await db.rollback()
+            raise
+
+
+@hosted_mcp_server.tool(
+    description=(
+        "Validate and persist a Build designed by the host model into the selected Immensity project. "
+        "Use the exact problemCaseVersion returned by generate_build_workspace."
+    ),
+    annotations=DESTRUCTIVE_WRITE_CLOSED,
+)
+async def save_build_workspace(
+    problem_case_version: int,
+    build: dict[str, Any],
+    delivery_targets: list[Literal["web", "ios", "android"]] | None = None,
+    constraints: list[str] | None = None,
+    preferred_stack: list[str] | None = None,
+) -> dict[str, Any]:
+    body = SolutionGenerateRequest(
+        delivery_targets=delivery_targets or ["web"],
+        constraints=constraints or [],
+        preferred_stack=preferred_stack or [],
+    )
+    async with AsyncSessionLocal() as db:
+        try:
+            access = await _access_for_call(db)
+            card = await _owned_project(db, access.pipeline_id, access.user_id)
+            return await save_host_build_workspace(
+                db,
+                card,
+                access.user_id,
+                problem_case_version=problem_case_version,
+                request=body,
+                build=build,
+            )
+        except HTTPException as exc:
+            await db.rollback()
+            raise _tool_error(exc) from exc
+        except Exception:
+            await db.rollback()
+            raise
 
 
 @hosted_mcp_server.tool(
