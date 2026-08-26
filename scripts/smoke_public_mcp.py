@@ -17,6 +17,9 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 
+DEFAULT_MCP_URL = "https://mcp.useimmensity.com/mcp"
+REQUIRED_OAUTH_SCOPES = {"mcp:use", "offline_access"}
+
 REQUIRED_TOOLS = {
     "list_projects",
     "select_project",
@@ -70,6 +73,12 @@ async def check_public_surface(mcp_url: str, timeout: float) -> None:
         for key in ("authorization_endpoint", "token_endpoint", "registration_endpoint"):
             if not authorization_payload.get(key):
                 raise RuntimeError(f"OAuth authorization metadata is missing {key}")
+        scopes_supported = set(authorization_payload.get("scopes_supported") or [])
+        missing_scopes = sorted(REQUIRED_OAUTH_SCOPES - scopes_supported)
+        if missing_scopes:
+            raise RuntimeError(
+                f"OAuth authorization metadata is missing scopes: {', '.join(missing_scopes)}"
+            )
         print("PASS OAuth authorization metadata")
 
         protected = await client.get(f"{origin}/.well-known/oauth-protected-resource/mcp")
@@ -172,7 +181,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mcp-url",
-        default="https://mcp.immensity.ai/mcp",
+        default=DEFAULT_MCP_URL,
         help="Public Streamable HTTP MCP resource URL",
     )
     parser.add_argument(
