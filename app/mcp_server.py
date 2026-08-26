@@ -1,4 +1,4 @@
-"""Hosted MCP transport for account OAuth and legacy project-token Build operations."""
+"""Hosted MCP transport for OAuth-authenticated Build operations."""
 
 from __future__ import annotations
 
@@ -108,8 +108,7 @@ async def _access_for_call(db) -> IdeAccess:
         if len(cards) > 1:
             raise ValueError("Select a project first with list_projects and select_project")
         pipeline_id = str(cards[0].id)
-        if claims.get("auth_kind") == "oauth":
-            await oauth_provider.select_project_for_token(token.token, token.subject, pipeline_id)
+        await oauth_provider.select_project_for_token(token.token, token.subject, pipeline_id)
     return IdeAccess.from_values(
         access_id=str(claims.get("token_id") or "oauth"),
         pipeline_id=str(pipeline_id),
@@ -139,14 +138,11 @@ async def list_projects() -> dict[str, Any]:
         raise ValueError("Sign in to Immensity before using this tool")
     async with AsyncSessionLocal() as db:
         claims = token.claims or {}
-        project_filters = [Pipeline.user_id == token.subject, Pipeline.removed_at == None]
-        if claims.get("auth_kind") == "manual":
-            project_filters.append(Pipeline.id == claims.get("selected_pipeline_id"))
         cards = list(
             (
                 await db.execute(
                     select(Pipeline)
-                    .where(*project_filters)
+                    .where(Pipeline.user_id == token.subject, Pipeline.removed_at == None)
                     .order_by(Pipeline.updated_at.desc())
                 )
             ).scalars().all()
@@ -203,12 +199,7 @@ async def select_project(project_id: str) -> dict[str, Any]:
         ).scalar_one_or_none()
         if card is None:
             raise ValueError("Project not found")
-    claims = token.claims or {}
-    if claims.get("auth_kind") == "manual":
-        if str(claims.get("selected_pipeline_id")) != project_id:
-            raise ValueError("Manual project tokens cannot switch projects")
-    else:
-        await oauth_provider.select_project_for_token(token.token, token.subject, project_id)
+    await oauth_provider.select_project_for_token(token.token, token.subject, project_id)
     return {"projectId": project_id, "name": card.project_name or card.name, "selected": True}
 
 
