@@ -16,7 +16,7 @@ from main import app as api_app
 async def test_hosted_mcp_exposes_the_existing_build_toolset():
     tools = await hosted_mcp_server.list_tools()
 
-    assert len(tools) == 21
+    assert len(tools) == 22
     assert {tool.name for tool in tools} == {
         "search_problems",
         "create_project_from_problem",
@@ -25,6 +25,7 @@ async def test_hosted_mcp_exposes_the_existing_build_toolset():
         "get_problem_case",
         "get_build_workspace",
         "generate_build_workspace",
+        "save_build_workspace",
         "update_build_section",
         "update_build_document",
         "approve_build_workspace",
@@ -284,6 +285,78 @@ async def test_save_problem_analysis_rejects_stale_analysis_context(
         await mcp_module.save_problem_analysis(card.id, "sha256:stale", {"problems": []})
 
     assert not any(isinstance(row, SignalAnalysisCase) for row in fake_db.added)
+
+
+async def test_generate_build_workspace_returns_context_for_the_host_model(
+    monkeypatch,
+    fake_db,
+):
+    use_oauth_user(monkeypatch, fake_db)
+    card = make_pipeline(user_id="oauth-user")
+
+    async def resolve_access(_db):
+        return SimpleNamespace(pipeline_id=card.id, user_id="oauth-user")
+
+    async def owned_project(_db, project_id, uid):
+        assert project_id == card.id
+        assert uid == "oauth-user"
+        return card
+
+    async def prepare(_db, prepared_card, uid, request):
+        assert prepared_card is card
+        assert uid == "oauth-user"
+        assert request.delivery_targets == ["web"]
+        return {
+            "projectId": card.id,
+            "problemCaseVersion": 3,
+            "instructions": "design with the host model",
+            "buildSchema": {"type": "object"},
+            "context": {"request": {}, "problemCase": {}},
+            "saveWith": "save_build_workspace",
+        }
+
+    monkeypatch.setattr(mcp_module, "_access_for_call", resolve_access)
+    monkeypatch.setattr(mcp_module, "_owned_project", owned_project)
+    monkeypatch.setattr(mcp_module, "prepare_host_build_context", prepare)
+
+    result = await mcp_module.generate_build_workspace()
+
+    assert result["problemCaseVersion"] == 3
+    assert result["saveWith"] == "save_build_workspace"
+
+
+async def test_save_build_workspace_persists_the_host_model_result(
+    monkeypatch,
+    fake_db,
+):
+    use_oauth_user(monkeypatch, fake_db)
+    card = make_pipeline(user_id="oauth-user")
+
+    async def resolve_access(_db):
+        return SimpleNamespace(pipeline_id=card.id, user_id="oauth-user")
+
+    async def owned_project(_db, project_id, uid):
+        return card
+
+    async def save(_db, saved_card, uid, *, problem_case_version, request, build):
+        assert saved_card is card
+        assert uid == "oauth-user"
+        assert problem_case_version == 3
+        assert request.delivery_targets == ["web"]
+        assert build == {"mvpGoal": "Ship it"}
+        return {
+            "projectId": card.id,
+            "build": {"status": "ready", "version": 1, "problemCaseVersion": 3},
+        }
+
+    monkeypatch.setattr(mcp_module, "_access_for_call", resolve_access)
+    monkeypatch.setattr(mcp_module, "_owned_project", owned_project)
+    monkeypatch.setattr(mcp_module, "save_host_build_workspace", save)
+
+    result = await mcp_module.save_build_workspace(3, {"mvpGoal": "Ship it"})
+
+    assert result["build"]["status"] == "ready"
+    assert result["build"]["problemCaseVersion"] == 3
 
 
 async def test_hosted_mcp_starts_browser_auth_when_no_token_is_present():
