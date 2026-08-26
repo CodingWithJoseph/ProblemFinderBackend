@@ -1,0 +1,14 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.codingwithjoseph/immensity",
+  "title": "Immensity",
+  "description": "Discover software problems, analyze evidence, and create implementation-ready Build plans.",
+  "version": "0.7.0",
+  "websiteUrl": "https://useimmensity.com",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.useimmensity.com/mcp"
+    }
+  ]
+}
