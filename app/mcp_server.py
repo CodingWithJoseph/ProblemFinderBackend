@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, Literal
 
 from fastapi import HTTPException
@@ -11,13 +12,15 @@ from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
-from sqlalchemy import select
+from pydantic import ValidationError
+from sqlalchemy import func, select
 from starlette.types import ASGIApp
 
 from app.config import get_settings
 from app.db import AsyncSessionLocal
 from app.mcp_oauth import MCP_SCOPE, oauth_provider
-from app.models import Pipeline, SignalAnalysisCase, SolutionCase
+from app.models import Pipeline, SignalAnalysisCase, SignalAnalysisVersion, SolutionCase
+from app.prompts.signal_analysis import SIGNAL_ANALYSIS_INSTRUCTIONS
 from app.routes.clusters import search_clusters
 from app.routes.ide_workspace import (
     IdeAccess,
@@ -37,7 +40,20 @@ from app.routes.ide_workspace import (
     update_ide_task,
 )
 from app.routes.pipeline import WatchBody, get_pipeline_card, watch_cluster
-from app.routes.signal_workspace import refresh_signal_case
+from app.services.signal_analysis_worker import (
+    build_analysis_payload,
+    build_case_document,
+    build_problem_model_output,
+    load_signal_source_items,
+    usable_signal_items,
+)
+from app.services.signal_cases import (
+    find_signal_case,
+    signal_source_fingerprint,
+    signal_source_updated_at,
+    utc_now,
+)
+from app.signal_contract import SIGNAL_ANALYSIS_SCHEMA_VERSION, SignalProblemAnalysisOutput
 from app.solution_contract import (
     ApproveSolutionRequest,
     BuildDocumentUpdateRequest,
@@ -82,14 +98,17 @@ _auth_settings = AuthSettings(
 
 hosted_mcp_server = MCPServer(
     name="immensity-build",
-    version="0.5.0",
+    version="0.6.0",
     website_url=settings.web_app_url,
     auth_server_provider=oauth_provider,
     auth=_auth_settings,
     instructions=(
         "To create a project, search_problems first, then call create_project_from_problem with "
-        "the chosen cluster ID and start_analysis with the returned project ID. For existing "
-        "projects, start with list_projects, then select_project when more than one is available. "
+        "the chosen cluster ID. For analysis, call start_analysis with the returned project ID, "
+        "retrieve every evidence page, analyze that evidence with the host model, and call "
+        "save_problem_analysis with the exact sourceFingerprint and schema-conforming result. "
+        "Immensity does not call its own analysis model on the MCP path. For existing projects, "
+        "start with list_projects, then select_project when more than one is available. "
         "For Build design, use get_problem_case and get_build_workspace. "
         "Use expected_version on every Build edit so concurrent website or IDE edits cannot be overwritten. "
         "Approve the finished Build workspace before implementation. For implementation, start with "
@@ -100,6 +119,8 @@ hosted_mcp_server = MCPServer(
 )
 
 SEARCH_PROBLEM_LIMIT = 10
+ANALYSIS_PAGE_DEFAULT = 50
+ANALYSIS_PAGE_MAX = 100
 
 
 async def _access_for_call(db) -> IdeAccess:
@@ -169,6 +190,21 @@ def _authenticated_subject() -> str:
 def _tool_error(exc: HTTPException) -> ValueError:
     detail = exc.detail if isinstance(exc.detail, str) else "Immensity request failed"
     return ValueError(detail)
+
+
+async def _owned_project(db, project_id: str, uid: str) -> Pipeline:
+    card = (
+        await db.execute(
+            select(Pipeline).where(
+                Pipeline.id == project_id,
+                Pipeline.user_id == uid,
+                Pipeline.removed_at == None,
+            )
+        )
+    ).scalar_one_or_none()
+    if card is None:
+        raise ValueError("Pipeline card not found")
+    return card
 
 
 @hosted_mcp_server.tool(
@@ -252,23 +288,174 @@ async def create_project_from_problem(cluster_id: str) -> dict[str, Any]:
 
 @hosted_mcp_server.tool(
     description=(
-        "Start or refresh Signal analysis for a signed-in user's Immensity project "
-        "and return its current analysis state."
+        "Return paged, evidence-grounded analysis context and the exact output schema for "
+        "the host model to analyze. This tool never calls an Immensity LLM. Retrieve every "
+        "page before calling save_problem_analysis."
+    ),
+    annotations=READ_ONLY_CLOSED,
+)
+async def start_analysis(
+    project_id: str,
+    offset: int = 0,
+    limit: int = ANALYSIS_PAGE_DEFAULT,
+) -> dict[str, Any]:
+    uid = _authenticated_subject()
+    if offset < 0:
+        raise ValueError("offset must be zero or greater")
+    page_size = max(1, min(int(limit), ANALYSIS_PAGE_MAX))
+    async with AsyncSessionLocal() as db:
+        try:
+            card = await _owned_project(db, project_id, uid)
+            all_items = await load_signal_source_items(db, card)
+            usable_items = usable_signal_items(all_items)
+            fingerprint = signal_source_fingerprint(all_items)
+            page = usable_items[offset:offset + page_size]
+            next_offset = offset + len(page)
+            if next_offset >= len(usable_items):
+                next_offset = None
+            return {
+                "projectId": project_id,
+                "sourceFingerprint": fingerprint,
+                "instructions": SIGNAL_ANALYSIS_INSTRUCTIONS,
+                "analysisSchema": SignalProblemAnalysisOutput.model_json_schema(by_alias=True),
+                "context": build_analysis_payload(
+                    card,
+                    page,
+                    total_items=len(usable_items),
+                ),
+                "paging": {
+                    "offset": offset,
+                    "limit": page_size,
+                    "returned": len(page),
+                    "total": len(usable_items),
+                    "nextOffset": next_offset,
+                },
+                "saveWith": "save_problem_analysis",
+            }
+        except HTTPException as exc:
+            await db.rollback()
+            raise _tool_error(exc) from exc
+        except Exception:
+            await db.rollback()
+            raise
+
+
+@hosted_mcp_server.tool(
+    description=(
+        "Validate and persist a host-model problem analysis into the signed-in user's "
+        "Immensity project. Use the exact sourceFingerprint returned by start_analysis."
     ),
     annotations=WRITE_CLOSED,
 )
-async def start_analysis(project_id: str) -> dict[str, Any]:
+async def save_problem_analysis(
+    project_id: str,
+    source_fingerprint: str,
+    analysis: dict[str, Any],
+) -> dict[str, Any]:
     uid = _authenticated_subject()
     async with AsyncSessionLocal() as db:
         try:
-            document = await refresh_signal_case(project_id, db=db, uid=uid)
+            card = await _owned_project(db, project_id, uid)
+            all_items = await load_signal_source_items(db, card)
+            usable_items = usable_signal_items(all_items)
+            current_fingerprint = signal_source_fingerprint(all_items)
+            if source_fingerprint != current_fingerprint:
+                raise ValueError(
+                    "Project evidence changed during analysis. Call start_analysis again before saving."
+                )
+
+            try:
+                output = SignalProblemAnalysisOutput.model_validate(analysis)
+            except ValidationError as exc:
+                raise ValueError("Analysis does not match the required Immensity schema") from exc
+
+            now = utc_now()
+            case = await find_signal_case(db, project_id, uid)
+            if case is None:
+                case = SignalAnalysisCase(
+                    id=str(uuid.uuid4()),
+                    pipeline_id=str(card.id),
+                    user_id=uid,
+                    status="queued",
+                    created_at=now,
+                    updated_at=now,
+                )
+                db.add(case)
+                await db.flush()
+
+            case.source_fingerprint = current_fingerprint
+            case.source_updated_at = signal_source_updated_at(all_items)
+            case.safe_error = None
+
+            if not output.problems:
+                case.status = "insufficient_evidence"
+                case.progress_step = None
+                case.progress_label = None
+                case.analyzed_at = now
+                case.updated_at = now
+                await db.commit()
+                return {
+                    "projectId": project_id,
+                    "analysis": {
+                        "status": "insufficient_evidence",
+                        "version": 0,
+                        "problemCount": 0,
+                    },
+                }
+
+            try:
+                model_output = build_problem_model_output(output, usable_items)
+                document = build_case_document(
+                    card,
+                    case,
+                    all_items,
+                    usable_items,
+                    model_output,
+                )
+            except ValidationError as exc:
+                raise ValueError(
+                    "Analysis contains invalid or unknown evidence references"
+                ) from exc
+
+            next_version = int(
+                await db.scalar(
+                    select(func.coalesce(func.max(SignalAnalysisVersion.version), 0)).where(
+                        SignalAnalysisVersion.case_id == case.id
+                    )
+                )
+                or 0
+            ) + 1
+            payload = document.model_copy(update={"version": next_version}).model_dump(
+                mode="json",
+                by_alias=True,
+            )
+            version = SignalAnalysisVersion(
+                id=str(uuid.uuid4()),
+                case_id=case.id,
+                version=next_version,
+                schema_version=SIGNAL_ANALYSIS_SCHEMA_VERSION,
+                provider="host_agent",
+                model="user_selected",
+                source_fingerprint=current_fingerprint,
+                analysis=payload,
+                generated_at=now,
+            )
+            db.add(version)
+            await db.flush()
+            case.current_version_id = version.id
+            case.status = "ready"
+            case.progress_step = None
+            case.progress_label = None
+            case.safe_error = None
+            case.analyzed_at = now
+            case.updated_at = now
+            await db.commit()
             return {
                 "projectId": project_id,
                 "analysis": {
-                    "status": document.status,
-                    "version": document.version,
-                    "progress": jsonable_encoder(document.progress),
-                    "safeError": document.safe_error,
+                    "status": "ready",
+                    "version": next_version,
+                    "problemCount": len(output.problems),
                 },
             }
         except HTTPException as exc:
