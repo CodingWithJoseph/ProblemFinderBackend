@@ -2,6 +2,7 @@ from app.mcp_server import hosted_mcp_server
 
 
 READ_ONLY_TOOLS = {
+    "search_problems",
     "list_projects",
     "get_problem_case",
     "get_build_workspace",
@@ -13,7 +14,11 @@ READ_ONLY_TOOLS = {
     "get_project_context",
 }
 
-NON_DESTRUCTIVE_WRITE_TOOLS = {"select_project"}
+NON_DESTRUCTIVE_WRITE_TOOLS = {
+    "select_project",
+    "create_project_from_problem",
+    "start_analysis",
+}
 
 DESTRUCTIVE_WRITE_TOOLS = {
     "generate_build_workspace",
