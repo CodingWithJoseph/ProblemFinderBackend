@@ -67,6 +67,9 @@ async def test_hosted_mcp_publishes_oauth_discovery_metadata():
     assert authorization.status_code == 200
     assert authorization.json()["registration_endpoint"].endswith("/register")
     assert authorization.json()["code_challenge_methods_supported"] == ["S256"]
+    assert {"mcp:use", "offline_access"}.issubset(
+        set(authorization.json()["scopes_supported"])
+    )
 
 
 async def test_hosted_mcp_dynamically_registers_oauth_clients(monkeypatch):
@@ -86,7 +89,7 @@ async def test_hosted_mcp_dynamically_registers_oauth_clients(monkeypatch):
                 "token_endpoint_auth_method": "none",
                 "grant_types": ["authorization_code", "refresh_token"],
                 "response_types": ["code"],
-                "scope": "mcp:use",
+                "scope": "mcp:use offline_access",
             },
         )
 

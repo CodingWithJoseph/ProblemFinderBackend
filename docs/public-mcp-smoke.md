@@ -1,6 +1,6 @@
 # Public MCP smoke validation
 
-Run these checks only after `https://mcp.immensity.ai` has valid DNS/TLS and the production environment values from `docs/public-mcp-deployment.md` are active.
+Run these checks only after `https://mcp.useimmensity.com` has valid DNS/TLS and the production environment values from `docs/public-mcp-deployment.md` are active.
 
 ## 1. Public unauthenticated checks
 
@@ -12,7 +12,7 @@ This verifies:
 
 - `/health`
 - `/ready`
-- OAuth authorization-server metadata
+- OAuth authorization-server metadata, including `mcp:use` and `offline_access`
 - OAuth protected-resource metadata for `/mcp`
 - unauthenticated MCP requests return an OAuth challenge
 
@@ -28,6 +28,8 @@ python scripts/smoke_public_mcp.py \
 ```
 
 This opens a real Streamable HTTP MCP session, verifies the full required tool surface, and calls `list_projects`.
+
+For the client-connection test, request both `mcp:use` and `offline_access`, verify that the token response includes a refresh token, and confirm the refresh-token grant can issue a replacement access token.
 
 ## 3. Approved-project read flow
 

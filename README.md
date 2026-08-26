@@ -97,19 +97,19 @@ OAuth-capable clients open Immensity in the browser so the user can sign in,
 approve the connection, call `list_projects`, and select the project they want
 with `select_project`. Manual project tokens are not supported.
 
-The production MCP resource is intended to be:
+The production MCP resource is:
 
 ```text
-https://mcp.immensity.ai/mcp
+https://mcp.useimmensity.com/mcp
 ```
 
 Configure the production Railway service and DNS/TLS endpoint with:
 
 ```text
 ENVIRONMENT=production
-MCP_ALLOWED_HOSTS=mcp.immensity.ai
-MCP_PUBLIC_URL=https://mcp.immensity.ai/mcp
-MCP_ISSUER_URL=https://mcp.immensity.ai
+MCP_ALLOWED_HOSTS=mcp.useimmensity.com
+MCP_PUBLIC_URL=https://mcp.useimmensity.com/mcp
+MCP_ISSUER_URL=https://mcp.useimmensity.com
 WEB_APP_URL=https://console.useimmensity.com
 ALLOWED_ORIGINS=https://console.useimmensity.com
 ```
@@ -117,7 +117,10 @@ ALLOWED_ORIGINS=https://console.useimmensity.com
 Production startup rejects non-HTTPS MCP, issuer, or web-app URLs and rejects a
 public MCP hostname that is missing from `MCP_ALLOWED_HOSTS`. The application
 still uses the existing PostgreSQL database for OAuth client registrations,
-authorization codes, access/refresh tokens, and project selection.
+authorization codes, access/refresh tokens, and project selection. OAuth
+discovery advertises `offline_access` so clients such as ChatGPT can request
+refresh access and maintain the connection after the one-hour access token
+expires.
 
 Apply all migrations through `0054_drop_legacy_ide_access_tokens.sql` before
 making the public MCP hostname available.

@@ -27,6 +27,9 @@ class Session:
     def add(self, row):
         self.added.append(row)
 
+    def add_all(self, rows):
+        self.added.extend(rows)
+
     async def execute(self, _statement):
         return Result(self.execute_row)
 
@@ -63,7 +66,7 @@ async def test_authorize_sends_the_client_to_immensity_without_issuing_a_token(m
         client_info(),
         AuthorizationParams(
             state="client-state",
-            scopes=["mcp:use"],
+            scopes=["mcp:use", "offline_access"],
             code_challenge="pkce-challenge",
             redirect_uri=AnyUrl("http://127.0.0.1:1455/callback"),
             redirect_uri_provided_explicitly=True,
@@ -76,6 +79,7 @@ async def test_authorize_sends_the_client_to_immensity_without_issuing_a_token(m
     pending = session.added[0]
     assert pending.client_id == "client-1"
     assert pending.code_challenge == "pkce-challenge"
+    assert pending.scopes == ["mcp:use", "offline_access"]
     assert pending.expires_at <= utc_now() + AUTHORIZATION_LIFETIME
     assert session.commits == 1
 
@@ -87,7 +91,7 @@ async def test_browser_approval_returns_a_one_time_hashed_authorization_code(mon
         redirect_uri="http://127.0.0.1:1455/callback",
         redirect_uri_provided_explicitly=True,
         code_challenge="pkce-challenge",
-        scopes=["mcp:use"],
+        scopes=["mcp:use", "offline_access"],
         state="client-state",
         resource="http://127.0.0.1:8000/mcp",
         expires_at=utc_now() + timedelta(minutes=5),
@@ -105,8 +109,25 @@ async def test_browser_approval_returns_a_one_time_hashed_authorization_code(mon
     code_row = session.added[0]
     assert code_row.user_id == "user-1"
     assert code_row.code_hash == hash_token(clear_code)
+    assert code_row.scopes == ["mcp:use", "offline_access"]
     assert clear_code not in code_row.code_hash
     assert session.commits == 1
+
+
+def test_offline_access_issues_refresh_token():
+    session = Session()
+
+    token = ImmensityOAuthProvider._issue_token_pair(
+        session,
+        client_id="client-1",
+        user_id="user-1",
+        scopes=["mcp:use", "offline_access"],
+        resource="https://mcp.useimmensity.com/mcp",
+    )
+
+    assert token.refresh_token
+    assert set((token.scope or "").split()) == {"mcp:use", "offline_access"}
+    assert {row.token_type for row in session.added} == {"access", "refresh"}
 
 
 async def test_legacy_manual_project_tokens_are_rejected(monkeypatch):
