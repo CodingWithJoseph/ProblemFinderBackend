@@ -122,6 +122,14 @@ class IdeAccess:
         self.pipeline_id = str(row.pipeline_id)
         self.user_id = row.user_id
 
+    @classmethod
+    def from_values(cls, *, access_id: str, pipeline_id: str, user_id: str) -> "IdeAccess":
+        access = object.__new__(cls)
+        access.id = access_id
+        access.pipeline_id = pipeline_id
+        access.user_id = user_id
+        return access
+
 
 def serialize_token(row: IdeAccessToken, *, cleartext: str | None = None) -> dict:
     payload = {

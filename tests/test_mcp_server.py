@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from httpx import ASGITransport, AsyncClient
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+from mcp.server.auth.provider import AccessToken
 
 import app.mcp_server as mcp_module
 from app.mcp_server import hosted_mcp_app, hosted_mcp_server
@@ -28,17 +29,22 @@ async def test_hosted_mcp_exposes_the_existing_build_toolset():
         "report_blocker",
         "submit_verification",
         "get_project_context",
+        "list_projects",
+        "select_project",
     }
 
 
-async def test_hosted_mcp_rejects_requests_without_a_project_token():
+async def test_hosted_mcp_starts_browser_auth_when_no_token_is_present():
     transport = ASGITransport(app=hosted_mcp_app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post("/mcp", json={})
 
     assert response.status_code == 401
-    assert response.json() == {"detail": "Missing project access token"}
-    assert response.headers["www-authenticate"] == "Bearer"
+    assert response.json() == {
+        "error": "invalid_token",
+        "error_description": "Authentication required",
+    }
+    assert "resource_metadata=" in response.headers["www-authenticate"]
 
 
 async def test_api_exposes_hosted_mcp_at_the_expected_path():
@@ -47,7 +53,47 @@ async def test_api_exposes_hosted_mcp_at_the_expected_path():
         response = await client.post("/mcp", json={})
 
     assert response.status_code == 401
-    assert response.json()["detail"] == "Missing project access token"
+    assert response.json()["error"] == "invalid_token"
+
+
+async def test_hosted_mcp_publishes_oauth_discovery_metadata():
+    transport = ASGITransport(app=hosted_mcp_app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        protected = await client.get("/.well-known/oauth-protected-resource/mcp")
+        authorization = await client.get("/.well-known/oauth-authorization-server")
+
+    assert protected.status_code == 200
+    assert protected.json()["resource"].endswith("/mcp")
+    assert authorization.status_code == 200
+    assert authorization.json()["registration_endpoint"].endswith("/register")
+    assert authorization.json()["code_challenge_methods_supported"] == ["S256"]
+
+
+async def test_hosted_mcp_dynamically_registers_oauth_clients(monkeypatch):
+    registered = []
+
+    async def register(client):
+        registered.append(client)
+
+    monkeypatch.setattr(mcp_module.oauth_provider, "register_client", register)
+    transport = ASGITransport(app=hosted_mcp_app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/register",
+            json={
+                "client_name": "Codex",
+                "redirect_uris": ["http://127.0.0.1:1455/callback"],
+                "token_endpoint_auth_method": "none",
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+                "scope": "mcp:use",
+            },
+        )
+
+    assert response.status_code == 201
+    assert response.json()["client_id"]
+    assert response.json()["client_name"] == "Codex"
+    assert len(registered) == 1
 
 
 async def test_hosted_mcp_initializes_with_a_project_token(monkeypatch):
@@ -58,14 +104,24 @@ async def test_hosted_mcp_initializes_with_a_project_token(monkeypatch):
         async def __aexit__(self, *_args):
             return None
 
-    async def resolve_token(_token, _db):
+    async def resolve_access(_db):
         return SimpleNamespace(id="token-1", pipeline_id="project-1", user_id="user-1")
+
+    async def verify_token(token):
+        return AccessToken(
+            token=token,
+            client_id="legacy-project-token",
+            scopes=["mcp:use"],
+            subject="user-1",
+            claims={"auth_kind": "manual", "selected_pipeline_id": "project-1"},
+        )
 
     async def get_workspace(pipeline_id, _db, access):
         return {"projectId": pipeline_id, "userId": access.user_id}
 
     monkeypatch.setattr(mcp_module, "AsyncSessionLocal", SessionContext)
-    monkeypatch.setattr(mcp_module, "resolve_ide_access_token", resolve_token)
+    monkeypatch.setattr(mcp_module, "_access_for_call", resolve_access)
+    monkeypatch.setattr(mcp_module.oauth_provider, "load_access_token", verify_token)
     monkeypatch.setattr(mcp_module, "get_ide_build_workspace", get_workspace)
 
     transport = ASGITransport(app=hosted_mcp_app)

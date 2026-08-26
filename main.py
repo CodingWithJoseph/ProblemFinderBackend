@@ -17,6 +17,7 @@ from app.routes.search_sessions import router as search_sessions_router
 from app.routes.signal_workspace import router as signal_workspace_router
 from app.routes.solution_workspace import router as solution_workspace_router
 from app.routes.ide_workspace import router as ide_workspace_router
+from app.routes.mcp_oauth import router as mcp_oauth_router
 
 load_dotenv()
 
@@ -85,6 +86,7 @@ app.include_router(search_sessions_router)
 app.include_router(signal_workspace_router)
 app.include_router(solution_workspace_router)
 app.include_router(ide_workspace_router)
+app.include_router(mcp_oauth_router)
 app.include_router(pipeline_router)
 app.include_router(problems_router)
 

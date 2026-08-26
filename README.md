@@ -93,9 +93,14 @@ pytest -q
 ## MCP
 
 The hosted Streamable HTTP endpoint is available at `/mcp` on the existing API
-domain. It accepts the same project-scoped bearer token created in Handoff and
-derives the project from that token, so remote clients only need the endpoint
-and token. Set `MCP_ALLOWED_HOSTS` to the API hostname in production.
+domain. OAuth-capable clients open Immensity in the browser so the user can sign
+in once, approve the connection, and select any project they own through the
+`list_projects` and `select_project` tools. Project-scoped bearer tokens created
+in Handoff remain available as a manual fallback.
+
+In production, set `MCP_ALLOWED_HOSTS` to the API hostname, `MCP_PUBLIC_URL` to
+the complete `/mcp` URL, `MCP_ISSUER_URL` to the API origin, and `WEB_APP_URL` to
+the web app origin. Apply migration `0053_mcp_oauth.sql` before enabling OAuth.
 
 The npm stdio package remains available as a local-development fallback:
 

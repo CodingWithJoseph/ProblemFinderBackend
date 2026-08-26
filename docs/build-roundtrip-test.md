@@ -5,7 +5,7 @@ They must have a real source cluster and a completed current Analysis version.
 
 ## IDE/MCP to website
 
-1. Create a project token from the project's Handoff screen and configure the MCP server.
+1. Add the hosted MCP URL in the coding agent, sign in through the browser, then call `list_projects` and `select_project`.
 2. Call `get_problem_case`, then `generate_build_workspace`.
 3. Poll `get_build_workspace` until its status is `ready`.
 4. Save one unmistakable constraint with `update_build_section`, using the returned version as `expectedVersion`.
@@ -27,3 +27,4 @@ They must have a real source cluster and a completed current Analysis version.
 - Every edit clears prior approval.
 - Implementation tools remain unavailable until the exact current version is approved.
 - No synthetic project, evidence, or public demo route is used.
+- No bearer token is copied for the preferred OAuth flow. The manual project-token fallback is tested separately.

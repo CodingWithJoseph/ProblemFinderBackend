@@ -20,6 +20,10 @@ RETAINED_TABLES = {
     "solution_jobs",
     "ide_access_tokens",
     "solution_task_states",
+    "mcp_oauth_clients",
+    "mcp_oauth_pending_authorizations",
+    "mcp_oauth_codes",
+    "mcp_oauth_tokens",
     "problems",
 }
 
@@ -49,6 +53,21 @@ def test_build_contract_migration_pins_approval_and_verification():
     assert "approved_version_id uuid" in sql
     assert "approval_status varchar(24)" in sql
     assert "verification jsonb" in sql
+
+
+def test_mcp_oauth_migration_hashes_tokens_and_tracks_project_selection():
+    sql = _sql("0053_mcp_oauth.sql")
+
+    for table in {
+        "mcp_oauth_clients",
+        "mcp_oauth_pending_authorizations",
+        "mcp_oauth_codes",
+        "mcp_oauth_tokens",
+    }:
+        assert f"create table if not exists {table}" in sql
+    assert "token_hash varchar(64) not null unique" in sql
+    assert "selected_pipeline_id uuid null references pipeline(id)" in sql
+    assert "revoked_at timestamptz null" in sql
 
 
 def _sql(name: str) -> str:
