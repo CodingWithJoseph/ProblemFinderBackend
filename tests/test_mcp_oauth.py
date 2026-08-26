@@ -27,6 +27,9 @@ class Session:
     def add(self, row):
         self.added.append(row)
 
+    def add_all(self, rows):
+        self.added.extend(rows)
+
     async def execute(self, _statement):
         return Result(self.execute_row)
 
@@ -109,6 +112,22 @@ async def test_browser_approval_returns_a_one_time_hashed_authorization_code(mon
     assert code_row.scopes == ["mcp:use", "offline_access"]
     assert clear_code not in code_row.code_hash
     assert session.commits == 1
+
+
+def test_offline_access_issues_refresh_token():
+    session = Session()
+
+    token = ImmensityOAuthProvider._issue_token_pair(
+        session,
+        client_id="client-1",
+        user_id="user-1",
+        scopes=["mcp:use", "offline_access"],
+        resource="https://mcp.useimmensity.com/mcp",
+    )
+
+    assert token.refresh_token
+    assert set((token.scope or "").split()) == {"mcp:use", "offline_access"}
+    assert {row.token_type for row in session.added} == {"access", "refresh"}
 
 
 async def test_legacy_manual_project_tokens_are_rejected(monkeypatch):
