@@ -4,16 +4,23 @@ from httpx import ASGITransport, AsyncClient
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.server.auth.provider import AccessToken
+import pytest
 
 import app.mcp_server as mcp_module
+from app.models import Pipeline, SignalAnalysisCase, SignalAnalysisJob
 from app.mcp_server import hosted_mcp_app, hosted_mcp_server
+from conftest import FakeResult, make_cluster, make_cluster_item, make_pipeline
 from main import app as api_app
 
 
 async def test_hosted_mcp_exposes_the_existing_build_toolset():
     tools = await hosted_mcp_server.list_tools()
 
+    assert len(tools) == 20
     assert {tool.name for tool in tools} == {
+        "search_problems",
+        "create_project_from_problem",
+        "start_analysis",
         "get_problem_case",
         "get_build_workspace",
         "generate_build_workspace",
@@ -32,6 +39,173 @@ async def test_hosted_mcp_exposes_the_existing_build_toolset():
         "list_projects",
         "select_project",
     }
+
+
+class SessionContext:
+    def __init__(self, db):
+        self.db = db
+
+    async def __aenter__(self):
+        return self.db
+
+    async def __aexit__(self, *_args):
+        return None
+
+
+def use_oauth_user(monkeypatch, fake_db, subject="oauth-user"):
+    monkeypatch.setattr(mcp_module, "AsyncSessionLocal", lambda: SessionContext(fake_db))
+    monkeypatch.setattr(
+        mcp_module,
+        "get_access_token",
+        lambda: SimpleNamespace(subject=subject, token="oauth-token", claims={}),
+    )
+
+
+async def test_search_problems_reuses_cluster_search_and_returns_concise_candidates(
+    monkeypatch,
+    fake_db,
+):
+    use_oauth_user(monkeypatch, fake_db)
+    cluster = make_cluster()
+    item = make_cluster_item(cluster_id=cluster.id)
+    fake_db.stub(
+        scalar=[1],
+        execute=[
+            FakeResult(rows=[cluster]),
+            FakeResult(rows=[item]),
+            FakeResult(rows=[]),
+        ],
+    )
+
+    result = await mcp_module.search_problems("late invoices")
+
+    assert result == {
+        "problems": [{
+            "clusterId": "42",
+            "name": "Freelance invoicing pain",
+            "problemStatement": "Freelancers waste hours every week chasing unpaid invoices.",
+            "summary": "Freelancers struggle to get invoices paid on time.",
+            "evidenceCount": 1,
+            "sources": ["reddit"],
+            "communities": ["r/freelance"],
+            "hasProject": False,
+        }],
+        "returned": 1,
+        "total": 1,
+    }
+
+
+async def test_create_project_from_problem_uses_oauth_user_and_watch_workflow(
+    monkeypatch,
+    fake_db,
+):
+    use_oauth_user(monkeypatch, fake_db)
+    cluster = make_cluster()
+    item = make_cluster_item(cluster_id=cluster.id)
+    fake_db.stub(
+        execute=[
+            FakeResult(rows=[]),
+            FakeResult(rows=[cluster]),
+            FakeResult(rows=[(item.id,)]),
+        ],
+    )
+
+    async def load_created_project(project_id, db, uid):
+        card = next(row for row in db.added if isinstance(row, Pipeline))
+        assert project_id == card.id
+        assert uid == "oauth-user"
+        return {
+            "data": {
+                "id": card.id,
+                "displayName": card.name,
+                "stage": card.stage,
+                "sourceClusterId": card.source_cluster_id,
+                "analysisStatus": "not_started",
+                "buildStatus": "not_started",
+            }
+        }
+
+    monkeypatch.setattr(mcp_module, "get_pipeline_card", load_created_project)
+
+    result = await mcp_module.create_project_from_problem("42")
+
+    project = next(row for row in fake_db.added if isinstance(row, Pipeline))
+    assert project.user_id == "oauth-user"
+    assert project.source_cluster_id == "42"
+    assert result["projectId"] == project.id
+    assert result["project"] == {
+        "id": project.id,
+        "name": cluster.name,
+        "stage": "watching",
+        "sourceClusterId": "42",
+        "analysisStatus": "not_started",
+        "buildStatus": "not_started",
+    }
+
+
+async def test_create_project_from_problem_returns_an_existing_owned_project(
+    monkeypatch,
+    fake_db,
+):
+    use_oauth_user(monkeypatch, fake_db)
+    card = make_pipeline(
+        user_id="oauth-user",
+        name="Late invoices",
+        source_cluster_id="42",
+    )
+    fake_db.stub(execute=[
+        FakeResult(rows=[card]),
+        FakeResult(rows=[card]),
+        FakeResult(rows=[]),
+        FakeResult(rows=[]),
+    ])
+
+    result = await mcp_module.create_project_from_problem("42")
+
+    assert result["projectId"] == card.id
+    assert result["project"]["name"] == "Late invoices"
+    assert result["project"]["sourceClusterId"] == "42"
+    assert not any(isinstance(row, Pipeline) for row in fake_db.added)
+
+
+async def test_start_analysis_uses_owned_signal_refresh_and_returns_state(
+    monkeypatch,
+    fake_db,
+):
+    use_oauth_user(monkeypatch, fake_db)
+    card = make_pipeline(user_id="oauth-user")
+    fake_db.stub(execute=[FakeResult(rows=[card]), FakeResult(rows=[])])
+
+    result = await mcp_module.start_analysis(card.id)
+
+    case = next(row for row in fake_db.added if isinstance(row, SignalAnalysisCase))
+    job = next(row for row in fake_db.added if isinstance(row, SignalAnalysisJob))
+    assert case.pipeline_id == card.id
+    assert case.user_id == "oauth-user"
+    assert job.requested_by == "oauth-user"
+    assert result == {
+        "projectId": card.id,
+        "analysis": {
+            "status": "queued",
+            "version": 0,
+            "progress": {"step": "queued", "label": "Waiting to analyze this Signal"},
+            "safeError": None,
+        },
+    }
+
+
+async def test_start_analysis_rejects_a_project_not_owned_by_oauth_user(
+    monkeypatch,
+    fake_db,
+):
+    use_oauth_user(monkeypatch, fake_db)
+    fake_db.stub(execute=[FakeResult(rows=[])])
+
+    with pytest.raises(ValueError, match="Pipeline card not found"):
+        await mcp_module.start_analysis("another-users-project")
+
+    assert not any(isinstance(row, SignalAnalysisCase) for row in fake_db.added)
+    assert not any(isinstance(row, SignalAnalysisJob) for row in fake_db.added)
 
 
 async def test_hosted_mcp_starts_browser_auth_when_no_token_is_present():

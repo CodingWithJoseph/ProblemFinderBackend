@@ -18,6 +18,7 @@ from app.config import get_settings
 from app.db import AsyncSessionLocal
 from app.mcp_oauth import MCP_SCOPE, oauth_provider
 from app.models import Pipeline, SignalAnalysisCase, SolutionCase
+from app.routes.clusters import search_clusters
 from app.routes.ide_workspace import (
     IdeAccess,
     TaskProgressRequest,
@@ -35,6 +36,8 @@ from app.routes.ide_workspace import (
     update_ide_build_section,
     update_ide_task,
 )
+from app.routes.pipeline import WatchBody, get_pipeline_card, watch_cluster
+from app.routes.signal_workspace import refresh_signal_case
 from app.solution_contract import (
     ApproveSolutionRequest,
     BuildDocumentUpdateRequest,
@@ -84,7 +87,9 @@ hosted_mcp_server = MCPServer(
     auth_server_provider=oauth_provider,
     auth=_auth_settings,
     instructions=(
-        "Start with list_projects, then select_project when more than one project is available. "
+        "To create a project, search_problems first, then call create_project_from_problem with "
+        "the chosen cluster ID and start_analysis with the returned project ID. For existing "
+        "projects, start with list_projects, then select_project when more than one is available. "
         "For Build design, use get_problem_case and get_build_workspace. "
         "Use expected_version on every Build edit so concurrent website or IDE edits cannot be overwritten. "
         "Approve the finished Build workspace before implementation. For implementation, start with "
@@ -93,6 +98,8 @@ hosted_mcp_server = MCPServer(
         "before marking work done; never claim an unrun check passed."
     ),
 )
+
+SEARCH_PROBLEM_LIMIT = 10
 
 
 async def _access_for_call(db) -> IdeAccess:
@@ -147,6 +154,126 @@ async def _call(handler, *args):
             await db.rollback()
             detail = exc.detail if isinstance(exc.detail, str) else "Immensity request failed"
             raise ValueError(detail) from exc
+        except Exception:
+            await db.rollback()
+            raise
+
+
+def _authenticated_subject() -> str:
+    token = get_access_token()
+    if token is None or not token.subject:
+        raise ValueError("Sign in to Immensity before using this tool")
+    return token.subject
+
+
+def _tool_error(exc: HTTPException) -> ValueError:
+    detail = exc.detail if isinstance(exc.detail, str) else "Immensity request failed"
+    return ValueError(detail)
+
+
+@hosted_mcp_server.tool(
+    description=(
+        "Search Immensity's existing problem clusters and return concise candidates "
+        "that can be used with create_project_from_problem."
+    ),
+    annotations=READ_ONLY_CLOSED,
+)
+async def search_problems(query: str) -> dict[str, Any]:
+    uid = _authenticated_subject()
+    async with AsyncSessionLocal() as db:
+        try:
+            result = await search_clusters(
+                q=query,
+                limit=SEARCH_PROBLEM_LIMIT,
+                offset=0,
+                min_posts=1,
+                db=db,
+                uid=uid,
+            )
+            problems = [
+                {
+                    "clusterId": str(candidate["id"]),
+                    "name": candidate["name"],
+                    "problemStatement": candidate["problemStatement"],
+                    "summary": candidate["summary"],
+                    "evidenceCount": candidate["post_count"],
+                    "sources": candidate["sources"],
+                    "communities": candidate["subreddits"],
+                    "hasProject": candidate["is_watched"],
+                }
+                for candidate in result["data"]
+            ]
+            return {
+                "problems": problems,
+                "returned": len(problems),
+                "total": result["total"],
+            }
+        except HTTPException as exc:
+            await db.rollback()
+            raise _tool_error(exc) from exc
+        except Exception:
+            await db.rollback()
+            raise
+
+
+@hosted_mcp_server.tool(
+    description=(
+        "Create or return an Immensity project for the signed-in user from an existing "
+        "problem cluster returned by search_problems."
+    ),
+    annotations=WRITE_CLOSED,
+)
+async def create_project_from_problem(cluster_id: str) -> dict[str, Any]:
+    uid = _authenticated_subject()
+    async with AsyncSessionLocal() as db:
+        try:
+            watched = await watch_cluster(WatchBody(cluster_id=cluster_id), db=db, uid=uid)
+            project_id = watched["pipeline_id"]
+            result = await get_pipeline_card(project_id, db=db, uid=uid)
+            project = result["data"]
+            return {
+                "projectId": project_id,
+                "project": {
+                    "id": str(project["id"]),
+                    "name": project["displayName"],
+                    "stage": project["stage"],
+                    "sourceClusterId": project["sourceClusterId"],
+                    "analysisStatus": project["analysisStatus"],
+                    "buildStatus": project["buildStatus"],
+                },
+            }
+        except HTTPException as exc:
+            await db.rollback()
+            raise _tool_error(exc) from exc
+        except Exception:
+            await db.rollback()
+            raise
+
+
+@hosted_mcp_server.tool(
+    description=(
+        "Start or refresh Signal analysis for a signed-in user's Immensity project "
+        "and return its current analysis state."
+    ),
+    annotations=WRITE_CLOSED,
+)
+async def start_analysis(project_id: str) -> dict[str, Any]:
+    uid = _authenticated_subject()
+    async with AsyncSessionLocal() as db:
+        try:
+            document = await refresh_signal_case(project_id, db=db, uid=uid)
+            return {
+                "projectId": project_id,
+                "analysis": {
+                    "status": document.status,
+                    "version": document.version,
+                    "progress": jsonable_encoder(document.progress),
+                    "safeError": document.safe_error,
+                },
+            }
+        except HTTPException as exc:
+            await db.rollback()
+            raise _tool_error(exc) from exc
         except Exception:
             await db.rollback()
             raise
