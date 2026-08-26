@@ -10,6 +10,7 @@ from mcp.server import MCPServer
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import ToolAnnotations
 from sqlalchemy import select
 from starlette.types import ASGIApp
 
@@ -46,6 +47,22 @@ OFFLINE_ACCESS_SCOPE = "offline_access"
 OPENID_SCOPE = "openid"
 EMAIL_SCOPE = "email"
 SUPPORTED_OAUTH_SCOPES = [MCP_SCOPE, OFFLINE_ACCESS_SCOPE, OPENID_SCOPE, EMAIL_SCOPE]
+
+READ_ONLY_CLOSED = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    open_world_hint=False,
+)
+WRITE_CLOSED = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    open_world_hint=False,
+)
+DESTRUCTIVE_WRITE_CLOSED = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=True,
+    open_world_hint=False,
+)
 
 _auth_settings = AuthSettings(
     issuer_url=settings.mcp_issuer_url,
@@ -135,7 +152,10 @@ async def _call(handler, *args):
             raise
 
 
-@hosted_mcp_server.tool(description="List the Immensity projects available to the signed-in account.")
+@hosted_mcp_server.tool(
+    description="List the Immensity projects available to the signed-in account.",
+    annotations=READ_ONLY_CLOSED,
+)
 async def list_projects() -> dict[str, Any]:
     token = get_access_token()
     if token is None or not token.subject:
@@ -186,7 +206,10 @@ async def list_projects() -> dict[str, Any]:
         }
 
 
-@hosted_mcp_server.tool(description="Select which Immensity project subsequent tools should use.")
+@hosted_mcp_server.tool(
+    description="Select which Immensity project subsequent tools should use.",
+    annotations=WRITE_CLOSED,
+)
 async def select_project(project_id: str) -> dict[str, Any]:
     token = get_access_token()
     if token is None or not token.subject:
@@ -207,17 +230,26 @@ async def select_project(project_id: str) -> dict[str, Any]:
     return {"projectId": project_id, "name": card.project_name or card.name, "selected": True}
 
 
-@hosted_mcp_server.tool(description="Return the analyzed Problem Case used as the source for Build design.")
+@hosted_mcp_server.tool(
+    description="Return the analyzed Problem Case used as the source for Build design.",
+    annotations=READ_ONLY_CLOSED,
+)
 async def get_problem_case() -> dict[str, Any]:
     return await _call(get_ide_problem_case)
 
 
-@hosted_mcp_server.tool(description="Return the current Build workspace shown in Immensity.")
+@hosted_mcp_server.tool(
+    description="Return the current Build workspace shown in Immensity.",
+    annotations=READ_ONLY_CLOSED,
+)
 async def get_build_workspace() -> dict[str, Any]:
     return await _call(get_ide_build_workspace)
 
 
-@hosted_mcp_server.tool(description="Generate a Build draft from the current analyzed Problem Case.")
+@hosted_mcp_server.tool(
+    description="Generate a Build draft from the current analyzed Problem Case.",
+    annotations=DESTRUCTIVE_WRITE_CLOSED,
+)
 async def generate_build_workspace(
     delivery_targets: list[Literal["web", "ios", "android"]] | None = None,
     constraints: list[str] | None = None,
@@ -231,7 +263,10 @@ async def generate_build_workspace(
     return await _call(generate_ide_build_workspace, body)
 
 
-@hosted_mcp_server.tool(description="Replace one structured Build section with optimistic version checking.")
+@hosted_mcp_server.tool(
+    description="Replace one structured Build section with optimistic version checking.",
+    annotations=DESTRUCTIVE_WRITE_CLOSED,
+)
 async def update_build_section(
     section: Literal[
         "mvp_goal",
@@ -255,7 +290,10 @@ async def update_build_section(
     )
 
 
-@hosted_mcp_server.tool(description="Replace an editable Build markdown document.")
+@hosted_mcp_server.tool(
+    description="Replace an editable Build markdown document.",
+    annotations=DESTRUCTIVE_WRITE_CLOSED,
+)
 async def update_build_document(
     document: Literal["build_contract", "features", "requirements", "tasks", "test_plan", "decisions"],
     content: str,
@@ -268,7 +306,10 @@ async def update_build_document(
     )
 
 
-@hosted_mcp_server.tool(description="Approve and freeze the current Build workspace version.")
+@hosted_mcp_server.tool(
+    description="Approve and freeze the current Build workspace version.",
+    annotations=DESTRUCTIVE_WRITE_CLOSED,
+)
 async def approve_build_workspace(expected_version: int) -> dict[str, Any]:
     return await _call(
         approve_ide_build_workspace,
@@ -276,17 +317,26 @@ async def approve_build_workspace(expected_version: int) -> dict[str, Any]:
     )
 
 
-@hosted_mcp_server.tool(description="Return the approved Build Contract. Call this before implementation.")
+@hosted_mcp_server.tool(
+    description="Return the approved Build Contract. Call this before implementation.",
+    annotations=READ_ONLY_CLOSED,
+)
 async def get_build_contract() -> dict[str, Any]:
     return await _call(get_ide_build_document, "build_contract")
 
 
-@hosted_mcp_server.tool(description="List the focused documents in the approved Build package.")
+@hosted_mcp_server.tool(
+    description="List the focused documents in the approved Build package.",
+    annotations=READ_ONLY_CLOSED,
+)
 async def list_build_documents() -> dict[str, Any]:
     return await _call(list_ide_build_documents)
 
 
-@hosted_mcp_server.tool(description="Fetch one approved Build document by key.")
+@hosted_mcp_server.tool(
+    description="Fetch one approved Build document by key.",
+    annotations=READ_ONLY_CLOSED,
+)
 async def get_build_document(
     document: Literal[
         "features",
@@ -302,17 +352,26 @@ async def get_build_document(
     return await _call(get_ide_build_document, document)
 
 
-@hosted_mcp_server.tool(description="Return Build version, task counts, completion state, and blockers.")
+@hosted_mcp_server.tool(
+    description="Return Build version, task counts, completion state, and blockers.",
+    annotations=READ_ONLY_CLOSED,
+)
 async def get_project_status() -> dict[str, Any]:
     return await _call(get_ide_project_status)
 
 
-@hosted_mcp_server.tool(description="Return the next todo task whose dependencies are complete.")
+@hosted_mcp_server.tool(
+    description="Return the next todo task whose dependencies are complete.",
+    annotations=READ_ONLY_CLOSED,
+)
 async def get_next_task() -> dict[str, Any]:
     return await _call(get_next_ide_task)
 
 
-@hosted_mcp_server.tool(description="Move a task to todo or in progress and attach an optional note.")
+@hosted_mcp_server.tool(
+    description="Move a task to todo or in progress and attach an optional note.",
+    annotations=DESTRUCTIVE_WRITE_CLOSED,
+)
 async def update_task_progress(
     task_id: str,
     status: Literal["todo", "in_progress"],
@@ -321,12 +380,18 @@ async def update_task_progress(
     return await _call(update_ide_task, task_id, TaskProgressRequest(status=status, note=note))
 
 
-@hosted_mcp_server.tool(description="Mark a task blocked with the concrete reason.")
+@hosted_mcp_server.tool(
+    description="Mark a task blocked with the concrete reason.",
+    annotations=DESTRUCTIVE_WRITE_CLOSED,
+)
 async def report_blocker(task_id: str, note: str) -> dict[str, Any]:
     return await _call(update_ide_task, task_id, TaskProgressRequest(status="blocked", note=note))
 
 
-@hosted_mcp_server.tool(description="Mark a task done with the checks that actually passed.")
+@hosted_mcp_server.tool(
+    description="Mark a task done with the checks that actually passed.",
+    annotations=DESTRUCTIVE_WRITE_CLOSED,
+)
 async def submit_verification(
     task_id: str,
     summary: str,
@@ -344,7 +409,10 @@ async def submit_verification(
     )
 
 
-@hosted_mcp_server.tool(description="Compatibility view containing the analyzed problem and approved Build data.")
+@hosted_mcp_server.tool(
+    description="Compatibility view containing the analyzed problem and approved Build data.",
+    annotations=READ_ONLY_CLOSED,
+)
 async def get_project_context() -> dict[str, Any]:
     return await _call(get_ide_project_context)
 

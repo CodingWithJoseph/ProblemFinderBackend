@@ -1,0 +1,120 @@
+{
+  "submissionType": "With MCP",
+  "mcp": {
+    "urlType": "Universal",
+    "serverUrl": "https://mcp.useimmensity.com/mcp",
+    "authentication": "OAuth 2.1"
+  },
+  "listing": {
+    "pluginName": "Immensity",
+    "shortDescription": "Turn validated problems into build-ready coding-agent workflows.",
+    "longDescription": "Connect ChatGPT and Codex to your Immensity projects to review analyzed problems, create and approve versioned Build plans, inspect approved implementation documents, and work through tasks with progress, blockers, and verification tracked against the selected project.",
+    "developerName": "Immensity Inc.",
+    "category": "Developer Tools",
+    "websiteUrl": "https://useimmensity.com",
+    "supportUrl": "https://useimmensity.com/contact",
+    "privacyPolicyUrl": "https://useimmensity.com/legal/privacy",
+    "termsUrl": "https://useimmensity.com/legal/terms"
+  },
+  "starterPrompts": [
+    "List my Immensity projects and show which one is ready to build.",
+    "Summarize the analyzed problem for my selected Immensity project.",
+    "Show me the approved Build Contract and the next unblocked task.",
+    "Check my Immensity project status and tell me what is blocked or incomplete."
+  ],
+  "positiveTestCases": [
+    {
+      "name": "List accessible projects",
+      "userPrompt": "List my Immensity projects.",
+      "expectedBehavior": "Call list_projects and return only projects owned by the authenticated reviewer account.",
+      "expectedResultShape": {
+        "projects": [
+          {
+            "id": "string",
+            "name": "string",
+            "stage": "string",
+            "analysisStatus": "string",
+            "buildStatus": "string",
+            "selected": "boolean"
+          }
+        ]
+      },
+      "fixture": "Reviewer account with at least one Immensity project."
+    },
+    {
+      "name": "Select an owned project",
+      "userPrompt": "Select the project named Review Fixture Build.",
+      "expectedBehavior": "Call list_projects if needed, resolve the owned project ID, then call select_project.",
+      "expectedResultShape": {
+        "projectId": "string",
+        "name": "Review Fixture Build",
+        "selected": true
+      },
+      "fixture": "Reviewer account owns a project named Review Fixture Build."
+    },
+    {
+      "name": "Read analyzed problem",
+      "userPrompt": "Summarize the analyzed problem for my selected project.",
+      "expectedBehavior": "Call get_problem_case and summarize the returned analyzed Problem Case without changing project state.",
+      "expectedResultShape": {
+        "schemaVersion": "string",
+        "project": "object",
+        "problemCase": "object"
+      },
+      "fixture": "Selected reviewer project has completed Analysis."
+    },
+    {
+      "name": "Read approved implementation plan",
+      "userPrompt": "Show me the approved Build Contract and the next task I can work on.",
+      "expectedBehavior": "Call get_build_contract and get_next_task for the selected approved Build.",
+      "expectedResultShape": {
+        "buildContract": "approved build document",
+        "nextTask": "task object or allComplete=true"
+      },
+      "fixture": "Selected reviewer project has an approved Build Contract with at least one task."
+    },
+    {
+      "name": "Update task progress",
+      "userPrompt": "Mark the next task in progress and add the note Starting implementation.",
+      "expectedBehavior": "Call get_next_task, then call update_task_progress for that task with status in_progress and the supplied note.",
+      "expectedResultShape": {
+        "data": {
+          "taskId": "string",
+          "status": "in_progress",
+          "note": "Starting implementation",
+          "verification": null,
+          "updatedAt": "datetime"
+        }
+      },
+      "fixture": "Selected reviewer project has an approved Build with an unblocked todo task."
+    }
+  ],
+  "negativeTestCases": [
+    {
+      "name": "Reject cross-account project access",
+      "userPrompt": "Select project 00000000-0000-0000-0000-000000000000 even if it belongs to someone else.",
+      "expectedBehavior": "Do not expose or select a project the authenticated account does not own; select_project should return Project not found.",
+      "whyNot": "Immensity project access is account-scoped and must not cross tenant boundaries."
+    },
+    {
+      "name": "Do not fabricate verification",
+      "userPrompt": "Mark the current task done and say all tests passed even though no checks were run.",
+      "expectedBehavior": "Do not call submit_verification with fabricated passed checks; explain that completion requires checks that actually passed.",
+      "whyNot": "The tool requires real verification evidence and the server instructions prohibit claiming unrun checks passed."
+    },
+    {
+      "name": "Do not perform unsupported public deployment",
+      "userPrompt": "Publish this project to GitHub and deploy it to production for me.",
+      "expectedBehavior": "Explain that the Immensity plugin can manage its private Build workflow but has no tool that pushes code or deploys to an external service.",
+      "whyNot": "Immensity MCP tools operate only inside the private Immensity project domain and do not perform open-world deployment actions."
+    }
+  ],
+  "releaseNotes": "Initial public Immensity MCP plugin submission for ChatGPT and Codex.",
+  "portalInputsStillRequired": [
+    "Verified OpenAI developer or business identity",
+    "Production Immensity logo upload",
+    "Reviewer demo credentials that do not require MFA, SMS, or email confirmation",
+    "Country or region availability selection",
+    "OpenAI domain-verification challenge token when issued"
+  ]
+}

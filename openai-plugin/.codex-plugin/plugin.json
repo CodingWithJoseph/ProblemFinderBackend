@@ -1,0 +1,36 @@
+{
+  "name": "immensity",
+  "version": "0.1.0",
+  "description": "Connect ChatGPT and Codex to Immensity projects for problem analysis, Build planning, and guided implementation.",
+  "author": {
+    "name": "Immensity Inc.",
+    "email": "support@useimmensity.com",
+    "url": "https://useimmensity.com"
+  },
+  "homepage": "https://useimmensity.com",
+  "repository": "https://github.com/CodingWithJoseph/ProblemFinderBackend",
+  "keywords": [
+    "software-development",
+    "coding-agents",
+    "mcp",
+    "mvp",
+    "project-planning"
+  ],
+  "interface": {
+    "displayName": "Immensity",
+    "shortDescription": "Turn validated problems into build-ready coding-agent workflows.",
+    "longDescription": "Connect ChatGPT and Codex to your Immensity projects to review analyzed problems, create and approve versioned Build plans, inspect approved implementation documents, and work through tasks with progress, blockers, and verification tracked against the selected project.",
+    "developerName": "Immensity Inc.",
+    "category": "Developer Tools",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://useimmensity.com",
+    "privacyPolicyURL": "https://useimmensity.com/legal/privacy",
+    "termsOfServiceURL": "https://useimmensity.com/legal/terms",
+    "defaultPrompt": [
+      "List my Immensity projects and show which one is ready to build.",
+      "Summarize the analyzed problem for my selected Immensity project.",
+      "Show me the approved Build Contract and the next unblocked task.",
+      "Check my Immensity project status and tell me what is blocked or incomplete."
+    ]
+  }
+}
