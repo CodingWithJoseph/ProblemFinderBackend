@@ -7,6 +7,7 @@ READ_ONLY_TOOLS = {
     "list_projects",
     "get_problem_case",
     "get_build_workspace",
+    "generate_build_workspace",
     "get_build_contract",
     "list_build_documents",
     "get_build_document",
@@ -22,7 +23,7 @@ NON_DESTRUCTIVE_WRITE_TOOLS = {
 }
 
 DESTRUCTIVE_WRITE_TOOLS = {
-    "generate_build_workspace",
+    "save_build_workspace",
     "update_build_section",
     "update_build_document",
     "approve_build_workspace",
