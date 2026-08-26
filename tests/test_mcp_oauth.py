@@ -63,7 +63,7 @@ async def test_authorize_sends_the_client_to_immensity_without_issuing_a_token(m
         client_info(),
         AuthorizationParams(
             state="client-state",
-            scopes=["mcp:use"],
+            scopes=["mcp:use", "offline_access"],
             code_challenge="pkce-challenge",
             redirect_uri=AnyUrl("http://127.0.0.1:1455/callback"),
             redirect_uri_provided_explicitly=True,
@@ -76,6 +76,7 @@ async def test_authorize_sends_the_client_to_immensity_without_issuing_a_token(m
     pending = session.added[0]
     assert pending.client_id == "client-1"
     assert pending.code_challenge == "pkce-challenge"
+    assert pending.scopes == ["mcp:use", "offline_access"]
     assert pending.expires_at <= utc_now() + AUTHORIZATION_LIFETIME
     assert session.commits == 1
 
@@ -87,7 +88,7 @@ async def test_browser_approval_returns_a_one_time_hashed_authorization_code(mon
         redirect_uri="http://127.0.0.1:1455/callback",
         redirect_uri_provided_explicitly=True,
         code_challenge="pkce-challenge",
-        scopes=["mcp:use"],
+        scopes=["mcp:use", "offline_access"],
         state="client-state",
         resource="http://127.0.0.1:8000/mcp",
         expires_at=utc_now() + timedelta(minutes=5),
@@ -105,6 +106,7 @@ async def test_browser_approval_returns_a_one_time_hashed_authorization_code(mon
     code_row = session.added[0]
     assert code_row.user_id == "user-1"
     assert code_row.code_hash == hash_token(clear_code)
+    assert code_row.scopes == ["mcp:use", "offline_access"]
     assert clear_code not in code_row.code_hash
     assert session.commits == 1
 
