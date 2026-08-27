@@ -37,6 +37,17 @@ async def test_openid_configuration_advertises_email_userinfo_support():
     assert response.status_code == 200
     assert payload["userinfo_endpoint"].endswith("/userinfo")
     assert {"openid", "email"}.issubset(set(payload["scopes_supported"]))
+    assert payload["subject_types_supported"] == ["public"]
+    assert payload["jwks_uri"].endswith("/.well-known/jwks.json")
+
+
+async def test_openid_jwks_endpoint_is_available():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/.well-known/jwks.json")
+
+    assert response.status_code == 200
+    assert response.json() == {"keys": []}
 
 
 async def test_userinfo_returns_verified_firebase_email(monkeypatch):
