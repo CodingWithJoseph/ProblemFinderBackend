@@ -8,7 +8,7 @@ The plugin installs the production remote MCP endpoint:
 
 `https://mcp.useimmensity.com/mcp`
 
-Cursor handles OAuth through the MCP server's browser-based authorization flow. No API key, bearer token, or project token is embedded in the plugin.
+Cursor handles OAuth through the MCP server's browser-based authorization flow. The plugin contains no embedded credentials or project-specific secrets.
 
 ## Workflow
 
