@@ -32,7 +32,7 @@ def test_ai_assistant_uses_same_remote_mcp_without_static_credentials():
 def test_official_registry_metadata_matches_jetbrains_distribution():
     registry = _load(ROOT / "server.json")
 
-    assert registry["name"] == "io.github.codingwithjoseph/immensity"
+    assert registry["name"] == "io.github.CodingWithJoseph/immensity"
     assert registry["remotes"] == [
         {
             "type": "streamable-http",
