@@ -1,0 +1,16 @@
+{
+  "name": "immensity",
+  "version": "1.0.0",
+  "description": "Discover evidence-backed software problems, analyze opportunities, create versioned Build plans, and work through implementation tasks with Immensity.",
+  "author": {
+    "name": "Immensity"
+  },
+  "homepage": "https://useimmensity.com",
+  "keywords": [
+    "mcp",
+    "software-planning",
+    "product-discovery",
+    "coding-agents"
+  ],
+  "mcpServers": "mcp.json"
+}
