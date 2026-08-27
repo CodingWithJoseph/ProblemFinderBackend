@@ -36,12 +36,21 @@ async def openid_configuration():
         "userinfo_endpoint": f"{issuer}/userinfo",
         "registration_endpoint": f"{issuer}/register",
         "revocation_endpoint": f"{issuer}/revoke",
+        "jwks_uri": f"{issuer}/.well-known/jwks.json",
         "scopes_supported": SUPPORTED_SCOPES,
         "response_types_supported": ["code"],
+        "subject_types_supported": ["public"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic"],
         "code_challenge_methods_supported": ["S256"],
     }
+
+
+@router.get("/.well-known/jwks.json", include_in_schema=False)
+async def openid_jwks():
+    # Immensity issues opaque OAuth access/refresh tokens, not signed JWT access tokens.
+    # The empty JWK set keeps OIDC discovery parseable for clients that require jwks_uri.
+    return {"keys": []}
 
 
 @router.get("/userinfo", include_in_schema=False)
