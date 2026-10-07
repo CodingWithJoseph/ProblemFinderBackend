@@ -50,19 +50,17 @@ async def test_openid_jwks_endpoint_is_available():
     assert response.json() == {"keys": []}
 
 
-async def test_userinfo_returns_verified_firebase_email(monkeypatch):
+async def test_userinfo_returns_verified_supabase_email(monkeypatch):
     async def load_access_token(_token):
         return SimpleNamespace(
-            subject="firebase-user-1",
+            subject="11111111-1111-4111-8111-111111111111",
             scopes=["mcp:use", "openid", "email"],
         )
 
     monkeypatch.setattr(openai_auth_module.oauth_provider, "load_access_token", load_access_token)
-    monkeypatch.setattr(
-        openai_auth_module.firebase_auth,
-        "get_user",
-        lambda _uid: SimpleNamespace(email="dev@example.com", email_verified=True),
-    )
+    async def admin_user(_uid):
+        return {"email": "dev@example.com", "email_confirmed_at": "2026-10-06T00:00:00Z"}
+    monkeypatch.setattr(openai_auth_module, "supabase_admin_user", admin_user)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(
@@ -74,7 +72,7 @@ async def test_userinfo_returns_verified_firebase_email(monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == {
-        "sub": "firebase-user-1",
+        "sub": "11111111-1111-4111-8111-111111111111",
         "email": "dev@example.com",
         "email_verified": True,
     }
@@ -82,7 +80,7 @@ async def test_userinfo_returns_verified_firebase_email(monkeypatch):
 
 async def test_userinfo_requires_openid_and_email_scopes(monkeypatch):
     async def load_access_token(_token):
-        return SimpleNamespace(subject="firebase-user-1", scopes=["mcp:use"])
+        return SimpleNamespace(subject="11111111-1111-4111-8111-111111111111", scopes=["mcp:use"])
 
     monkeypatch.setattr(openai_auth_module.oauth_provider, "load_access_token", load_access_token)
 

@@ -7,7 +7,7 @@ from app.config import Settings
 def production_settings(**overrides):
     values = {
         "database_url": "postgresql+asyncpg://user:password@db.example.com/immensity",
-        "firebase_project_id": "immensity-prod",
+        "supabase_url": "https://auth.example.test",
         "environment": "production",
         "allowed_origins": "https://console.useimmensity.com",
         "mcp_allowed_hosts": "mcp.useimmensity.com",

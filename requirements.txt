@@ -6,7 +6,7 @@ alembic==1.19.0
 asyncpg==0.31.0
 pydantic-settings==2.14.2
 python-dotenv==1.2.2
-firebase-admin==7.5.0
+PyJWT[crypto]==2.15.0
 openai==2.53.0
 httpx==0.28.1
 pgvector==0.5.0

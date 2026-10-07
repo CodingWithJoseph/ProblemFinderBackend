@@ -21,8 +21,30 @@ class Settings(BaseSettings):
 
     database_url: str
 
-    firebase_project_id: str
-    firebase_credentials_path: str = "firebase-service-account-prod.json"
+    supabase_url: str
+    supabase_publishable_key: str = ""
+    supabase_secret_key: str = ""
+    supabase_jwt_audience: str = "authenticated"
+    supabase_jwks_cache_seconds: int = 300
+    supabase_auth_timeout_seconds: float = 10.0
+
+    @property
+    def supabase_issuer(self) -> str:
+        return f"{self.supabase_url.rstrip('/')}/auth/v1"
+
+    @model_validator(mode="after")
+    def validate_supabase_configuration(self) -> "Settings":
+        parsed = urlparse(self.supabase_url)
+        if not parsed.hostname or parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+            raise ValueError("SUPABASE_URL must be an origin")
+        if parsed.scheme != "https" and not (
+            self.environment.lower() != "production" and parsed.scheme == "http"
+            and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+        ):
+            raise ValueError("SUPABASE_URL must use HTTPS except for local development")
+        if not 1 <= self.supabase_jwks_cache_seconds <= 600:
+            raise ValueError("SUPABASE_JWKS_CACHE_SECONDS must be between 1 and 600")
+        return self
 
     ai_provider: str = "local"
     ai_base_url: str = ""

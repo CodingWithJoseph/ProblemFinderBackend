@@ -12,6 +12,7 @@ REQUIRED_SCHEMA_VERSIONS = frozenset(
         "0051_ide_mcp_access",
         "0052_build_contract_foundation",
         "0053_mcp_oauth",
+        "0055_supabase_accounts",
     }
 )
 

@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from sqlalchemy import func, select
 from starlette.types import ASGIApp
 
+from app.auth import lock_active_account
 from app.config import get_settings
 from app.db import AsyncSessionLocal
 from app.mcp_host_build import prepare_host_build_context, save_host_build_workspace
@@ -169,6 +170,7 @@ async def _access_for_call(db) -> IdeAccess:
 
 async def _call(handler, *args):
     async with AsyncSessionLocal() as db:
+        await lock_active_account(db, _authenticated_subject())
         try:
             access = await _access_for_call(db)
             result = await handler(access.pipeline_id, *args, db, access)
@@ -219,6 +221,7 @@ async def _owned_project(db, project_id: str, uid: str) -> Pipeline:
 async def search_problems(query: str) -> dict[str, Any]:
     uid = _authenticated_subject()
     async with AsyncSessionLocal() as db:
+        await lock_active_account(db, _authenticated_subject())
         try:
             result = await search_clusters(
                 q=query,
@@ -264,6 +267,7 @@ async def search_problems(query: str) -> dict[str, Any]:
 async def create_project_from_problem(cluster_id: str) -> dict[str, Any]:
     uid = _authenticated_subject()
     async with AsyncSessionLocal() as db:
+        await lock_active_account(db, _authenticated_subject())
         try:
             watched = await watch_cluster(WatchBody(cluster_id=cluster_id), db=db, uid=uid)
             project_id = watched["pipeline_id"]
@@ -306,6 +310,7 @@ async def start_analysis(
         raise ValueError("offset must be zero or greater")
     page_size = max(1, min(int(limit), ANALYSIS_PAGE_MAX))
     async with AsyncSessionLocal() as db:
+        await lock_active_account(db, _authenticated_subject())
         try:
             card = await _owned_project(db, project_id, uid)
             all_items = await load_signal_source_items(db, card)
@@ -356,6 +361,7 @@ async def save_problem_analysis(
 ) -> dict[str, Any]:
     uid = _authenticated_subject()
     async with AsyncSessionLocal() as db:
+        await lock_active_account(db, _authenticated_subject())
         try:
             card = await _owned_project(db, project_id, uid)
             all_items = await load_signal_source_items(db, card)
@@ -477,6 +483,7 @@ async def list_projects() -> dict[str, Any]:
     if token is None or not token.subject:
         raise ValueError("Sign in to Immensity before using this tool")
     async with AsyncSessionLocal() as db:
+        await lock_active_account(db, _authenticated_subject())
         claims = token.claims or {}
         cards = list(
             (
@@ -539,6 +546,7 @@ async def select_project(project_id: str) -> dict[str, Any]:
     if token is None or not token.subject:
         raise ValueError("Sign in to Immensity before using this tool")
     async with AsyncSessionLocal() as db:
+        await lock_active_account(db, _authenticated_subject())
         card = (
             await db.execute(
                 select(Pipeline).where(
@@ -588,6 +596,7 @@ async def generate_build_workspace(
         preferred_stack=preferred_stack or [],
     )
     async with AsyncSessionLocal() as db:
+        await lock_active_account(db, _authenticated_subject())
         try:
             access = await _access_for_call(db)
             card = await _owned_project(db, access.pipeline_id, access.user_id)
@@ -620,6 +629,7 @@ async def save_build_workspace(
         preferred_stack=preferred_stack or [],
     )
     async with AsyncSessionLocal() as db:
+        await lock_active_account(db, _authenticated_subject())
         try:
             access = await _access_for_call(db)
             card = await _owned_project(db, access.pipeline_id, access.user_id)

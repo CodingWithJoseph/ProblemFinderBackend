@@ -153,7 +153,7 @@ def main() -> int:
             "analyzed projects for website and IDE/MCP round-trip testing."
         ),
     )
-    parser.add_argument("--user-id", required=True, help="Firebase UID that owns the projects")
+    parser.add_argument("--user-id", required=True, help="Supabase user UUID that owns the projects")
     parser.add_argument(
         "--project-id",
         action="append",

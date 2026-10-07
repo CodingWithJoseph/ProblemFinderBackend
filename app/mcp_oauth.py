@@ -24,6 +24,7 @@ from sqlalchemy import select, update
 from app.config import get_settings
 from app.db import AsyncSessionLocal
 from app.models import (
+    AccountProfile,
     McpOAuthClient,
     McpOAuthCode,
     McpOAuthPendingAuthorization,
@@ -152,7 +153,8 @@ class ImmensityOAuthProvider(
         async with AsyncSessionLocal() as db:
             row = (
                 await db.execute(
-                    select(McpOAuthCode).where(
+                    select(McpOAuthCode).join(AccountProfile, AccountProfile.id == McpOAuthCode.user_id).where(
+                        AccountProfile.deleted_at == None,
                         McpOAuthCode.code_hash == hash_token(authorization_code),
                         McpOAuthCode.client_id == client.client_id,
                         McpOAuthCode.consumed_at == None,
@@ -171,14 +173,15 @@ class ImmensityOAuthProvider(
         async with AsyncSessionLocal() as db:
             row = (
                 await db.execute(
-                    select(McpOAuthCode)
+                    select(McpOAuthCode).join(AccountProfile, AccountProfile.id == McpOAuthCode.user_id)
                     .where(
+                        AccountProfile.deleted_at == None,
                         McpOAuthCode.code_hash == hash_token(authorization_code.code),
                         McpOAuthCode.client_id == client.client_id,
                         McpOAuthCode.consumed_at == None,
                         McpOAuthCode.expires_at > now,
                     )
-                    .with_for_update()
+                    .with_for_update(of=McpOAuthCode)
                 )
             ).scalar_one_or_none()
             if row is None:
@@ -221,15 +224,16 @@ class ImmensityOAuthProvider(
         async with AsyncSessionLocal() as db:
             row = (
                 await db.execute(
-                    select(McpOAuthToken)
+                    select(McpOAuthToken).join(AccountProfile, AccountProfile.id == McpOAuthToken.user_id)
                     .where(
+                        AccountProfile.deleted_at == None,
                         McpOAuthToken.token_hash == hash_token(refresh_token.token),
                         McpOAuthToken.token_type == "refresh",
                         McpOAuthToken.client_id == client.client_id,
                         McpOAuthToken.revoked_at == None,
                         McpOAuthToken.expires_at > now,
                     )
-                    .with_for_update()
+                    .with_for_update(of=McpOAuthToken)
                 )
             ).scalar_one_or_none()
             if row is None:
@@ -321,7 +325,7 @@ class ImmensityOAuthProvider(
         ]
         if client_id:
             filters.append(McpOAuthToken.client_id == client_id)
-        return (await db.execute(select(McpOAuthToken).where(*filters))).scalar_one_or_none()
+        return (await db.execute(select(McpOAuthToken).join(AccountProfile, AccountProfile.id == McpOAuthToken.user_id).where(*filters, AccountProfile.deleted_at == None))).scalar_one_or_none()
 
     @staticmethod
     def _authorization_code(row: McpOAuthCode, clear_code: str) -> AuthorizationCode:

@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import PlainTextResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from firebase_admin import auth as firebase_auth
+from app.auth import supabase_admin_user
 
 from app.config import get_settings
 from app.mcp_oauth import MCP_SCOPE, oauth_provider
@@ -72,9 +72,9 @@ async def userinfo(
             detail="openid and email scopes are required",
         )
 
-    user = firebase_auth.get_user(access.subject)
+    user = await supabase_admin_user(access.subject)
     return {
         "sub": access.subject,
-        "email": user.email,
-        "email_verified": bool(user.email_verified),
+        "email": user.get("email"),
+        "email_verified": bool(user.get("email_confirmed_at")),
     }

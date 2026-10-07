@@ -3,7 +3,7 @@
 
 Strategy
 --------
-* We set dummy settings and stub ``firebase_admin`` *before* importing any
+* We set dummy settings before importing any
   ``app.*`` module (the real app reads required settings and performs
   import-time side effects).
 * We never touch a real database. ``get_db`` is overridden with a
@@ -32,8 +32,8 @@ if _REPO_ROOT not in sys.path:
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@localhost:5432/test")
-os.environ.setdefault("FIREBASE_PROJECT_ID", "test-project")
-os.environ.setdefault("FIREBASE_CREDENTIALS_PATH", "unused-in-tests.json")
+os.environ.setdefault("SUPABASE_URL", "https://auth.example.test")
+os.environ.setdefault("SUPABASE_PUBLISHABLE_KEY", "test-publishable")
 os.environ.setdefault("AI_PROVIDER", "local")
 os.environ.setdefault("AI_BASE_URL", "http://127.0.0.1:8080/v1")
 os.environ.setdefault("AI_MODEL", "gpt-oss-20b")
@@ -42,7 +42,6 @@ os.environ.setdefault("ALLOWED_ORIGINS", "http://localhost:3000")
 os.environ.setdefault("SIGNAL_ANALYSIS_WORKER_ENABLED", "false")
 os.environ.setdefault("SOLUTION_WORKER_ENABLED", "false")
 
-sys.modules.setdefault("firebase_admin", MagicMock())
 
 from fastapi import FastAPI  # noqa: E402
 
@@ -278,7 +277,13 @@ def embedding_response(vector):
 # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @pytest.fixture
-def fake_db():
+def fake_db(monkeypatch):
+    # Ownership-domain unit tests stub authentication; real account locks are
+    # covered by test_supabase_auth and test_accounts_postgres.
+    async def already_authorized(_db, _uid):
+        return None
+    monkeypatch.setattr("app.auth.lock_active_account", already_authorized)
+    monkeypatch.setattr("app.mcp_server.lock_active_account", already_authorized)
     return FakeSession()
 
 
