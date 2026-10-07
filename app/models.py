@@ -63,6 +63,31 @@ class ClusterItem(Base):
 # ============================================================
 
 
+class AccountProfile(Base):
+    __tablename__ = "account_profiles"
+
+    # Supabase owns this UUID; no cross-database FK to its auth schema.
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    onboarding_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    focus_areas: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    deletion_completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
+class LaunchWaitlist(Base):
+    __tablename__ = "launch_waitlist"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    consent_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+
 class SearchSession(Base):
     __tablename__ = "search_sessions"
 

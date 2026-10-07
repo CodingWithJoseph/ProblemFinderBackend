@@ -30,7 +30,7 @@ python -m pip install -r requirements.txt -r requirements-test.txt
 Copy-Item .env.example .env
 ```
 
-Update `.env` with a working `DATABASE_URL` and Firebase credentials. The
+Update `.env` with a working `DATABASE_URL` and Supabase settings. The
 checked-in development defaults use the OpenAI-compatible API at
 `http://127.0.0.1:8080/v1` and the model alias `gpt-oss-20b`.
 
@@ -41,10 +41,10 @@ python scripts\migrate.py
 ```
 
 To prepare the two Build round-trip test lanes, run the local-only command with
-the Firebase UID used to sign in to the web app:
+the Supabase UUID used to sign in to the web or Android app:
 
 ```powershell
-python scripts\prepare_build_roundtrip_examples.py --user-id <firebase-uid>
+python scripts\prepare_build_roundtrip_examples.py --user-id <supabase-user-id>
 ```
 
 The command removes the old synthetic Build seed, selects up to two existing
@@ -150,3 +150,7 @@ python scripts/smoke_release.py \
 ```
 
 The command checks API liveness/readiness plus the three canonical Warroom routes.
+
+## Supabase Auth
+
+The API verifies ES256/RS256 user access tokens from the configured project, including issuer, audience, signature, expiry, UUID and authenticated role. All product `user_id` values are Supabase UUIDs. Profiles, onboarding and waitlist data stay in the application PostgreSQL database. Migration `0055_supabase_accounts.sql` adds these tables. Deleted accounts are fenced immediately; a retry worker finishes Auth and application-data cleanup. See [auth deployment](docs/auth-deployment.md).

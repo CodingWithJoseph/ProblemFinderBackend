@@ -56,6 +56,7 @@ async def test_readiness_passes_when_release_migrations_are_applied():
             "0051_ide_mcp_access",
             "0052_build_contract_foundation",
             "0053_mcp_oauth",
+            "0055_supabase_accounts",
         ]))
     )
 
@@ -73,6 +74,7 @@ async def test_readiness_lists_missing_release_migrations():
         "0051_ide_mcp_access",
         "0052_build_contract_foundation",
         "0053_mcp_oauth",
+            "0055_supabase_accounts",
     )
 
 

@@ -448,6 +448,9 @@ async def test_hosted_mcp_initializes_with_oauth_access_token(monkeypatch):
         return {"projectId": pipeline_id, "userId": access.user_id}
 
     monkeypatch.setattr(mcp_module, "AsyncSessionLocal", SessionContext)
+    async def already_authorized(_db, uid):
+        assert uid == "user-1"
+    monkeypatch.setattr(mcp_module, "lock_active_account", already_authorized)
     monkeypatch.setattr(mcp_module, "_access_for_call", resolve_access)
     monkeypatch.setattr(mcp_module.oauth_provider, "load_access_token", verify_token)
     monkeypatch.setattr(mcp_module, "get_ide_build_workspace", get_workspace)

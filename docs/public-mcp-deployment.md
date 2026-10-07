@@ -17,7 +17,7 @@ WEB_APP_URL=https://console.useimmensity.com
 ALLOWED_ORIGINS=https://console.useimmensity.com
 ```
 
-Keep the existing production `DATABASE_URL`, Firebase credentials, AI provider settings, and worker settings unchanged.
+Keep the existing production `DATABASE_URL`, Supabase Auth settings, AI provider settings, and worker settings unchanged.
 
 ## Database
 

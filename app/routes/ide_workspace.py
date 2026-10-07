@@ -111,6 +111,10 @@ async def require_ide_access(
     if access_token is None or not access_token.subject:
         raise HTTPException(status_code=401, detail="Invalid or expired MCP OAuth access token")
 
+    from app.mcp_oauth import MCP_SCOPE
+    from app.config import get_settings
+    if MCP_SCOPE not in access_token.scopes or access_token.resource != get_settings().mcp_public_url:
+        raise HTTPException(status_code=403, detail="MCP access scope or resource is invalid")
     claims = access_token.claims or {}
     access = IdeAccess.from_values(
         access_id=str(claims.get("token_id") or "oauth"),
@@ -123,6 +127,8 @@ async def require_ide_access(
 
 
 async def _owned_card(db: AsyncSession, pipeline_id: str, uid: str) -> Pipeline:
+    from app.auth import lock_active_account
+    await lock_active_account(db, uid)
     card = (await db.execute(
         select(Pipeline).where(
             Pipeline.id == pipeline_id,

@@ -28,6 +28,7 @@ async def test_ide_rest_access_accepts_oauth_access_token(monkeypatch):
             token=token,
             client_id="client-1",
             scopes=["mcp:use"],
+            resource=oauth_module.oauth_provider.settings.mcp_public_url,
             subject=TEST_UID,
             claims={"token_id": "oauth-token-id"},
         )

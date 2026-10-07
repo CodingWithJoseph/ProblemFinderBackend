@@ -19,6 +19,7 @@ from app.routes.solution_workspace import router as solution_workspace_router
 from app.routes.ide_workspace import router as ide_workspace_router
 from app.routes.mcp_oauth import router as mcp_oauth_router
 from app.routes.openai_plugin_auth import router as openai_plugin_auth_router
+from app.routes.accounts import router as accounts_router
 
 load_dotenv()
 
@@ -31,6 +32,11 @@ async def lifespan(app: "FastAPI"):
     signal_worker = None
     solution_stop = asyncio.Event()
     solution_worker = None
+    deletion_stop = asyncio.Event()
+    deletion_worker = None
+    if settings.supabase_secret_key:
+        from app.account_deletion import run_account_deletion_worker
+        deletion_worker = asyncio.create_task(run_account_deletion_worker(deletion_stop), name="account-deletion-worker")
     if settings.signal_analysis_worker_enabled:
         from app.services.signal_analysis_worker import run_signal_worker
 
@@ -51,6 +57,13 @@ async def lifespan(app: "FastAPI"):
         finally:
             signal_stop.set()
             solution_stop.set()
+            deletion_stop.set()
+            if deletion_worker:
+                deletion_worker.cancel()
+                try:
+                    await deletion_worker
+                except asyncio.CancelledError:
+                    pass
             if signal_worker:
                 signal_worker.cancel()
                 try:
@@ -91,6 +104,7 @@ app.include_router(mcp_oauth_router)
 app.include_router(openai_plugin_auth_router)
 app.include_router(pipeline_router)
 app.include_router(problems_router)
+app.include_router(accounts_router)
 
 
 @app.get("/health")
