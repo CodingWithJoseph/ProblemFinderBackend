@@ -1,4 +1,3 @@
-
 """Cluster discovery and detail over the v2 public AI publish contract.
 
 Every post-level read uses ``cluster_items`` filtered to ``PIPELINE_VERSION``.
@@ -7,15 +6,28 @@ source text, community metadata, engagement, and ``problem_statement``.
 """
 from collections import Counter
 from datetime import datetime, timezone
-
+from sqlalchemy import and_, case, func, literal, or_, select
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case, func, literal, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import get_db
 from app.auth import get_uid
+from app.browse_contract import (
+    BrowseCategory,
+    BrowsePageResponse,
+    BrowseSort,
+    DiscoveryClusterResponse,
+    build_browse_filters,
+)
+from app.browse_cursor import (
+    BrowseCursor,
+    decode_browse_cursor,
+    encode_browse_cursor,
+)
+
 from app.config import PIPELINE_VERSION
+from app.db import get_db
 from app.models import Cluster, ClusterItem, Pipeline
 from app.search_agent_contract import SearchAgentResponse
 from app.search_contract import (
@@ -56,11 +68,6 @@ def _source_names(items: list[ClusterItem]) -> list[str]:
         for source in (item.platform for item in items)
         if source and source.strip()
     })
-
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# cluster_items helpers (shared with pipeline.py / problems.py / dashboard.py)
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _item_observed_at(it: ClusterItem):
     return it.posted_at
@@ -118,11 +125,11 @@ def _sort_items(items: list[ClusterItem]) -> list[ClusterItem]:
 
 
 async def load_cluster_items(
-    db: AsyncSession,
-    cluster_id: int,
-    *,
-    limit: int | None = None,
-    offset: int | None = None,
+        db: AsyncSession,
+        cluster_id: int,
+        *,
+        limit: int | None = None,
+        offset: int | None = None,
 ) -> list[ClusterItem]:
     """Items for a cluster, highest reddit score first."""
     query = (
@@ -184,11 +191,6 @@ def _item_stats_subquery():
         .subquery()
     )
 
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# Watched-cluster state (user pipeline cards)
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 async def _watched_cluster_ids(uid: str, cluster_ids: list[int], db: AsyncSession) -> set[int]:
     if not cluster_ids:
         return set()
@@ -208,10 +210,6 @@ async def _watched_cluster_ids(uid: str, cluster_ids: list[int], db: AsyncSessio
             continue
     return watched
 
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# Serializers
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _serialize_cluster(c: Cluster, items: list[ClusterItem], *, post_count: int | None = None) -> dict:
     observed = sorted(
@@ -241,6 +239,25 @@ def _serialize_cluster(c: Cluster, items: list[ClusterItem], *, post_count: int 
     }
 
 
+def _serialize_browse_clusters(
+        cluster: Cluster,
+        *,
+        post_count: int,
+        last_observed: datetime | None,
+        problem_statement: str | None,
+        watched_ids: set[int],
+) -> DiscoveryClusterResponse:
+    return DiscoveryClusterResponse(
+        id=cluster.id,
+        name=cluster.name,
+        summary=cluster.summary,
+        problemStatement=problem_statement,
+        postCount=post_count,
+        isWatched=cluster.id in watched_ids,
+        date=last_observed
+    )
+
+
 def _serialize_discovery_cluster(c: Cluster, items: list[ClusterItem], watched_ids: set[int]) -> dict:
     subreddits = sorted({it.community for it in items if it.community})
     dates = sorted(_iso(_item_observed_at(it)) for it in items if _item_observed_at(it))
@@ -257,11 +274,6 @@ def _serialize_discovery_cluster(c: Cluster, items: list[ClusterItem], watched_i
         "sample_posts": [serialize_sample_item(it) for it in items[:SEARCH_SAMPLE_POSTS]],
         "is_watched": c.id in watched_ids,
     }
-
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# Discovery: search + browse
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _skip_filter(value: str | None) -> bool:
     return value is None or value.strip() == "" or value.strip().lower() == "all"
@@ -339,7 +351,7 @@ def _build_cluster_search(filters: ClusterSearchQuery):
     """Compile allow-listed search filters into a parameterized SQLAlchemy query."""
     stats = _item_stats_subquery()
     base = (
-        select(Cluster)
+        select(Cluster, stats.c.post_count, stats.c.last_observed)
         .join(stats, stats.c.cluster_id == Cluster.id)
         .where(
             Cluster.pipeline_version == PIPELINE_VERSION,
@@ -374,6 +386,106 @@ def _build_cluster_search(filters: ClusterSearchQuery):
 
     return base, order_clauses
 
+def _apply_newest_browse_cursor(base, cursor: BrowseCursor):
+    post_count = base.selected_columns.post_count
+    last_observed = base.selected_columns.last_observed
+
+    after_tie = or_(
+        post_count < cursor.post_count,
+        and_(
+            post_count == cursor.post_count,
+            Cluster.id < cursor.cluster_id,
+        ),
+    )
+
+    if cursor.last_observed is None:
+        return base.where(
+            and_(
+                last_observed.is_(None),
+                after_tie,
+            )
+        )
+
+    return base.where(
+        or_(
+            last_observed < cursor.last_observed,
+            last_observed.is_(None),
+            and_(
+                last_observed == cursor.last_observed,
+                after_tie,
+            ),
+        )
+    )
+
+async def _load_browse_rows(
+    filters: ClusterSearchQuery,
+    limit: int,
+    db: AsyncSession,
+    *,
+    cursor: BrowseCursor | None = None,
+):
+    base, order_clauses = _build_cluster_search(filters)
+
+    if cursor is not None:
+        base = _apply_newest_browse_cursor(base, cursor)
+
+    statement_query = (
+        select(
+            ClusterItem.problem_statement
+        ).where(
+            ClusterItem.cluster_id == Cluster.id,
+            ClusterItem.pipeline_version == PIPELINE_VERSION,
+            ClusterItem.problem_statement.isnot(None),
+            func.trim(ClusterItem.problem_statement) != "",
+        ).order_by(
+            ClusterItem.score.desc().nullslast(),
+            ClusterItem.id.asc()
+        ).limit(1)
+        .correlate(Cluster)
+        .scalar_subquery()
+    )
+
+    query = (
+        base.add_columns(statement_query.label("problem_statement"))
+        .order_by(*order_clauses, Cluster.id.desc())
+        .limit(limit + 1)
+    )
+
+    result = await db.execute(query)
+    rows = result.all()
+    return rows[:limit], len(rows) > limit
+
+
+async def _load_browse_clusters(
+    filters: ClusterSearchQuery,
+    limit: int,
+    uid: str,
+    db: AsyncSession,
+    *,
+    cursor: BrowseCursor | None = None,
+) -> tuple[list[DiscoveryClusterResponse], bool]:
+    rows, has_more = await _load_browse_rows(
+        filters,
+        limit,
+        db,
+        cursor=cursor,
+    )
+
+    cluster_ids = [row[0].id for row in rows]
+    watched_ids = await _watched_cluster_ids(uid, cluster_ids, db)
+
+    clusters = [
+        _serialize_browse_clusters(
+            cluster,
+            post_count=post_count,
+            last_observed=last_observed,
+            problem_statement=problem_statement,
+            watched_ids=watched_ids,
+        )
+        for cluster, post_count, last_observed, problem_statement in rows
+    ]
+
+    return clusters, has_more
 
 async def _materialize_discovery(base, order_clauses, limit, offset, uid, db) -> dict:
     total = await db.scalar(select(func.count()).select_from(base.subquery()))
@@ -395,12 +507,12 @@ async def _materialize_discovery(base, order_clauses, limit, offset, uid, db) ->
 
 @router.get("/search")
 async def search_clusters(
-    q: str = Query(..., min_length=2, max_length=500),
-    limit: int = Query(SEARCH_DEFAULT_LIMIT, ge=1, le=SEARCH_MAX_LIMIT),
-    offset: int = Query(0, ge=0, le=1_000_000),
-    min_posts: int = Query(1, ge=1, le=100_000),
-    db: AsyncSession = Depends(get_db),
-    uid: str = Depends(get_uid),
+        q: str = Query(..., min_length=2, max_length=500),
+        limit: int = Query(SEARCH_DEFAULT_LIMIT, ge=1, le=SEARCH_MAX_LIMIT),
+        offset: int = Query(0, ge=0, le=1_000_000),
+        min_posts: int = Query(1, ge=1, le=100_000),
+        db: AsyncSession = Depends(get_db),
+        uid: str = Depends(get_uid),
 ):
     """Cluster-first search across cluster and item text."""
     filters = ClusterSearchQuery(
@@ -416,9 +528,9 @@ async def search_clusters(
 
 @router.post("/search/query")
 async def query_clusters(
-    body: ClusterSearchQuery,
-    db: AsyncSession = Depends(get_db),
-    uid: str = Depends(get_uid),
+        body: ClusterSearchQuery,
+        db: AsyncSession = Depends(get_db),
+        uid: str = Depends(get_uid),
 ):
     """Execute a confirmed, allow-listed search draft against cluster data."""
     base, order_clauses = _build_cluster_search(body)
@@ -447,8 +559,8 @@ async def query_clusters(
 
 @router.get("/search/options", response_model=SearchFilterOptions)
 async def search_filter_options(
-    db: AsyncSession = Depends(get_db),
-    uid: str = Depends(get_uid),
+        db: AsyncSession = Depends(get_db),
+        uid: str = Depends(get_uid),
 ):
     """Canonical values available to structured filters and the filter editor."""
     try:
@@ -460,9 +572,9 @@ async def search_filter_options(
 
 @router.post("/search/interpret", response_model=SearchInterpretationResponse)
 async def interpret_cluster_search(
-    body: SearchInterpretRequest,
-    db: AsyncSession = Depends(get_db),
-    uid: str = Depends(get_uid),
+        body: SearchInterpretRequest,
+        db: AsyncSession = Depends(get_db),
+        uid: str = Depends(get_uid),
 ):
     """Translate one conversational turn into a draft without running search."""
     return await interpret_search(body, uid, db)
@@ -470,9 +582,9 @@ async def interpret_cluster_search(
 
 @router.post("/search/agent", response_model=SearchAgentResponse)
 async def run_cluster_search_agent(
-    body: SearchInterpretRequest,
-    db: AsyncSession = Depends(get_db),
-    uid: str = Depends(get_uid),
+        body: SearchInterpretRequest,
+        db: AsyncSession = Depends(get_db),
+        uid: str = Depends(get_uid),
 ):
     """Run a bounded tool loop that always stops before database search execution."""
     return await run_search_agent(body, uid, db)
@@ -480,13 +592,13 @@ async def run_cluster_search_agent(
 
 @router.get("/browse")
 async def browse_clusters(
-    limit: int = Query(SEARCH_DEFAULT_LIMIT, ge=1, le=SEARCH_MAX_LIMIT),
-    offset: int = Query(0, ge=0, le=1_000_000),
-    sort: str = Query("newest"),
-    subreddit: str | None = Query(None, max_length=100),
-    min_posts: int = Query(1, ge=1, le=100_000),
-    db: AsyncSession = Depends(get_db),
-    uid: str = Depends(get_uid),
+        limit: int = Query(SEARCH_DEFAULT_LIMIT, ge=1, le=SEARCH_MAX_LIMIT),
+        offset: int = Query(0, ge=0, le=1_000_000),
+        sort: str = Query("newest"),
+        subreddit: str | None = Query(None, max_length=100),
+        min_posts: int = Query(1, ge=1, le=100_000),
+        db: AsyncSession = Depends(get_db),
+        uid: str = Depends(get_uid),
 ):
     """Default (no-query) cluster discovery feed with sort + subreddit filter."""
     stats = _item_stats_subquery()
@@ -517,9 +629,74 @@ async def browse_clusters(
     return await _materialize_discovery(base, order_clauses, limit, offset, uid, db)
 
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# Cluster detail + sub-resources
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+@router.get("/browse/page", response_model=BrowsePageResponse)
+async def browse_cluster_page(
+    category: BrowseCategory = Query(BrowseCategory.ALL),
+    sort: BrowseSort = Query(BrowseSort.NEWEST),
+    limit: int = Query(
+        SEARCH_DEFAULT_LIMIT,
+        ge=1,
+        le=SEARCH_MAX_LIMIT,
+    ),
+    cursor: str | None = Query(
+        None,
+        min_length=1,
+        max_length=2048,
+    ),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+) -> BrowsePageResponse:
+    if sort != BrowseSort.NEWEST:
+        raise HTTPException(
+            status_code=422,
+            detail="This endpoint currently supports sort=newest.",
+        )
+
+    decoded_cursor = None
+    if cursor is not None:
+        try:
+            decoded_cursor = decode_browse_cursor(
+                cursor,
+                category=category,
+                sort=sort,
+                pipeline_version=PIPELINE_VERSION,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=str(exc),
+            ) from exc
+
+    filters = build_browse_filters(category, sort)
+
+    clusters, has_more = await _load_browse_clusters(
+        filters,
+        limit,
+        uid,
+        db,
+        cursor=decoded_cursor,
+    )
+
+    next_cursor = None
+    if has_more:
+        last_cluster = clusters[-1]
+        next_cursor = encode_browse_cursor(
+            BrowseCursor(
+                version=1,
+                pipeline_version=PIPELINE_VERSION,
+                category=category,
+                sort=sort,
+                cluster_id=last_cluster.id,
+                post_count=last_cluster.postCount,
+                last_observed=last_cluster.date,
+            )
+        )
+
+    return BrowsePageResponse(
+        clusters=clusters,
+        nextCursor=next_cursor,
+    )
+
 
 async def _fetch_cluster(cluster_id: int, db: AsyncSession) -> Cluster | None:
     result = await db.execute(
@@ -533,11 +710,11 @@ async def _fetch_cluster(cluster_id: int, db: AsyncSession) -> Cluster | None:
 
 @router.get("/{cluster_id}")
 async def get_cluster(
-    cluster_id: int,
-    page: int = Query(1, ge=1),
-    pageSize: int = Query(20, ge=1, le=200),
-    db: AsyncSession = Depends(get_db),
-    uid: str = Depends(get_uid),
+        cluster_id: int,
+        page: int = Query(1, ge=1),
+        pageSize: int = Query(20, ge=1, le=200),
+        db: AsyncSession = Depends(get_db),
+        uid: str = Depends(get_uid),
 ):
     """Problem breakdown with source evidence and paginated cluster items."""
     cluster = await _fetch_cluster(cluster_id, db)
