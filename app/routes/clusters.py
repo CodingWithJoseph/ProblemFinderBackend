@@ -6,9 +6,10 @@ source text, community metadata, engagement, and ``problem_statement``.
 """
 from collections import Counter
 from datetime import datetime, timezone
-from sqlalchemy import and_, case, func, literal, or_, select
+
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import case, func, literal, or_, select
+from sqlalchemy import and_
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,10 +26,10 @@ from app.browse_cursor import (
     decode_browse_cursor,
     encode_browse_cursor,
 )
-
 from app.config import PIPELINE_VERSION
 from app.db import get_db
-from app.models import Cluster, ClusterItem, Pipeline
+from app.discovery_contract import DiscoveryDashboardResponse
+from app.models import Cluster, ClusterItem
 from app.search_agent_contract import SearchAgentResponse
 from app.search_contract import (
     ClusterSearchQuery,
@@ -38,16 +39,16 @@ from app.search_contract import (
     SEARCH_DEFAULT_LIMIT,
     SEARCH_MAX_LIMIT,
 )
-from app.search_normalization import meaningful_search_terms
+from app.services.cluster_membership import load_watched_cluster_ids
+from app.services.cluster_search_text import search_text_expressions
 from app.services.search_agent import run_search_agent
 from app.services.search_interpreter import interpret_search, load_search_filter_options
+from app.services.temp_discovery_preview import load_discovery_preview_dashboard
 
 router = APIRouter(prefix="/clusters", tags=["clusters"])
 
 TOP_EVIDENCE_COUNT = 4
-
 SEARCH_SAMPLE_POSTS = 3
-SEARCH_MAX_TOKENS = 12
 
 
 def _iso(value) -> str | None:
@@ -68,6 +69,7 @@ def _source_names(items: list[ClusterItem]) -> list[str]:
         for source in (item.platform for item in items)
         if source and source.strip()
     })
+
 
 def _item_observed_at(it: ClusterItem):
     return it.posted_at
@@ -191,25 +193,6 @@ def _item_stats_subquery():
         .subquery()
     )
 
-async def _watched_cluster_ids(uid: str, cluster_ids: list[int], db: AsyncSession) -> set[int]:
-    if not cluster_ids:
-        return set()
-    str_ids = [str(cid) for cid in cluster_ids]
-    rows = (await db.execute(
-        select(Pipeline.source_cluster_id).where(
-            Pipeline.user_id == uid,
-            Pipeline.source_cluster_id.in_(str_ids),
-            Pipeline.removed_at == None,
-        )
-    )).all()
-    watched: set[int] = set()
-    for (scid,) in rows:
-        try:
-            watched.add(int(scid))
-        except (TypeError, ValueError):
-            continue
-    return watched
-
 
 def _serialize_cluster(c: Cluster, items: list[ClusterItem], *, post_count: int | None = None) -> dict:
     observed = sorted(
@@ -275,6 +258,7 @@ def _serialize_discovery_cluster(c: Cluster, items: list[ClusterItem], watched_i
         "is_watched": c.id in watched_ids,
     }
 
+
 def _skip_filter(value: str | None) -> bool:
     return value is None or value.strip() == "" or value.strip().lower() == "all"
 
@@ -295,58 +279,6 @@ def _apply_item_value_filter(base, column, values: list[str]):
     return base.where(exists_q.exists())
 
 
-def _contains_pattern(value: str) -> str:
-    escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return f"%{escaped}%"
-
-
-def _item_text_match(pattern: str):
-    exists_q = select(ClusterItem.id).where(
-        ClusterItem.cluster_id == Cluster.id,
-        ClusterItem.pipeline_version == PIPELINE_VERSION,
-        or_(
-            ClusterItem.title.ilike(pattern, escape="\\"),
-            ClusterItem.body.ilike(pattern, escape="\\"),
-            ClusterItem.problem_statement.ilike(pattern, escape="\\"),
-            ClusterItem.platform.ilike(pattern, escape="\\"),
-            ClusterItem.community.ilike(pattern, escape="\\"),
-        ),
-    )
-    return exists_q.exists()
-
-
-def _search_text_expressions(query: str):
-    conditions = []
-    score_parts = []
-    meaningful_terms = meaningful_search_terms(query)
-    normalized_phrase = " ".join(meaningful_terms) or query
-    terms: list[tuple[str, tuple[int, int, int]]] = [(normalized_phrase, (8, 5, 3))]
-    seen = {normalized_phrase.casefold()}
-    for token in meaningful_terms:
-        key = token.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        terms.append((token, (3, 2, 1)))
-        if len(terms) >= SEARCH_MAX_TOKENS + 1:
-            break
-
-    for term, weights in terms:
-        pattern = _contains_pattern(term)
-        name_match = Cluster.name.ilike(pattern, escape="\\")
-        summary_match = Cluster.summary.ilike(pattern, escape="\\")
-        item_match = _item_text_match(pattern)
-        conditions.extend([name_match, summary_match, item_match])
-        score_parts.extend([
-            case((name_match, weights[0]), else_=0),
-            case((summary_match, weights[1]), else_=0),
-            case((item_match, weights[2]), else_=0),
-        ])
-
-    relevance = sum(score_parts, literal(0))
-    return conditions, relevance
-
-
 def _build_cluster_search(filters: ClusterSearchQuery):
     """Compile allow-listed search filters into a parameterized SQLAlchemy query."""
     stats = _item_stats_subquery()
@@ -361,7 +293,7 @@ def _build_cluster_search(filters: ClusterSearchQuery):
 
     relevance = None
     if filters.query:
-        conditions, relevance = _search_text_expressions(filters.query)
+        conditions, relevance = search_text_expressions(filters.query)
         base = base.where(or_(*conditions))
 
     base = _apply_item_value_filter(base, ClusterItem.platform, filters.sources)
@@ -385,6 +317,7 @@ def _build_cluster_search(filters: ClusterSearchQuery):
         order_clauses = newest_order
 
     return base, order_clauses
+
 
 def _apply_newest_browse_cursor(base, cursor: BrowseCursor):
     post_count = base.selected_columns.post_count
@@ -417,14 +350,19 @@ def _apply_newest_browse_cursor(base, cursor: BrowseCursor):
         )
     )
 
+
 async def _load_browse_rows(
-    filters: ClusterSearchQuery,
-    limit: int,
-    db: AsyncSession,
-    *,
-    cursor: BrowseCursor | None = None,
+        filters: ClusterSearchQuery,
+        limit: int,
+        db: AsyncSession,
+        *,
+        category: BrowseCategory = BrowseCategory.ALL,
+        cursor: BrowseCursor | None = None,
 ):
     base, order_clauses = _build_cluster_search(filters)
+
+    if category != BrowseCategory.ALL:
+        base = base.where(Cluster.discovery_category == category)
 
     if cursor is not None:
         base = _apply_newest_browse_cursor(base, cursor)
@@ -457,22 +395,24 @@ async def _load_browse_rows(
 
 
 async def _load_browse_clusters(
-    filters: ClusterSearchQuery,
-    limit: int,
-    uid: str,
-    db: AsyncSession,
-    *,
-    cursor: BrowseCursor | None = None,
+        filters: ClusterSearchQuery,
+        limit: int,
+        uid: str,
+        db: AsyncSession,
+        *,
+        category: BrowseCategory = BrowseCategory.ALL,
+        cursor: BrowseCursor | None = None,
 ) -> tuple[list[DiscoveryClusterResponse], bool]:
     rows, has_more = await _load_browse_rows(
-        filters,
-        limit,
-        db,
+        filters=filters,
+        limit=limit,
+        db=db,
+        category=category,
         cursor=cursor,
     )
 
     cluster_ids = [row[0].id for row in rows]
-    watched_ids = await _watched_cluster_ids(uid, cluster_ids, db)
+    watched_ids = await load_watched_cluster_ids(uid, cluster_ids, db)
 
     clusters = [
         _serialize_browse_clusters(
@@ -487,6 +427,7 @@ async def _load_browse_clusters(
 
     return clusters, has_more
 
+
 async def _materialize_discovery(base, order_clauses, limit, offset, uid, db) -> dict:
     total = await db.scalar(select(func.count()).select_from(base.subquery()))
     query = base.order_by(*order_clauses).offset(offset).limit(limit)
@@ -494,7 +435,7 @@ async def _materialize_discovery(base, order_clauses, limit, offset, uid, db) ->
 
     cluster_ids = [c.id for c in clusters]
     items_map = await _items_by_cluster(cluster_ids, db)
-    watched_ids = await _watched_cluster_ids(uid, cluster_ids, db)
+    watched_ids = await load_watched_cluster_ids(uid, cluster_ids, db)
 
     return {
         "data": [
@@ -631,20 +572,20 @@ async def browse_clusters(
 
 @router.get("/browse/page", response_model=BrowsePageResponse)
 async def browse_cluster_page(
-    category: BrowseCategory = Query(BrowseCategory.ALL),
-    sort: BrowseSort = Query(BrowseSort.NEWEST),
-    limit: int = Query(
-        SEARCH_DEFAULT_LIMIT,
-        ge=1,
-        le=SEARCH_MAX_LIMIT,
-    ),
-    cursor: str | None = Query(
-        None,
-        min_length=1,
-        max_length=2048,
-    ),
-    db: AsyncSession = Depends(get_db),
-    uid: str = Depends(get_uid),
+        category: BrowseCategory = Query(BrowseCategory.ALL),
+        sort: BrowseSort = Query(BrowseSort.NEWEST),
+        limit: int = Query(
+            SEARCH_DEFAULT_LIMIT,
+            ge=1,
+            le=SEARCH_MAX_LIMIT,
+        ),
+        cursor: str | None = Query(
+            None,
+            min_length=1,
+            max_length=2048,
+        ),
+        db: AsyncSession = Depends(get_db),
+        uid: str = Depends(get_uid),
 ) -> BrowsePageResponse:
     if sort != BrowseSort.NEWEST:
         raise HTTPException(
@@ -667,13 +608,14 @@ async def browse_cluster_page(
                 detail=str(exc),
             ) from exc
 
-    filters = build_browse_filters(category, sort)
+    filters = build_browse_filters(sort)
 
     clusters, has_more = await _load_browse_clusters(
         filters,
         limit,
         uid,
         db,
+        category=category,
         cursor=decoded_cursor,
     )
 
@@ -706,6 +648,14 @@ async def _fetch_cluster(cluster_id: int, db: AsyncSession) -> Cluster | None:
         )
     )
     return result.scalar_one_or_none()
+
+
+@router.get("/discovery", response_model=DiscoveryDashboardResponse)
+async def get_discovery_dashboard(
+        db: AsyncSession = Depends(get_db),
+        uid: str = Depends(get_uid),
+) -> DiscoveryDashboardResponse:
+    return await load_discovery_preview_dashboard(db, uid)
 
 
 @router.get("/{cluster_id}")

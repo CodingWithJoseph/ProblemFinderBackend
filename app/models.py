@@ -27,6 +27,11 @@ class Cluster(Base):
     name: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     pipeline_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    discovery_category: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default="uncategorized",
+    )
 
 
 class ClusterItem(Base):

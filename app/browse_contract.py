@@ -14,12 +14,18 @@ class DiscoveryClusterResponse(BaseModel):
     isWatched: bool
     date: datetime | None
 
+
 class BrowsePageResponse(BaseModel):
     clusters: list[DiscoveryClusterResponse]
     nextCursor: str | None
 
+
 class BrowseCategory(StrEnum):
     ALL = "all"
+    BUILD_AND_TOOLING = "build_and_tooling"
+    DATA_AND_APIS = "data_and_apis"
+    WORKFLOW_AND_AUTOMATION = "workflow_and_automation"
+    UNCATEGORIZED = "uncategorized"
 
 
 class BrowseSort(StrEnum):
@@ -27,11 +33,6 @@ class BrowseSort(StrEnum):
     OLDEST = "oldest"
     LARGEST = "largest"
     SMALLEST = "smallest"
-
-
-CATEGORY_QUERIES: dict[BrowseCategory, str | None] = {
-    BrowseCategory.ALL: None,
-}
 
 SORT_TYPE: dict[BrowseSort, Literal] = {
     BrowseSort.NEWEST: 'newest',
@@ -41,8 +42,5 @@ SORT_TYPE: dict[BrowseSort, Literal] = {
 }
 
 
-def build_browse_filters(category: BrowseCategory, sort: BrowseSort) -> ClusterSearchQuery:
-    return ClusterSearchQuery(
-        query=CATEGORY_QUERIES[category],
-        sort=SORT_TYPE[sort],
-    )
+def build_browse_filters(sort: BrowseSort) -> ClusterSearchQuery:
+    return ClusterSearchQuery(sort=SORT_TYPE[sort],)
