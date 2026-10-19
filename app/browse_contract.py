@@ -1,5 +1,4 @@
 from enum import StrEnum
-from typing import Literal
 from pydantic import BaseModel
 from app.discovery_contract import DiscoveryCardResponse
 from app.search_contract import ClusterSearchQuery
@@ -28,13 +27,10 @@ class BrowseSort(StrEnum):
     LARGEST = "largest"
     SMALLEST = "smallest"
 
-SORT_TYPE: dict[BrowseSort, Literal] = {
-    BrowseSort.NEWEST: 'newest',
-    BrowseSort.OLDEST: 'oldest',
-    BrowseSort.LARGEST: 'largest',
-    BrowseSort.SMALLEST: 'smallest',
-}
+class BrowseQuery(ClusterSearchQuery):
+    # Browse supports additional sorts without changing the Search API contract.
+    sort: BrowseSort = BrowseSort.NEWEST
 
 
-def build_browse_filters(sort: BrowseSort) -> ClusterSearchQuery:
-    return ClusterSearchQuery(sort=SORT_TYPE[sort],)
+def build_browse_filters(sort: BrowseSort) -> BrowseQuery:
+    return BrowseQuery(sort=sort)

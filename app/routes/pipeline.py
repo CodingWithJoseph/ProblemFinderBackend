@@ -176,7 +176,7 @@ async def _find_watch_card(
                 Pipeline.user_id == uid,
                 Pipeline.source_cluster_id == str(cluster_id),
                 Pipeline.removed_at == None,
-            )
+            ).order_by(Pipeline.created_at.desc(), Pipeline.id.desc()).limit(1)
         )
     ).scalar_one_or_none()
 
@@ -235,11 +235,16 @@ async def unwatch_cluster(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_uid),
 ):
-    card = await _find_watch_card(uid, cluster_id, db)
-    if card:
+    cards = (await db.execute(select(Pipeline).where(
+        Pipeline.user_id == uid,
+        Pipeline.source_cluster_id == str(cluster_id),
+        Pipeline.removed_at.is_(None),
+    ))).scalars().all()
+    if cards:
         now = datetime.now(timezone.utc)
-        card.removed_at = now
-        card.updated_at = now
+        for card in cards:
+            card.removed_at = now
+            card.updated_at = now
         await db.commit()
     return {"is_watched": False}
 
