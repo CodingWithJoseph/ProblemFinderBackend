@@ -321,36 +321,41 @@ def _build_cluster_search(filters: ClusterSearchQuery):
     return base, order_clauses
 
 
-def _apply_newest_browse_cursor(base, cursor: BrowseCursor):
-    post_count = base.selected_columns.post_count
-    last_observed = base.selected_columns.last_observed
+def _browse_sort_fields(base, sort: BrowseSort, cursor: BrowseCursor | None = None):
+    count = base.selected_columns.post_count
+    observed = base.selected_columns.last_observed
+    count_value = cursor.post_count if cursor else None
+    date_value = cursor.last_observed if cursor else None
+    id_value = cursor.cluster_id if cursor else None
+    date_field = (observed, date_value, sort == BrowseSort.OLDEST, True)
+    count_field = (count, count_value, sort == BrowseSort.SMALLEST, False)
+    fields = [count_field, date_field] if sort in (BrowseSort.LARGEST, BrowseSort.SMALLEST) else [date_field, count_field]
+    return [*fields, (Cluster.id, id_value, False, False)]
 
-    after_tie = or_(
-        post_count < cursor.post_count,
-        and_(
-            post_count == cursor.post_count,
-            Cluster.id < cursor.cluster_id,
-        ),
-    )
 
-    if cursor.last_observed is None:
-        return base.where(
-            and_(
-                last_observed.is_(None),
-                after_tie,
-            )
-        )
+def _browse_order(base, sort: BrowseSort):
+    return [
+        (column.asc() if ascending else column.desc()).nullslast() if nullable
+        else (column.asc() if ascending else column.desc())
+        for column, _, ascending, nullable in _browse_sort_fields(base, sort)
+    ]
 
-    return base.where(
-        or_(
-            last_observed < cursor.last_observed,
-            last_observed.is_(None),
-            and_(
-                last_observed == cursor.last_observed,
-                after_tie,
-            ),
-        )
-    )
+
+def _apply_browse_cursor(base, cursor: BrowseCursor):
+    # Lexicographic keyset pagination must use the exact same keys as ORDER BY.
+    # Missing activity dates sort last in both chronological directions.
+    prefix = []
+    alternatives = []
+    for column, value, ascending, nullable in _browse_sort_fields(base, cursor.sort, cursor):
+        if value is None:
+            prefix.append(column.is_(None))
+            continue
+        after = column > value if ascending else column < value
+        if nullable:
+            after = or_(after, column.is_(None))
+        alternatives.append(and_(*prefix, after))
+        prefix.append(column == value)
+    return base.where(or_(*alternatives))
 
 
 async def _load_browse_rows(
@@ -361,13 +366,14 @@ async def _load_browse_rows(
         category: BrowseCategory = BrowseCategory.ALL,
         cursor: BrowseCursor | None = None,
 ):
-    base, order_clauses = _build_cluster_search(filters)
+    base, _ = _build_cluster_search(filters)
+    order_clauses = _browse_order(base, BrowseSort(filters.sort))
 
     if category != BrowseCategory.ALL:
         base = base.where(Cluster.discovery_category == category)
 
     if cursor is not None:
-        base = _apply_newest_browse_cursor(base, cursor)
+        base = _apply_browse_cursor(base, cursor)
 
     statement_query = (
         select(
@@ -391,7 +397,7 @@ async def _load_browse_rows(
             has_nonblank_text(Cluster.summary),
             statement_query.isnot(None),
         )
-        .order_by(*order_clauses, Cluster.id.desc())
+        .order_by(*order_clauses)
         .limit(limit + 1)
     )
 
@@ -593,12 +599,6 @@ async def browse_cluster_page(
         db: AsyncSession = Depends(get_db),
         uid: str = Depends(get_uid),
 ) -> BrowsePageResponse:
-    if sort != BrowseSort.NEWEST:
-        raise HTTPException(
-            status_code=422,
-            detail="This endpoint currently supports sort=newest.",
-        )
-
     decoded_cursor = None
     if cursor is not None:
         try:

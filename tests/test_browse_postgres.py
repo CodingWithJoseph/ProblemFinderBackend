@@ -16,6 +16,7 @@ from app.auth import get_uid
 from app.db import Base, get_db
 from app.models import Cluster, ClusterItem, Pipeline
 from app.routes.clusters import router
+from app.routes.pipeline import router as pipeline_router
 
 
 DSN = os.environ.get("TEST_DATABASE_URL")
@@ -109,6 +110,7 @@ async def browse_postgres():
 
         app = FastAPI()
         app.include_router(router)
+        app.include_router(pipeline_router)
 
         async def database_override():
             async with sessions() as db:
@@ -246,3 +248,63 @@ async def test_browse_excludes_incomplete_content_before_paginating(browse_postg
     second = await client.get("/clusters/browse/page", params={"limit": 1, "cursor": cursor})
     assert second.status_code == 200
     assert [row["id"] for row in second.json()["clusters"]] == [29]
+
+
+@pytest.mark.parametrize("sort,expected", [
+    ("newest", [30, 29, 28, 20, 12, 11, 10]),
+    ("oldest", [20, 30, 29, 28, 12, 11, 10]),
+    ("largest", [20, 12, 30, 29, 28, 11, 10]),
+    ("smallest", [29, 28, 11, 10, 30, 12, 20]),
+])
+@pytest.mark.parametrize("limit", [1, 2, 3, 20])
+async def test_every_sort_pages_through_ties_and_missing_dates(browse_postgres, sort, expected, limit):
+    client, _ = browse_postgres
+    seen = []
+    cursor = None
+    for _ in range(12):
+        params = dict(sort=sort, limit=limit)
+        if cursor:
+            params["cursor"] = cursor
+        response = await client.get("/clusters/browse/page", params=params)
+        assert response.status_code == 200
+        body = response.json()
+        seen.extend(row["id"] for row in body["clusters"])
+        cursor = body["nextCursor"]
+        if cursor is None:
+            break
+    else:
+        pytest.fail("Pagination did not terminate")
+    assert seen == expected
+
+
+async def test_add_remove_round_trip_is_idempotent_and_updates_browse_membership(browse_postgres):
+    client, sessions = browse_postgres
+    first = await client.post("/pipeline/watch", json={"cluster_id": "30"})
+    second = await client.post("/pipeline/watch", json={"cluster_id": "30"})
+    assert first.status_code == second.status_code == 200
+    assert first.json()["pipeline_id"] == second.json()["pipeline_id"]
+    rows = (await client.get("/clusters/browse/page")).json()["clusters"]
+    assert next(row for row in rows if row["id"] == 30)["isWatched"] is True
+    for _ in range(2):
+        removed = await client.delete("/pipeline/watch/30")
+        assert removed.status_code == 200
+        assert removed.json() == {"is_watched": False}
+    rows = (await client.get("/clusters/browse/page")).json()["clusters"]
+    assert next(row for row in rows if row["id"] == 30)["isWatched"] is False
+    async with sessions() as db:
+        from sqlalchemy import select
+        projects = (await db.execute(select(Pipeline).where(Pipeline.user_id == "alice", Pipeline.source_cluster_id == "30"))).scalars().all()
+        assert len(projects) == 1
+        assert projects[0].stage == "watching"
+        assert projects[0].removed_at is not None
+
+
+async def test_remove_clears_legacy_duplicate_memberships_only_for_the_current_user(browse_postgres):
+    client, _ = browse_postgres
+    # Fixture contains two active Alice projects for cluster 29.
+    assert (await client.post("/pipeline/watch", json={"cluster_id": "29"})).status_code == 200
+    assert (await client.delete("/pipeline/watch/29")).status_code == 200
+    rows = (await client.get("/clusters/browse/page")).json()["clusters"]
+    assert next(row for row in rows if row["id"] == 29)["isWatched"] is False
+    other = (await client.get("/clusters/browse/page", headers={"x-test-user": "bob"})).json()["clusters"]
+    assert next(row for row in other if row["id"] == 28)["isWatched"] is True
