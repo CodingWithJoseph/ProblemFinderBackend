@@ -10,6 +10,7 @@ from app.discovery_contract import (
 )
 from app.models import ClusterItem, Cluster
 from app.services.cluster_membership import load_watched_cluster_ids
+from app.services.cluster_text import has_nonblank_text
 
 DISCOVERY_CATEGORY = (
     DiscoveryCategory.BUILD_AND_TOOLING,
@@ -20,17 +21,13 @@ DISCOVERY_CATEGORY = (
 DISCOVERY_COLLECTION_LIMIT = 6
 
 
-def _has_text(column):
-    return func.regexp_replace(column, r"\s", "", "g") != ""
-
-
 def build_discovery_query():
     has_problem_statement = (
         select(ClusterItem.id)
         .where(
             ClusterItem.cluster_id == Cluster.id,
             ClusterItem.pipeline_version == PIPELINE_VERSION,
-            _has_text(ClusterItem.problem_statement)
+            has_nonblank_text(ClusterItem.problem_statement)
         ).exists()
     )
 
@@ -45,8 +42,8 @@ def build_discovery_query():
     ).join(stats, stats.c.cluster_id == Cluster.id)
     .where(
         Cluster.pipeline_version == PIPELINE_VERSION,
-        _has_text(Cluster.name),
-        _has_text(Cluster.summary),
+        has_nonblank_text(Cluster.name),
+        has_nonblank_text(Cluster.summary),
         has_problem_statement
     ))
 
@@ -74,7 +71,7 @@ def _problem_statement_discovery():
         ).where(
             ClusterItem.cluster_id == Cluster.id,
             ClusterItem.pipeline_version == PIPELINE_VERSION,
-            _has_text(ClusterItem.problem_statement),
+            has_nonblank_text(ClusterItem.problem_statement),
         ).order_by(
             ClusterItem.score.desc().nullslast(),
             ClusterItem.id.asc()

@@ -10,19 +10,24 @@ from app.browse_cursor import (
     encode_browse_cursor,
 )
 from app.config import PIPELINE_VERSION
-from conftest import FakeResult, make_cluster
+from conftest import FakeResult, make_cluster as _make_cluster
+
+
+def make_cluster(**kwargs):
+    kwargs.setdefault("discovery_category", "uncategorized")
+    return _make_cluster(**kwargs)
 
 
 @pytest.mark.parametrize("date", [datetime(2026, 10, 10, tzinfo=timezone.utc), None])
 async def test_browse_page_returns_cards_and_cursor(client, fake_db, date):
-    first = make_cluster(id=30, name="First", summary=None)
+    first = make_cluster(id=30, name="First", summary="First summary")
     second = make_cluster(id=20)
     extra = make_cluster(id=10)
     fake_db.stub(execute=[
         FakeResult(rows=[
             (first, 3, date, "First problem"),
-            (second, 2, date, None),
-            (extra, 1, date, None),
+            (second, 2, date, "Second problem"),
+            (extra, 1, date, "Extra problem"),
         ]),
         FakeResult(rows=[("30",)]),
     ])
@@ -36,7 +41,8 @@ async def test_browse_page_returns_cards_and_cursor(client, fake_db, date):
     assert body["clusters"][0] == {
         "id": 30,
         "name": "First",
-        "summary": None,
+        "summary": "First summary",
+        "category": "uncategorized",
         "problemStatement": "First problem",
         "postCount": 3,
         "isWatched": True,
@@ -58,7 +64,7 @@ async def test_browse_page_returns_cards_and_cursor(client, fake_db, date):
 
 @pytest.mark.parametrize("row_count", [0, 1, 2])
 async def test_browse_last_page_has_no_cursor(client, fake_db, row_count):
-    rows = [(make_cluster(id=30 - i), 1, None, None) for i in range(row_count)]
+    rows = [(make_cluster(id=30 - i), 1, None, "Valid problem") for i in range(row_count)]
     results = [FakeResult(rows=rows)]
     if rows:
         results.append(FakeResult(rows=[]))

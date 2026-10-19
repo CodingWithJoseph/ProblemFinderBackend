@@ -26,6 +26,7 @@ from app.browse_cursor import (
     decode_browse_cursor,
     encode_browse_cursor,
 )
+from app.services.cluster_text import has_nonblank_text
 from app.config import PIPELINE_VERSION
 from app.db import get_db
 from app.discovery_contract import DiscoveryDashboardResponse
@@ -227,11 +228,12 @@ def _serialize_browse_clusters(
         *,
         post_count: int,
         last_observed: datetime | None,
-        problem_statement: str | None,
+        problem_statement: str,
         watched_ids: set[int],
 ) -> DiscoveryClusterResponse:
     return DiscoveryClusterResponse(
         id=cluster.id,
+        category=cluster.discovery_category,
         name=cluster.name,
         summary=cluster.summary,
         problemStatement=problem_statement,
@@ -373,8 +375,7 @@ async def _load_browse_rows(
         ).where(
             ClusterItem.cluster_id == Cluster.id,
             ClusterItem.pipeline_version == PIPELINE_VERSION,
-            ClusterItem.problem_statement.isnot(None),
-            func.trim(ClusterItem.problem_statement) != "",
+            has_nonblank_text(ClusterItem.problem_statement),
         ).order_by(
             ClusterItem.score.desc().nullslast(),
             ClusterItem.id.asc()
@@ -385,6 +386,11 @@ async def _load_browse_rows(
 
     query = (
         base.add_columns(statement_query.label("problem_statement"))
+        .where(
+            has_nonblank_text(Cluster.name),
+            has_nonblank_text(Cluster.summary),
+            statement_query.isnot(None),
+        )
         .order_by(*order_clauses, Cluster.id.desc())
         .limit(limit + 1)
     )

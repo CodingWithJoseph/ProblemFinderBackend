@@ -69,7 +69,7 @@ async def browse_postgres():
                 db.add(Cluster(
                     id=cluster_id,
                     name=f"Cluster {cluster_id}",
-                    summary=None,
+                    summary="Complete cluster summary",
                     pipeline_version="v2",
                 ))
                 for index in range(count):
@@ -193,7 +193,7 @@ async def test_browse_empty_dataset(browse_postgres):
 async def test_browse_picks_nonblank_statement_with_stable_score_tie(browse_postgres):
     client, sessions = browse_postgres
     async with sessions() as db:
-        db.add(Cluster(id=50, name=None, summary=None, pipeline_version="v2"))
+        db.add(Cluster(id=50, name="Complete name", summary="Complete cluster summary", pipeline_version="v2"))
         for index, (score, statement) in enumerate([
             (None, "Unscored statement"),
             (10, "Chosen statement"),
@@ -213,7 +213,7 @@ async def test_browse_picks_nonblank_statement_with_stable_score_tie(browse_post
     assert response.status_code == 200
     row = next(row for row in response.json()["clusters"] if row["id"] == 50)
     assert row["problemStatement"] == "Chosen statement"
-    assert row["name"] is None
+    assert row["name"] == "Complete name"
 
 
 async def test_browse_preserves_existing_discovery_contracts(browse_postgres):
@@ -226,3 +226,23 @@ async def test_browse_preserves_existing_discovery_contracts(browse_postgres):
         assert response.status_code == 200
         assert response.json()["total"] == 7
         assert len(response.json()["data"]) == 2
+
+
+@pytest.mark.parametrize("field", ["name", "summary", "problem_statement"])
+@pytest.mark.parametrize("value", [None, "", " \t\n"])
+async def test_browse_excludes_incomplete_content_before_paginating(browse_postgres, field, value):
+    client, sessions = browse_postgres
+    async with sessions() as db:
+        cluster = Cluster(id=1000, name="Valid name", summary="Valid summary", pipeline_version="v2")
+        item = ClusterItem(cluster_id=1000, pipeline_version="v2", posted_at=OBSERVED, problem_statement="Valid problem")
+        setattr(item if field == "problem_statement" else cluster, field, value)
+        db.add_all([cluster, item])
+        await db.commit()
+    # Invalid content sorts before the visible first row but must not consume a page slot.
+    first = await client.get("/clusters/browse/page", params={"limit": 1})
+    assert first.status_code == 200
+    assert [row["id"] for row in first.json()["clusters"]] == [30]
+    cursor = first.json()["nextCursor"]
+    second = await client.get("/clusters/browse/page", params={"limit": 1, "cursor": cursor})
+    assert second.status_code == 200
+    assert [row["id"] for row in second.json()["clusters"]] == [29]

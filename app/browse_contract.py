@@ -1,18 +1,12 @@
-from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 from pydantic import BaseModel
+from app.discovery_contract import DiscoveryCardResponse
 from app.search_contract import ClusterSearchQuery
 
 
-class DiscoveryClusterResponse(BaseModel):
-    id: int
-    name: str | None
-    summary: str | None
-    problemStatement: str | None
-    postCount: int
-    isWatched: bool
-    date: datetime | None
+class DiscoveryClusterResponse(DiscoveryCardResponse):
+    """Browse and Discovery expose the same complete opportunity contract."""
 
 
 class BrowsePageResponse(BaseModel):
