@@ -296,6 +296,38 @@ class ApproveSolutionRequest(SolutionContractModel):
     expected_version: int = Field(ge=1)
 
 
+class VerificationCheck(SolutionContractModel):
+    command: str = Field(min_length=1, max_length=500)
+    outcome: Literal["passed", "failed", "skipped"]
+    details: str | None = Field(default=None, max_length=2000)
+
+
+class TaskVerification(SolutionContractModel):
+    summary: str = Field(min_length=1, max_length=2000)
+    checks: list[VerificationCheck] = Field(min_length=1, max_length=20)
+
+
+class TaskProgressRequest(SolutionContractModel):
+    status: Literal["todo", "in_progress", "blocked", "done"]
+    note: str | None = Field(default=None, max_length=2000)
+    verification: TaskVerification | None = None
+
+    @model_validator(mode="after")
+    def require_status_evidence(self) -> "TaskProgressRequest":
+        if self.status == "blocked" and not (self.note or "").strip():
+            raise ValueError("blocked tasks require a note")
+        if self.status == "done":
+            if self.verification is None:
+                raise ValueError("done tasks require a verification summary and checks")
+            if any(check.outcome != "passed" for check in self.verification.checks):
+                raise ValueError("done tasks require every submitted check to pass")
+        return self
+
+
+class SolutionTaskUpdateRequest(TaskProgressRequest):
+    expected_version: int = Field(ge=1)
+
+
 def _unique_ids(rows: list[SolutionContractModel], label: str) -> set[str]:
     ids = [str(getattr(row, "id")) for row in rows]
     if len(ids) != len(set(ids)):

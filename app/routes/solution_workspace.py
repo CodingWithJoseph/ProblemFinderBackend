@@ -1,11 +1,16 @@
 """Build workspace endpoints backed by immutable Solution Case versions."""
 
+import uuid
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from app.auth import get_uid
 from app.build_documents import build_export_zip
 from app.db import get_db
+from app.models import SolutionTaskState
 from app.routes.pipeline import _get_pipeline_card
 from app.services.signal_cases import find_current_version, find_signal_case
 from app.services.solution_cases import (
@@ -30,6 +35,7 @@ from app.solution_contract import (
     SolutionGenerateRequest,
     SolutionSectionKey,
     SolutionSectionUpdateRequest,
+    SolutionTaskUpdateRequest,
 )
 
 
@@ -211,3 +217,42 @@ async def export_solution_case(
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.patch("/{pipeline_id}/solution/case/tasks/{task_id}")
+async def update_solution_task_progress(
+    pipeline_id: str,
+    task_id: str,
+    body: SolutionTaskUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_uid),
+):
+    """Save app-authenticated task progress without changing the approved plan/version."""
+    card = await _get_pipeline_card(pipeline_id, db, uid)
+    # Serialize with document edits so a task cannot be written against a replaced plan.
+    case = await find_solution_case_for_update(db, pipeline_id, uid)
+    current = await find_current_solution_version(db, case) if case else None
+    if case is None or current is None or case.status != "ready":
+        raise HTTPException(status_code=409, detail="Generate the Build Contract before updating tasks")
+    if current.version != body.expected_version:
+        raise HTTPException(status_code=409, detail="The Build Contract changed. Reload before updating tasks.")
+    if case.approval_status != "approved" or case.approved_version_id != current.id:
+        raise HTTPException(status_code=409, detail="Approve the current Build Contract before updating tasks")
+    document = build_current_solution_document(card, case, current)
+    if task_id not in {task.id for task in document.tasks}:
+        raise HTTPException(status_code=404, detail="Solution task not found")
+    row = (await db.execute(select(SolutionTaskState).where(
+        SolutionTaskState.case_id == case.id,
+        SolutionTaskState.task_id == task_id,
+    ))).scalar_one_or_none()
+    now = datetime.now(timezone.utc)
+    if row is None:
+        row = SolutionTaskState(id=str(uuid.uuid4()), case_id=case.id, task_id=task_id, created_at=now)
+        db.add(row)
+    row.status = body.status
+    row.note = body.note
+    row.verification = body.verification.model_dump(mode="json", by_alias=True) if body.verification else {}
+    row.updated_by = "app"
+    row.updated_at = now
+    await db.commit()
+    return {"taskId": task_id, "status": row.status, "updatedAt": now.isoformat()}
