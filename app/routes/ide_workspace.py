@@ -4,12 +4,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-from pydantic.alias_generators import to_camel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,6 +38,9 @@ from app.solution_contract import (
     SolutionGenerateRequest,
     SolutionSectionKey,
     SolutionSectionUpdateRequest,
+    TaskProgressRequest,
+    TaskVerification,
+    VerificationCheck,
 )
 
 
@@ -50,38 +50,6 @@ oauth_bearer = HTTPBearer(auto_error=False)
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-class ApiModel(BaseModel):
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="forbid")
-
-
-class VerificationCheck(ApiModel):
-    command: str = Field(min_length=1, max_length=500)
-    outcome: Literal["passed", "failed", "skipped"]
-    details: str | None = Field(default=None, max_length=2000)
-
-
-class TaskVerification(ApiModel):
-    summary: str = Field(min_length=1, max_length=2000)
-    checks: list[VerificationCheck] = Field(min_length=1, max_length=20)
-
-
-class TaskProgressRequest(ApiModel):
-    status: Literal["todo", "in_progress", "blocked", "done"]
-    note: str | None = Field(default=None, max_length=2000)
-    verification: TaskVerification | None = None
-
-    @model_validator(mode="after")
-    def require_status_evidence(self) -> "TaskProgressRequest":
-        if self.status == "blocked" and not (self.note or "").strip():
-            raise ValueError("blocked tasks require a note")
-        if self.status == "done":
-            if self.verification is None:
-                raise ValueError("done tasks require a verification summary and checks")
-            if any(check.outcome != "passed" for check in self.verification.checks):
-                raise ValueError("done tasks require every submitted check to pass")
-        return self
 
 
 class IdeAccess:
