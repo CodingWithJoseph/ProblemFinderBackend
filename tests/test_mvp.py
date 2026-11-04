@@ -149,6 +149,7 @@ async def test_cluster_detail_problem_breakdown(client, fake_db, auth_headers):
             FakeResult(rows=[item]),          # top evidence
             FakeResult(rows=[item]),          # page items
             FakeResult(rows=[item]),          # all items for derived metadata
+            FakeResult(rows=[(str(cluster.id),)]),  # active membership for this account
         ],
     )
     resp = await client.get("/clusters/42", headers=auth_headers)
@@ -159,6 +160,9 @@ async def test_cluster_detail_problem_breakdown(client, fake_db, auth_headers):
     assert len(body["topEvidence"]) == 1
     assert body["totalPosts"] == 1
     assert body["postIds"] == [item.id]
+    assert isinstance(body["posts"][0]["id"], str)
+    assert body["isWatched"] is True
+    assert body["category"] == cluster.discovery_category
 
 
 async def test_cluster_detail_404(client, fake_db, auth_headers):

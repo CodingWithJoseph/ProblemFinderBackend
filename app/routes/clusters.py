@@ -141,7 +141,7 @@ async def load_cluster_items(
             ClusterItem.cluster_id == cluster_id,
             ClusterItem.pipeline_version == PIPELINE_VERSION,
         )
-        .order_by(ClusterItem.score.desc().nullslast())
+        .order_by(ClusterItem.score.desc().nullslast(), ClusterItem.id.asc())
     )
     if offset:
         query = query.offset(offset)
@@ -250,6 +250,7 @@ def _serialize_discovery_cluster(c: Cluster, items: list[ClusterItem], watched_i
         "id": c.id,
         "name": c.name,
         "summary": c.summary,
+        "category": c.discovery_category,
         "problemStatement": representative_problem_statement(items),
         "post_count": len(items),
         "date_range_start": dates[0] if dates else None,
@@ -485,8 +486,14 @@ async def query_clusters(
         db: AsyncSession = Depends(get_db),
         uid: str = Depends(get_uid),
 ):
-    """Execute a confirmed, allow-listed search draft against cluster data."""
+    """Execute a confirmed, allow-listed search draft against displayable clusters."""
     base, order_clauses = _build_cluster_search(body)
+    has_statement = select(ClusterItem.id).where(
+        ClusterItem.cluster_id == Cluster.id,
+        ClusterItem.pipeline_version == PIPELINE_VERSION,
+        has_nonblank_text(ClusterItem.problem_statement),
+    ).exists()
+    base = base.where(has_nonblank_text(Cluster.name), has_nonblank_text(Cluster.summary), has_statement)
     result = await _materialize_discovery(
         base,
         order_clauses,
@@ -682,10 +689,13 @@ async def get_cluster(
     page_items = await load_cluster_items(db, cluster_id, limit=pageSize, offset=(page - 1) * pageSize)
     all_items = await load_cluster_items(db, cluster_id)
     all_ids = [item.id for item in all_items]
+    watched_ids = await load_watched_cluster_ids(uid, [cluster_id], db)
 
     return {
         **_serialize_cluster(cluster, all_items, post_count=total_posts),
-        "problemStatement": representative_problem_statement(top_items),
+        "problemStatement": representative_problem_statement(all_items),
+        "category": cluster.discovery_category,
+        "isWatched": cluster_id in watched_ids,
         "topEvidence": [serialize_evidence_item(it) for it in top_items],
         "signals": {"totalPosts": total_posts},
         "postIds": all_ids,

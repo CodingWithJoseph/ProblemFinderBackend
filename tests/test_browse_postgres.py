@@ -240,6 +240,10 @@ async def test_browse_excludes_incomplete_content_before_paginating(browse_postg
         setattr(item if field == "problem_statement" else cluster, field, value)
         db.add_all([cluster, item])
         await db.commit()
+    search = await client.post("/clusters/search/query", json={"sort": "newest", "limit": 1})
+    assert search.status_code == 200
+    assert search.json()["total"] == 7
+    assert [row["id"] for row in search.json()["data"]] == [30]
     # Invalid content sorts before the visible first row but must not consume a page slot.
     first = await client.get("/clusters/browse/page", params={"limit": 1})
     assert first.status_code == 200
